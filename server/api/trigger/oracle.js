@@ -19,7 +19,8 @@ const config = require('../../config');
 const db =require('../../db');
 const { getAttestation } = require('../../services/attestationClient');
 const { evaluateReleaseAttestationGate } = require('../../services/attestationGate');
-const { authorityAuthMiddleware } = require('../../middleware/auth');
+const { submitFallbackAttestation } = require('../../services/attestationSubmitter');
+const { dualAuthMiddleware, authorityAuthMiddleware } = require('../../middleware/auth');
 const { TriggerEvent, ReleaseDecision } = require('../../models/schemas');
 // Note: RWA delivery for oracle triggers happens in decision.js maybeFinalizeDecision() when cooldown expires.
 
@@ -297,6 +298,140 @@ router.post('/from-oracle', async (req, res) => {
   } catch (err) {
     console.error('[trigger/oracle] POST from-oracle error:', err);
     return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /api/trigger/simulate-chainlink
+ * HACKATHON DEMO: Simulate a Chainlink oracle event that triggers release for all recipients.
+ * 1. Finds active binding for the authenticated wallet
+ * 2. Submits fallback attestation on-chain for each recipient (simulating CRE)
+ * 3. Creates cooldown triggers
+ * Auth: wallet session required.
+ */
+router.post('/simulate-chainlink', dualAuthMiddleware, async (req, res) => {
+  try {
+    const oracleEnabled = config.oracle?.enabled && config.oracle?.releaseAttestationAddress;
+    if (!oracleEnabled) {
+      return res.status(503).json({ error: 'Oracle not configured' });
+    }
+
+    const pubkey = (req.auth.pubkey || '').replace(/^0x/i, '').toLowerCase();
+    const walletId = '0x' + pubkey;
+
+    // Find active binding
+    let walletBindings = await db.bindings.findByWallet(walletId);
+    if (walletBindings.length === 0) {
+      try {
+        const { ethers } = require('ethers');
+        const checksummed = ethers.getAddress(walletId);
+        if (checksummed !== walletId) {
+          walletBindings = await db.bindings.findByWallet(checksummed);
+        }
+      } catch (_) {}
+    }
+    const binding = walletBindings.find((b) => b.status === 'active');
+    if (!binding || !Array.isArray(binding.recipient_indices) || binding.recipient_indices.length === 0) {
+      return res.status(404).json({ error: 'No active binding with recipient indices found for this wallet' });
+    }
+
+    const indices = binding.recipient_indices.map(Number);
+    const cooldownMs = ReleaseDecision.DEFAULT_COOLDOWN_MS;
+    const cooldownHours = cooldownMs / (60 * 60 * 1000);
+    const cooldownMinutes = Math.round(cooldownMs / 60000);
+    const now = Date.now();
+    const effectiveAt = now + cooldownMs;
+    const results = [];
+
+    for (const recipientIndex of indices) {
+      try {
+        // 1. Submit fallback attestation on-chain (simulates what Chainlink CRE would do)
+        const evidenceHash = crypto.createHash('sha256')
+          .update(`simulate-chainlink-${walletId}-${recipientIndex}-${now}`)
+          .digest('hex');
+
+        let attestationTxHash = null;
+        try {
+          const atResult = await submitFallbackAttestation(config, {
+            walletId,
+            recipientIndex,
+            decision: 'release',
+            reasonCode: null,
+            evidenceHash,
+          });
+          attestationTxHash = atResult.txHash;
+          console.log(`[simulate-chainlink] Attestation submitted for ${walletId}/${recipientIndex}: ${attestationTxHash}`);
+        } catch (atErr) {
+          console.warn(`[simulate-chainlink] Attestation submit failed for index ${recipientIndex} (continuing):`, atErr.message);
+        }
+
+        // 2. Check for duplicate trigger
+        const existing = await db.triggers.findByWallet(walletId);
+        const dup = existing?.find(
+          (t) => t.recipient_index === recipientIndex && (t.status === 'pending' || t.status === 'cooldown')
+        );
+        if (dup) {
+          results.push({ recipientIndex, status: 'duplicate', trigger_id: dup.trigger_id });
+          continue;
+        }
+
+        // 3. Create trigger with cooldown
+        const triggerId = crypto.randomBytes(16).toString('hex');
+        const triggerValidation = TriggerEvent.validate({
+          wallet_id: walletId,
+          authority_id: ORACLE_AUTHORITY_ID,
+          recipient_index: recipientIndex,
+          tlock_round: undefined,
+          arweave_tx_id: null,
+          release_request: null,
+        });
+        if (!triggerValidation.valid) {
+          results.push({ recipientIndex, status: 'validation_error', errors: triggerValidation.errors });
+          continue;
+        }
+
+        const record = {
+          ...triggerValidation.data,
+          trigger_id: triggerId,
+          trigger_type: 'oracle',
+          reason_code: 'authorized_request',
+          matter_id: null,
+          evidence_hash: evidenceHash,
+          initiation_signature: null,
+          initiated_by: 'simulate-chainlink',
+          initiated_at: now,
+          notes: 'Simulated Chainlink oracle event (hackathon demo)',
+          status: 'cooldown',
+          decision: 'release',
+          decision_reason: 'Simulated oracle attestation',
+          decision_reason_code: 'authorized_request',
+          decision_evidence_hash: evidenceHash,
+          decision_signature: null,
+          cooldown_ms: cooldownMs,
+          decided_at: now,
+          effective_at: effectiveAt,
+          decided_by: 'oracle',
+        };
+        await db.triggers.create(triggerId, record);
+        results.push({ recipientIndex, status: 'created', trigger_id: triggerId, attestation_tx: attestationTxHash });
+      } catch (indexErr) {
+        console.error(`[simulate-chainlink] Error for index ${recipientIndex}:`, indexErr);
+        results.push({ recipientIndex, status: 'error', error: indexErr.message });
+      }
+    }
+
+    return res.json({
+      success: true,
+      wallet_id: walletId,
+      triggers: results,
+      cooldown_ms: cooldownMs,
+      cooldown_minutes: cooldownMinutes,
+      cooldown_hours: cooldownHours,
+      effective_at: effectiveAt,
+    });
+  } catch (err) {
+    console.error('[simulate-chainlink] Error:', err);
+    return res.status(500).json({ error: 'Internal server error', detail: err.message });
   }
 });
 

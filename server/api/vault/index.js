@@ -24,6 +24,7 @@ const config = require('../../config');
 const { getMultiChainBalances } = require('../../services/chainProvider');
 const { getEVMChains } = require('../../config/chains');
 const vaultContract = require('../../services/vaultContract');
+const escrowContract = require('../../services/escrowContract');
 
 const router = Router();
 
@@ -118,11 +119,78 @@ router.get('/balance/:address', dualAuthMiddleware, async (req, res) => {
     console.warn('[vault/balance] Wallet balance query failed (non-fatal):', err.message);
   }
 
+  // Query escrow balance (vault shares locked in VaultShareEscrow for this wallet)
+  let escrowData = { shares: '0', value: '0', recipient_indices: [] };
+  const escrowAddr = (config.escrow?.address || '').trim();
+  if (escrowAddr && hasVaultContract()) {
+    try {
+      const { ethers } = require('ethers');
+      const wHash = escrowContract.walletIdHash(evmAddress);
+      const ctx = escrowContract.getEscrowReadOnly(config);
+      if (ctx) {
+        const deposited = await ctx.escrow.totalDeposited(wHash);
+        if (deposited > 0n) {
+          const decimals = config?.contracts?.underlyingDecimals ?? 18;
+          const rpc = config?.escrow?.rpcUrl || config?.contracts?.evmRpcUrl || '';
+          const provider = new ethers.JsonRpcProvider(rpc);
+          const vaultAddr = config.contracts.vaultAddress;
+          const vault = new ethers.Contract(vaultAddr, ['function convertToAssets(uint256) view returns (uint256)'], provider);
+          const assets = await vault.convertToAssets(deposited);
+          escrowData = {
+            shares: ethers.formatUnits(deposited, decimals),
+            value: ethers.formatUnits(assets, decimals),
+            recipient_indices: [],
+          };
+          // Look up recipient indices: try active binding first, then scan on-chain as fallback
+          try {
+            let found = false;
+            // 1. Try DB binding lookup (both lowercase and checksummed wallet_id)
+            let walletBindings = await db.bindings.findByWallet(evmAddress);
+            if (walletBindings.length === 0) {
+              try {
+                const checksummed = ethers.getAddress(evmAddress);
+                if (checksummed !== evmAddress) {
+                  walletBindings = await db.bindings.findByWallet(checksummed);
+                }
+              } catch (_) {}
+            }
+            const activeBinding = walletBindings.find((b) => b.status === 'active');
+            if (activeBinding && Array.isArray(activeBinding.recipient_indices)) {
+              escrowData.recipient_indices = activeBinding.recipient_indices.map(Number);
+              found = true;
+            }
+            // 2. Fallback: scan on-chain for indices with non-zero allocatedShares (probe 1..10)
+            if (!found) {
+              const indices = [];
+              const probes = await Promise.all(
+                Array.from({ length: 10 }, (_, i) => i + 1).map(async (idx) => {
+                  try {
+                    const alloc = await ctx.escrow.allocatedShares(wHash, idx);
+                    return { idx, alloc };
+                  } catch (_) { return { idx, alloc: 0n }; }
+                })
+              );
+              for (const p of probes) {
+                if (p.alloc > 0n) indices.push(p.idx);
+              }
+              escrowData.recipient_indices = indices;
+            }
+          } catch (bindErr) {
+            console.warn('[vault/balance] Binding/scan lookup failed (non-fatal):', bindErr.message);
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[vault/balance] Escrow query failed (non-fatal):', err.message);
+    }
+  }
+
   const underlyingSymbol = config?.contracts?.underlyingSymbol || 'USDC';
   res.json({
     address,
     wallet: walletData,
     vault: { ...vaultData, underlying_symbol: underlyingSymbol },
+    escrow: escrowData,
   });
 });
 
@@ -478,6 +546,80 @@ router.post('/transfer', dualAuthMiddleware, async (req, res) => {
     from_remaining: fromPos.deposited.toFixed(4),
     message: transferMessage,
   });
+});
+
+// ─── POST /simulate-yield (dev/demo: inject WETH into vault to simulate yield) ───
+
+router.post('/simulate-yield', dualAuthMiddleware, async (req, res) => {
+  const { address, amount } = req.body || {};
+  if (!address || !isValidAddress(address)) {
+    return res.status(400).json({ error: 'Valid address is required' });
+  }
+
+  const normalizedAddr = normalizeAddr(address);
+  if (req.auth.pubkey !== normalizedAddr) {
+    return res.status(403).json({ error: 'Forbidden', detail: 'You can only simulate yield for your own vault' });
+  }
+
+  if (!hasVaultContract()) {
+    return res.status(400).json({ error: 'No vault contract configured (VAULT_ADDRESS not set)' });
+  }
+
+  // Use relayer private key to send WETH to vault (simulates yield accrual)
+  const relayerKey = config.oracle.releaseAttestationRelayerPrivateKey;
+  if (!relayerKey) {
+    return res.status(500).json({ error: 'Relayer key not configured (RELEASE_ATTESTATION_RELAYER_PRIVATE_KEY)' });
+  }
+
+  const { ethers } = require('ethers');
+  const rpcUrl = config.contracts.evmRpcUrl;
+  const vaultAddress = config.contracts.vaultAddress;
+  const wethAddress = process.env.WETH_SEPOLIA || process.env.WETH_ADDRESS || '';
+
+  if (!wethAddress) {
+    return res.status(500).json({ error: 'WETH address not configured (set WETH_SEPOLIA in .env)' });
+  }
+
+  // Default: 0.005 WETH (~$15 at $3k/ETH) — enough to see yield but small for testnet faucet budgets
+  const yieldAmountEth = parseFloat(amount) || 0.005;
+  const yieldAmountWei = ethers.parseEther(String(yieldAmountEth));
+
+  try {
+    const provider = new ethers.JsonRpcProvider(rpcUrl);
+    const relayerWallet = new ethers.Wallet(relayerKey, provider);
+
+    // Step 1: Wrap ETH → WETH (call WETH.deposit{value: amount})
+    const wrapTx = await relayerWallet.sendTransaction({
+      to: wethAddress,
+      value: yieldAmountWei,
+      data: '0xd0e30db0', // deposit() selector
+      gasLimit: 60000,
+    });
+    await wrapTx.wait();
+
+    // Step 2: Transfer WETH → vault
+    const wethIface = new ethers.Interface(['function transfer(address to, uint256 amount) returns (bool)']);
+    const transferData = wethIface.encodeFunctionData('transfer', [vaultAddress, yieldAmountWei]);
+    const transferTx = await relayerWallet.sendTransaction({
+      to: wethAddress,
+      data: transferData,
+      gasLimit: 60000,
+    });
+    const receipt = await transferTx.wait();
+
+    console.log(`[simulate-yield] Injected ${yieldAmountEth} WETH into vault. tx=${receipt.hash}`);
+
+    res.json({
+      status: 'simulated',
+      amount: yieldAmountEth,
+      symbol: config.contracts.underlyingSymbol || 'WETH',
+      tx_hash: receipt.hash,
+      message: `Simulated ${yieldAmountEth} WETH yield injected into vault.`,
+    });
+  } catch (err) {
+    console.error('[simulate-yield] Error:', err.message);
+    res.status(500).json({ error: 'Simulation failed: ' + err.message });
+  }
 });
 
 // ─── GET /reserve/:address (check reserve status for an address) ───

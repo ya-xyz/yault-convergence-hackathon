@@ -28,6 +28,7 @@
     'function registerWallet(bytes32 walletIdHash)',
     'function deposit(bytes32 walletIdHash, uint256 shares, uint256[] calldata recipientIndices, uint256[] calldata amounts)',
     'function claim(bytes32 walletIdHash, uint256 recipientIndex, address to, uint256 amount, bool redeemToAsset)',
+    'function reclaim(bytes32 walletIdHash, uint256 recipientIndex, uint256 amount)',
     'function walletOwner(bytes32) view returns (address)',
     'function totalDeposited(bytes32) view returns (uint256)',
     'function allocatedShares(bytes32, uint256) view returns (uint256)',
@@ -71,9 +72,9 @@
    * @param {string} baseUrl - API base (e.g. '/api')
    * @returns {Promise<{ escrowAddress, vaultAddress, chainId, rpcUrl, enabled }>}
    */
-  async function getConfig(baseUrl) {
+  async function getConfig(baseUrl, opts) {
     const url = baseUrl.replace(/\/$/, '') + '/claim/escrow-config';
-    const res = await fetch(url);
+    const res = await fetch(url, opts && opts.headers ? { headers: opts.headers } : undefined);
     if (!res.ok) throw new Error('Failed to fetch escrow config: ' + res.status);
     return res.json();
   }
@@ -212,6 +213,21 @@
     };
   }
 
+  /**
+   * Build escrow.reclaim(walletIdHash, recipientIndex, amount) tx.
+   * Owner reclaims unclaimed shares before RELEASE attestation.
+   */
+  function buildReclaimTx(escrowAddress, walletIdHashHex, recipientIndex, amountWei, chainId) {
+    const ethers = _ethers();
+    const iface = new ethers.Interface(VAULT_SHARE_ESCROW_ABI);
+    return {
+      to: escrowAddress,
+      data: iface.encodeFunctionData('reclaim', [walletIdHashHex, recipientIndex, amountWei]),
+      value: '0x0',
+      chainId: '0x' + Number(chainId).toString(16),
+    };
+  }
+
   // -----------------------------------------------------------------------
   //  High-level: deposit all shares into escrow (multi-tx sequence)
   // -----------------------------------------------------------------------
@@ -315,6 +331,62 @@
   }
 
   /**
+   * Reclaim all shares from escrow back to the owner's wallet.
+   * Sends one reclaim tx per recipient index that has remaining shares.
+   *
+   * @param {object} provider - EVM-compatible provider with request() support
+   * @param {object} cfg - { escrowAddress, vaultAddress, chainId, rpcUrl }
+   * @param {string} ownerAddress - Owner's EVM address
+   * @param {number[]} recipientIndices - Recipient indices to reclaim from
+   * @param {function} [onProgress] - Optional callback: (step, total, detail) => void
+   * @returns {Promise<{ success: boolean, txHashes: string[], reclaimedCount: number, error?: string }>}
+   */
+  async function reclaimAllFromEscrow(provider, cfg, ownerAddress, recipientIndices, onProgress) {
+    const ethers = _ethers();
+    const progress = onProgress || function () {};
+    const txHashes = [];
+
+    try {
+      const wHash = walletIdHash(ownerAddress);
+
+      // 1. Query remaining shares for each recipient index
+      progress(0, recipientIndices.length + 1, 'Querying escrow allocations...');
+      const rpcProvider = new ethers.JsonRpcProvider(cfg.rpcUrl);
+      const escrow = new ethers.Contract(cfg.escrowAddress, VAULT_SHARE_ESCROW_ABI, rpcProvider);
+
+      const remainingList = await Promise.all(
+        recipientIndices.map(async (idx) => {
+          const rem = await escrow.remainingForRecipient(wHash, idx);
+          return { index: idx, remaining: rem };
+        })
+      );
+
+      const toReclaim = remainingList.filter((r) => r.remaining > 0n);
+      if (toReclaim.length === 0) {
+        return { success: true, txHashes: [], reclaimedCount: 0, error: 'No remaining shares to reclaim' };
+      }
+
+      // 2. Send reclaim tx for each recipient index with remaining shares
+      let reclaimedCount = 0;
+      for (let i = 0; i < toReclaim.length; i++) {
+        const { index, remaining } = toReclaim[i];
+        progress(i + 1, toReclaim.length + 1, 'Reclaiming from recipient #' + index + '...');
+        const tx = buildReclaimTx(cfg.escrowAddress, wHash, index, remaining.toString(), cfg.chainId);
+        tx.from = ownerAddress;
+        const hash = await provider.request({ method: 'eth_sendTransaction', params: [tx] });
+        txHashes.push(hash);
+        await _waitForTx(cfg.rpcUrl, hash);
+        reclaimedCount++;
+      }
+
+      progress(toReclaim.length + 1, toReclaim.length + 1, 'Reclaim complete!');
+      return { success: true, txHashes, reclaimedCount };
+    } catch (err) {
+      return { success: false, txHashes, reclaimedCount: 0, error: err.message || String(err) };
+    }
+  }
+
+  /**
    * Wait for a transaction to be mined.
    */
   async function _waitForTx(rpcUrl, txHash, timeoutMs) {
@@ -355,8 +427,10 @@
     buildRegisterWalletTx,
     buildDepositTx,
     buildClaimTx,
+    buildReclaimTx,
     // High-level
     depositAllToEscrow,
+    reclaimAllFromEscrow,
   };
 
   if (typeof module !== 'undefined' && module.exports) {

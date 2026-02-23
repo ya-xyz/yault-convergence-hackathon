@@ -83,6 +83,7 @@ const state = {
   walletBalancesUsdc: { ethereum: '0.00', solana: '0.00' }, // filled by GET /vault/balance
   walletBalancesWeth: { ethereum: '0.00' }, // filled by GET /vault/balance
   vaultBalances: { shares: '0.00', value: '0.00', yield: '0.00' },
+  escrowBalances: { shares: '0', value: '0', recipient_indices: [] },
   vaultUnderlyingSymbol: 'USDC',  // from GET /vault/balance (VAULT_UNDERLYING_SYMBOL), e.g. 'WETH'
   // Global UI context: all balances/addresses below derive from this (Chain + Token cascading dropdowns in header)
   globalChainKey: 'ethereum',  // 'ethereum' | 'solana' | 'bitcoin'
@@ -92,7 +93,11 @@ const state = {
   vaultAmount: '',
   vaultDepositLoading: false,
   vaultHarvestLoading: false,
+  vaultSimulateLoading: false,
+  vaultReclaimLoading: false,
   vaultRedeemLoading: false,
+  activities: [],                // [{ id, type, amount, asset, tx_hash, status, created_at }]
+  activitiesLoading: false,
   // Accounts page (related accounts, invite, transfer)
   accountsSection: 'accounts', // 'accounts' | 'invite' — left sidebar selection
   relatedAccountsInvites: [],  // [{ email, status: 'pending'|'accepted', label? }]
@@ -266,7 +271,7 @@ const REDEEM_DEFAULT_TOKENS = {
 
 // ─── Navigation ───
 
-const PAGES = ['wallet', 'accounts', 'protection', 'claim', 'activity', 'profile', 'settings'];
+const PAGES = ['wallet', 'accounts', 'protection', 'claim', 'profile', 'settings', 'activities'];
 
 function navigate(page) {
   state.page = page;
@@ -289,8 +294,8 @@ function navigate(page) {
     Promise.all([loadReleases(), loadWalletPlan()]).then(() => render());
   } else if (page === 'claim') {
     loadClaimMe().then(() => render());
-  } else if (page === 'activity') {
-    loadReleases().then(() => render());
+  } else if (page === 'activities') {
+    loadActivities();
   } else if (page === 'profile') {
     loadClientProfile().then(() => render());
   } else if (page === 'settings') {
@@ -732,7 +737,7 @@ function renderLogin() {
 }
 
 function renderNav() {
-  var labels = { wallet: T('wallet'), accounts: T('accounts'), protection: T('protection'), claim: T('claim'), activity: T('activity'), profile: T('profile') || 'Profile', settings: T('settings') };
+  var labels = { wallet: T('wallet'), accounts: T('accounts'), protection: T('protection'), claim: T('claim'), profile: T('profile') || 'Profile', settings: T('settings'), activities: 'Activities' };
   const items = PAGES.map((p) => {
     var label = labels[p];
     if (label === p) label = p.charAt(0).toUpperCase() + p.slice(1);
@@ -786,6 +791,8 @@ function renderProtectionOverview() {
         Manage the release plan for <strong>${esc(planChain)} — ${esc(planToken)}</strong>.
       </p>
       <button class="btn btn-primary" id="btnCreatePlan" style="margin-bottom:20px;">Modify Plan</button>
+      <button class="btn btn-secondary btn-sm" id="btnSimulateChainlinkOverview" style="margin-left:12px;margin-bottom:20px;vertical-align:middle;">Simulate Chainlink Event</button>
+      <span id="chainlinkOverviewHint" style="display:none;font-size:12px;color:var(--text-muted);margin-left:10px;vertical-align:middle;"></span>
       <div class="card">
         <h3>Current Plan <span style="font-size:12px;color:var(--text-muted);font-weight:400;">[${esc(planChain)} — ${esc(planToken)}]</span></h3>
         <p style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">${triggerText}</p>
@@ -1322,6 +1329,8 @@ function renderPlanStepCredentials() {
       </div>`;
     }).join('')}
     <button class="btn btn-primary" id="btnPlanCredentialsDone">Done</button>
+    <button class="btn btn-secondary btn-sm" id="btnSimulateChainlink" style="margin-left:12px;vertical-align:middle;">Simulate Chainlink Event</button>
+    <span id="chainlinkEventHint" style="display:none;font-size:12px;color:var(--text-muted);margin-left:10px;vertical-align:middle;"></span>
   `;
 }
 
@@ -1621,14 +1630,44 @@ function renderVaultTab() {
       </div>
     </div>
 
+    ${parseFloat(state.escrowBalances.shares) > 0 ? `
+    <div class="card" style="border-left:3px solid var(--warning);">
+      <h3 style="display:flex;align-items:center;gap:8px;">
+        <span style="color:var(--warning);">&#128274;</span> Escrow (Plan Locked)
+      </h3>
+      <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">
+        Vault shares locked in escrow for your Asset Plan. These shares continue earning yield and will be released to recipients when the trigger fires.
+      </p>
+      <div class="balance-grid">
+        <div class="balance-card">
+          <div class="balance-value">${esc(formatVaultShares(state.escrowBalances.shares))}</div>
+          <div class="balance-label">Locked Shares</div>
+        </div>
+        <div class="balance-card">
+          <div class="balance-value">${esc(formatVaultNum(state.escrowBalances.value))}</div>
+          <div class="balance-label">Value (${esc(state.vaultUnderlyingSymbol || 'USDC')})</div>
+        </div>
+      </div>
+      <button class="btn btn-secondary btn-sm" id="btnReclaimEscrow" ${state.vaultReclaimLoading ? 'disabled' : ''}
+        style="margin-top:12px;" title="Reclaim all shares from escrow back to your wallet (only before trigger fires)">
+        ${state.vaultReclaimLoading ? 'Reclaiming...' : 'Reclaim from Escrow'}
+      </button>
+    </div>
+    ` : ''}
+
     <div class="card">
       <h3>Harvest Yield</h3>
       <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">
         Claim accumulated yield from the vault. Yield distribution is handled automatically by protocol rules.
       </p>
-      <button class="btn btn-success" id="btnHarvestYield" ${state.vaultHarvestLoading ? 'disabled' : ''}>
-        ${state.vaultHarvestLoading ? 'Harvesting...' : 'Harvest Yield'}
-      </button>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <button class="btn btn-success" id="btnHarvestYield" ${state.vaultHarvestLoading ? 'disabled' : ''}>
+          ${state.vaultHarvestLoading ? 'Harvesting...' : 'Harvest Yield'}
+        </button>
+        <button class="btn btn-secondary btn-sm" id="btnSimulateYield" ${state.vaultSimulateLoading ? 'disabled' : ''} title="Inject test yield into vault (testnet only)">
+          ${state.vaultSimulateLoading ? 'Simulating...' : 'Simulate Yield'}
+        </button>
+      </div>
     </div>
 
     <div class="card">
@@ -1652,6 +1691,149 @@ function renderVaultTab() {
 }
 
 /** Vault section: Deposit to Vault + Vault Position + Harvest + Redeem. Labels follow header context. */
+// ─── Activities Section ───
+
+function renderWalletActivities() {
+  var items = state.activities || [];
+  var loading = state.activitiesLoading;
+
+  var rows = '';
+  if (loading && items.length === 0) {
+    rows = '<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--text-muted);">Loading activities...</td></tr>';
+  } else if (items.length === 0) {
+    rows = '<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--text-muted);">No activities yet. Actions like login, deposit, harvest, and redeem will appear here.</td></tr>';
+  } else {
+    for (var i = 0; i < items.length; i++) {
+      var a = items[i];
+      var typeLabel = activityTypeLabel(a.type);
+      var typeIcon = activityTypeIcon(a.type);
+      var amountStr = a.amount ? (parseFloat(a.amount).toFixed(4) + ' ' + (a.asset || '')) : (a.detail ? esc(a.detail) : '\u2014');
+      var dateStr = a.created_at ? new Date(a.created_at).toLocaleString() : '\u2014';
+      var statusBadge = a.status === 'confirmed'
+        ? '<span style="color:#22c55e;font-weight:600;">OK</span>'
+        : a.status === 'failed'
+        ? '<span style="color:#ef4444;font-weight:600;">Failed</span>'
+        : '<span style="color:#f59e0b;font-weight:600;">Pending</span>';
+      var explorerLink = '';
+      if (a.tx_hash) {
+        var chainId = a.chain_id || '11155111';
+        var url = getExplorerTxUrl(chainId, a.tx_hash);
+        explorerLink = '<a href="' + url + '" target="_blank" rel="noopener" style="color:var(--primary);text-decoration:none;font-size:12px;" title="' + esc(a.tx_hash) + '">' + esc(a.tx_hash.slice(0, 8)) + '\u2026' + esc(a.tx_hash.slice(-6)) + '</a>';
+      } else {
+        explorerLink = '<span style="color:var(--text-muted);font-size:12px;">\u2014</span>';
+      }
+      rows += '<tr style="border-bottom:1px solid var(--border);">' +
+        '<td style="padding:10px 8px;white-space:nowrap;">' + typeIcon + ' ' + esc(typeLabel) + '</td>' +
+        '<td style="padding:10px 8px;font-family:monospace;font-size:13px;">' + amountStr + '</td>' +
+        '<td style="padding:10px 8px;">' + statusBadge + '</td>' +
+        '<td style="padding:10px 8px;">' + explorerLink + '</td>' +
+        '<td style="padding:10px 8px;color:var(--text-muted);font-size:12px;white-space:nowrap;">' + esc(dateStr) + '</td>' +
+        '</tr>';
+    }
+  }
+
+  return '<div class="card" style="padding:20px;">' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">' +
+    '<h3 style="margin:0;">Activities</h3>' +
+    '<button class="btn btn-secondary" id="btnRefreshActivities" style="font-size:12px;padding:4px 12px;">Refresh</button>' +
+    '</div>' +
+    '<div style="overflow-x:auto;">' +
+    '<table style="width:100%;border-collapse:collapse;font-size:14px;">' +
+    '<thead><tr style="border-bottom:2px solid var(--border);text-align:left;">' +
+    '<th style="padding:8px;">Type</th>' +
+    '<th style="padding:8px;">Detail</th>' +
+    '<th style="padding:8px;">Status</th>' +
+    '<th style="padding:8px;">Transaction</th>' +
+    '<th style="padding:8px;">Time</th>' +
+    '</tr></thead>' +
+    '<tbody>' + rows + '</tbody>' +
+    '</table>' +
+    '</div>' +
+    '</div>';
+}
+
+function activityTypeLabel(type) {
+  var labels = {
+    login: 'Login',
+    deposit: 'Deposit',
+    redeem: 'Redeem',
+    harvest: 'Harvest',
+    approve: 'Approve',
+    escrow_deposit: 'Escrow Deposit',
+    escrow_register: 'Escrow Register',
+    claim: 'Claim',
+    plan_created: 'Plan Created',
+    plan_distributed: 'Plan Distributed',
+    trigger_initiated: 'Trigger Initiated',
+    simulate_chainlink: 'Chainlink Event (Simulated)',
+  };
+  return labels[type] || type;
+}
+
+function activityTypeIcon(type) {
+  var icons = {
+    login: '\uD83D\uDD11',          // 🔑
+    deposit: '\u2B07\uFE0F',        // ⬇️
+    redeem: '\u2B06\uFE0F',         // ⬆️
+    harvest: '\uD83C\uDF3E',        // 🌾
+    approve: '\u2705',               // ✅
+    escrow_deposit: '\uD83D\uDD12', // 🔒
+    escrow_register: '\uD83D\uDCDD',// 📝
+    claim: '\uD83C\uDFC6',          // 🏆
+    plan_created: '\uD83D\uDCC4',   // 📄
+    plan_distributed: '\uD83D\uDCE8',// 📨
+    trigger_initiated: '\u26A1',     // ⚡
+    simulate_chainlink: '\uD83D\uDD17', // 🔗
+  };
+  return icons[type] || '\uD83D\uDD35'; // 🔵
+}
+
+/** Fetch activities from server and update state. */
+async function loadActivities() {
+  if (!state.auth?.address) return;
+  state.activitiesLoading = true;
+  try {
+    var authHeaders = await getAuthHeadersAsync().catch(function () { return {}; });
+    var resp = await apiFetch(API_BASE + '/activities/' + encodeURIComponent(state.auth.address), {
+      headers: authHeaders,
+    });
+    if (resp.ok) {
+      var data = await resp.json();
+      state.activities = data.activities || [];
+    }
+  } catch (e) {
+    console.warn('[activities] load failed:', e.message);
+  } finally {
+    state.activitiesLoading = false;
+    if (state.page === 'activities') render();
+  }
+}
+
+/** Report a completed activity to the server. */
+async function reportActivity(type, txHash, amount, extra) {
+  if (!state.auth?.address) return;
+  try {
+    var authHeaders = await getAuthHeadersAsync().catch(function () { return {}; });
+    await apiFetch(API_BASE + '/activities', {
+      method: 'POST',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders),
+      body: JSON.stringify(Object.assign({
+        address: state.auth.address,
+        type: type,
+        tx_hash: txHash || null,
+        amount: amount || null,
+        asset: state.vaultUnderlyingSymbol || 'WETH',
+        chain_id: String(state.vaultChainId || '11155111'),
+        status: 'confirmed',
+      }, extra || {})),
+    });
+    // Refresh activities list in background
+    loadActivities();
+  } catch (e) {
+    console.warn('[activities] report failed:', e.message);
+  }
+}
+
 function renderVaultSection() {
   var vaultChainToken = formatChainToken();
   var vaultAvail = getGlobalContextBalance();
@@ -2437,7 +2619,7 @@ function render() {
     case 'accounts': content = renderAccounts(); break;
     case 'protection': content = renderProtection(); break;
     case 'claim': content = renderClaim(); break;
-    case 'activity': content = renderActivity(); break;
+    case 'activities': content = renderWalletActivities(); break;
     case 'profile': content = renderProfileContent(); break;
     case 'settings': content = renderSettings(); break;
     default: content = renderWallet();
@@ -2448,6 +2630,7 @@ function render() {
     const sectionContent =
       state.walletSection === 'balances' ? renderWalletBalancesSection() :
       state.walletSection === 'send' ? renderWalletSendSection() :
+      state.walletSection === 'activities' ? renderWalletActivities() :
       state.walletSection === 'deniable' ? renderDeniableAccounts() :
       renderVaultSection();
     app.innerHTML = renderPageWithSidebar(WALLET_SECTIONS, 'wallet-section', state.walletSection, sectionContent);
@@ -2464,8 +2647,8 @@ function render() {
       state.claimSection,
       claimContent
     );
-  } else if (state.page === 'activity') {
-    app.innerHTML = renderPageWithSidebar([{ key: 'activity', label: 'Activity' }], 'activity-section', 'activity', renderActivity());
+  } else if (state.page === 'activities') {
+    app.innerHTML = renderPageWithSidebar([{ key: 'activities', label: 'Activities' }], 'activities-section', 'activities', renderWalletActivities());
   } else if (state.page === 'profile') {
     app.innerHTML = renderPageWithSidebar([{ key: 'profile', label: 'Profile' }], 'profile-section', 'profile', renderProfileContent());
   } else if (state.page === 'settings') {
@@ -2566,6 +2749,44 @@ function attachAppEvents() {
       state.planMemo = '';
       await loadAccountInvites();
       render();
+    });
+  }
+
+  const btnSimChainOverview = document.getElementById('btnSimulateChainlinkOverview');
+  if (btnSimChainOverview) {
+    btnSimChainOverview.addEventListener('click', async () => {
+      const hint = document.getElementById('chainlinkOverviewHint');
+      btnSimChainOverview.disabled = true;
+      btnSimChainOverview.textContent = 'Submitting...';
+      if (hint) { hint.style.display = 'none'; hint.textContent = ''; }
+      try {
+        const headers = await getAuthHeadersAsync().catch(() => ({}));
+        const resp = await apiFetch(`${API_BASE}/trigger/simulate-chainlink`, {
+          method: 'POST',
+          headers: { ...headers, 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          throw new Error(err.error || resp.statusText);
+        }
+        const data = await resp.json();
+        const mins = data.cooldown_minutes || 10;
+        btnSimChainOverview.textContent = 'Event Triggered';
+        if (hint) {
+          hint.style.display = 'inline';
+          hint.textContent = 'Oracle event has been triggered. Please wait ' + mins + ' minutes before claiming.';
+        }
+        reportActivity('simulate_chainlink', null, null, { detail: (data.triggers || []).length + ' triggers created' });
+      } catch (err) {
+        btnSimChainOverview.textContent = 'Simulate Chainlink Event';
+        btnSimChainOverview.disabled = false;
+        if (hint) {
+          hint.style.display = 'inline';
+          hint.style.color = 'var(--danger)';
+          hint.textContent = 'Failed: ' + err.message;
+        }
+      }
     });
   }
 
@@ -3071,6 +3292,9 @@ function attachAppEvents() {
           throw new Error(err.error || 'Failed to save plan');
         }
         showToast('Plan saved', 'success');
+        reportActivity('plan_created', null, null, {
+          detail: (planData.recipients || []).length + ' recipients',
+        });
 
         // If custody WASM exists and there are recipients, call the extension to generate mnemonic+passphrase for each recipient and log to server console (not minting NFT yet).
         // Note: currently each yallet_changePassphraseWithAdmin triggers an approve popup with passkey verification, so N recipients will trigger N passkey prompts.
@@ -3133,6 +3357,28 @@ function attachAppEvents() {
                 if (hintEl) {
                   if (status === 'waiting') hintEl.textContent = 'Signing ' + (idx + 1) + ' of ' + total + ': please approve the passkey prompt.';
                   else if (status === 'ok') hintEl.textContent = (idx + 1) + ' of ' + total + ' done.';
+                }
+              }
+              // Helper: switch modal to "done" state via direct DOM manipulation.
+              // MUST NOT call render() here — render() rebuilds the modal HTML from
+              // scratch which resets it to the initial "Continue" prompt, causing the
+              // signing loop to restart.
+              function _showSignModalDone(results, headerText) {
+                var progEl = document.getElementById('signModalProgress');
+                var doneEl = document.getElementById('signModalDone');
+                var doneList = document.getElementById('signDoneList');
+                if (progEl) progEl.style.display = 'none';
+                if (doneEl) doneEl.style.display = 'block';
+                if (doneList) {
+                  doneList.innerHTML = results.map(function (mr) {
+                    var rLabel = (mr.recipient.label || mr.recipient.name || 'Recipient');
+                    if (mr.success) return '<div style="padding:3px 0;"><span style="color:var(--success);">&#10003;</span> ' + rLabel + '</div>';
+                    return '<div style="padding:3px 0;"><span style="color:var(--danger);">&#10007;</span> ' + rLabel + ' — ' + (mr.error || 'failed') + '</div>';
+                  }).join('');
+                }
+                if (headerText) {
+                  var headerEl = doneEl ? doneEl.querySelector('h3') : null;
+                  if (headerEl) { headerEl.textContent = headerText; headerEl.style.color = 'var(--warning)'; }
                 }
               }
               for (let i = 0; i < recipients.length; i++) {
@@ -3260,7 +3506,8 @@ function attachAppEvents() {
                   if (headerEl) headerEl.textContent = 'Securing vault shares...';
                   if (hintEl) hintEl.textContent = 'Depositing vault shares into escrow with per-recipient allocations...';
 
-                  var escrowCfg = await window.YaultEscrow.getConfig(API_BASE);
+                  var escrowAuthHeaders = await getAuthHeadersAsync().catch(function () { return {}; });
+                  var escrowCfg = await window.YaultEscrow.getConfig(API_BASE, { headers: escrowAuthHeaders });
                   if (escrowCfg.enabled && escrowCfg.escrowAddress && escrowCfg.vaultAddress) {
                     var ownerAddr = (state.auth?.address && state.auth.address.startsWith('0x'))
                       ? state.auth.address
@@ -3283,6 +3530,10 @@ function attachAppEvents() {
                       if (escrowResult.success) {
                         showToast('Vault shares deposited into escrow (' + escrowResult.txHashes.length + ' tx confirmed).', 'success');
                         console.log('[Plan] Escrow deposit success:', escrowResult);
+                        var lastEscrowTx = escrowResult.txHashes[escrowResult.txHashes.length - 1] || null;
+                        reportActivity('escrow_deposit', lastEscrowTx, escrowResult.totalShares, {
+                          detail: escrowIndices.length + ' recipients',
+                        });
                       } else {
                         // CRITICAL: Halt flow if escrow deposit fails.
                         // The invariant "escrow deposit ≺ credential delivery" MUST hold:
@@ -3291,8 +3542,11 @@ function attachAppEvents() {
                         // access the owner's vault shares directly.
                         console.error('[Plan] Escrow deposit FAILED — halting distribution:', escrowResult.error);
                         showToast('Escrow deposit failed: ' + (escrowResult.error || 'unknown') + '. Distribution halted — shares must be locked before credentials are stored. Please retry.', 'error');
-                        state.loading = false;
-                        render();
+                        // Show "done" modal via DOM (do NOT call render() — it rebuilds the
+                        // modal from scratch and resets to the initial "Continue" prompt,
+                        // causing an infinite re-signing loop).
+                        _showSignModalDone(mintResults, 'Signing complete (escrow failed)');
+                        state._signDeferredNav = { planStep: 'credentials' };
                         return;
                       }
                     }
@@ -3303,8 +3557,8 @@ function attachAppEvents() {
                   // CRITICAL: Halt flow on escrow exception (same invariant as above).
                   console.error('[Plan] Escrow deposit exception — halting distribution:', escrowErr);
                   showToast('Escrow deposit failed: ' + (escrowErr.message || 'unknown') + '. Distribution halted — shares must be locked before credentials are stored.', 'error');
-                  state.loading = false;
-                  render();
+                  _showSignModalDone(mintResults, 'Signing complete (escrow failed)');
+                  state._signDeferredNav = { planStep: 'credentials' };
                   return;
                 }
               }
@@ -3415,20 +3669,10 @@ function attachAppEvents() {
               }
 
               // Switch modal to "done" view — all signing + Arweave complete
-              (function _showSignDone() {
-                var progEl = document.getElementById('signModalProgress');
-                var doneEl = document.getElementById('signModalDone');
-                var doneList = document.getElementById('signDoneList');
-                if (progEl) progEl.style.display = 'none';
-                if (doneEl) doneEl.style.display = 'block';
-                if (doneList) {
-                  doneList.innerHTML = mintResults.map(function (mr) {
-                    var rLabel = (mr.recipient.label || mr.recipient.name || 'Recipient');
-                    if (mr.success) return '<div style="padding:3px 0;"><span style="color:var(--success);">&#10003;</span> ' + rLabel + '</div>';
-                    return '<div style="padding:3px 0;"><span style="color:var(--danger);">&#10007;</span> ' + rLabel + ' — ' + (mr.error || 'failed') + '</div>';
-                  }).join('');
-                }
-              })();
+              _showSignModalDone(mintResults);
+              reportActivity('plan_distributed', null, null, {
+                detail: mintResults.filter(function (r) { return r && r.success; }).length + ' credentials minted',
+              });
 
               // Defer navigation — user will click "Done" on the modal to proceed
               state._signDeferredNav = { planStep: 'credentials' };
@@ -3467,6 +3711,44 @@ function attachAppEvents() {
       state.protectionStep = 'overview';
       showToast('Done. Credentials were sent via NFT where RWA SDK was available.', 'success');
       render();
+    });
+  }
+
+  const btnSimulateChainlink = document.getElementById('btnSimulateChainlink');
+  if (btnSimulateChainlink) {
+    btnSimulateChainlink.addEventListener('click', async () => {
+      const hint = document.getElementById('chainlinkEventHint');
+      btnSimulateChainlink.disabled = true;
+      btnSimulateChainlink.textContent = 'Submitting...';
+      if (hint) { hint.style.display = 'none'; hint.textContent = ''; }
+      try {
+        const headers = await getAuthHeadersAsync().catch(() => ({}));
+        const resp = await apiFetch(`${API_BASE}/trigger/simulate-chainlink`, {
+          method: 'POST',
+          headers: { ...headers, 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          throw new Error(err.error || resp.statusText);
+        }
+        const data = await resp.json();
+        const mins = data.cooldown_minutes || 10;
+        btnSimulateChainlink.textContent = 'Event Triggered';
+        if (hint) {
+          hint.style.display = 'inline';
+          hint.textContent = 'Oracle event has been triggered. Please wait ' + mins + ' minutes before claiming.';
+        }
+        reportActivity('simulate_chainlink', null, null, { detail: (data.triggers || []).length + ' triggers created' });
+      } catch (err) {
+        btnSimulateChainlink.textContent = 'Simulate Chainlink Event';
+        btnSimulateChainlink.disabled = false;
+        if (hint) {
+          hint.style.display = 'inline';
+          hint.style.color = 'var(--danger)';
+          hint.textContent = 'Failed: ' + err.message;
+        }
+      }
     });
   }
 
@@ -3802,6 +4084,14 @@ function attachAppEvents() {
       }
     });
   });
+
+  // Refresh Activities button
+  var btnRefreshAct = document.getElementById('btnRefreshActivities');
+  if (btnRefreshAct) {
+    btnRefreshAct.addEventListener('click', function () {
+      loadActivities();
+    });
+  }
 
   // Accounts left sidebar (Accounts / Invite)
   app.querySelectorAll('[data-accounts-section]').forEach((el) => {
@@ -4155,6 +4445,7 @@ function attachAppEvents() {
           document.body.appendChild(toast);
           setTimeout(() => toast.remove(), 10000);
           state.vaultAmount = '';
+          reportActivity('deposit', txHash, amount);
           refreshWalletBalances();
           setTimeout(function () { refreshWalletBalances(); setTimeout(refreshWalletBalances, 5000); }, 3000);
         } else {
@@ -4217,6 +4508,7 @@ function attachAppEvents() {
           document.body.appendChild(toast);
           setTimeout(() => toast.remove(), 10000);
           state.vaultAmount = '';
+          reportActivity('redeem', txHash, amount, { shares: amount });
           refreshWalletBalances();
           setTimeout(function () { refreshWalletBalances(); setTimeout(refreshWalletBalances, 5000); }, 3000);
         } else {
@@ -4274,6 +4566,7 @@ function attachAppEvents() {
           toast.innerHTML = 'Transaction submitted (' + explorerName + '). <a href="' + explorerUrl + '" target="_blank" rel="noopener">View on block explorer</a>';
           document.body.appendChild(toast);
           setTimeout(() => toast.remove(), 10000);
+          reportActivity('harvest', txHash, null);
           refreshWalletBalances();
         } else {
           showToast(`Harvested yield: ${data.harvested || '0'}`, 'success');
@@ -4283,6 +4576,89 @@ function attachAppEvents() {
         state.error = 'Harvest failed: ' + err.message;
       } finally {
         state.vaultHarvestLoading = false;
+        render();
+      }
+    });
+  }
+
+  // Simulate yield (testnet: inject WETH into vault)
+  const btnSimulate = document.getElementById('btnSimulateYield');
+  if (btnSimulate) {
+    btnSimulate.addEventListener('click', async () => {
+      state.vaultSimulateLoading = true;
+      state.error = null;
+      render();
+      try {
+        const addr = state.auth?.address || '';
+        const authHeaders = await getAuthHeadersAsync().catch(() => ({}));
+        const resp = await apiFetch(`${API_BASE}/vault/simulate-yield`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
+          body: JSON.stringify({ address: addr }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Simulation failed');
+        showToast(`Simulated ${data.amount} ${data.symbol || 'WETH'} yield injected. Refreshing...`, 'success');
+        await refreshWalletBalances();
+      } catch (err) {
+        state.error = 'Simulate yield failed: ' + err.message;
+      } finally {
+        state.vaultSimulateLoading = false;
+        render();
+      }
+    });
+  }
+
+  // Reclaim from escrow (return locked shares to wallet)
+  const btnReclaim = document.getElementById('btnReclaimEscrow');
+  if (btnReclaim) {
+    btnReclaim.addEventListener('click', async () => {
+      const provider = window.yallet;
+      if (!provider || typeof provider.request !== 'function') {
+        state.error = 'Yallet wallet not detected. Please connect Yallet first.';
+        render();
+        return;
+      }
+      const indices = state.escrowBalances.recipient_indices || [];
+      if (indices.length === 0) {
+        state.error = 'No recipient indices found — cannot determine which allocations to reclaim';
+        render();
+        return;
+      }
+      state.vaultReclaimLoading = true;
+      state.error = null;
+      render();
+      try {
+        const authHeaders = await getAuthHeadersAsync().catch(() => ({}));
+        const escrowCfg = await window.YaultEscrow.getConfig(API_BASE, { headers: authHeaders });
+        if (!escrowCfg.enabled || !escrowCfg.escrowAddress) {
+          throw new Error('Escrow not configured');
+        }
+        const ownerAddr = (state.auth?.address && state.auth.address.startsWith('0x'))
+          ? state.auth.address
+          : ('0x' + (state.auth?.pubkey || ''));
+        const result = await window.YaultEscrow.reclaimAllFromEscrow(
+          provider, escrowCfg, ownerAddr, indices,
+          function (step, total, detail) {
+            var btn = document.getElementById('btnReclaimEscrow');
+            if (btn) btn.textContent = '(' + step + '/' + total + ') ' + detail;
+          }
+        );
+        if (result.success && result.reclaimedCount > 0) {
+          showToast('Reclaimed shares from ' + result.reclaimedCount + ' recipient(s). Refreshing...', 'success');
+          reportActivity('escrow_reclaim', result.txHashes[result.txHashes.length - 1] || null, null, {
+            detail: result.reclaimedCount + ' recipients reclaimed',
+          });
+        } else if (result.success && result.reclaimedCount === 0) {
+          showToast('No remaining shares to reclaim.', 'info');
+        } else {
+          throw new Error(result.error || 'Reclaim failed');
+        }
+        await refreshWalletBalances();
+      } catch (err) {
+        state.error = 'Reclaim failed: ' + err.message;
+      } finally {
+        state.vaultReclaimLoading = false;
         render();
       }
     });
@@ -4728,7 +5104,8 @@ function attachAppEvents() {
 
         // If escrow balance is available, execute on-chain claim
         if (bal && bal.configured && bal.remainingShares && bal.remainingShares !== '0' && window.YaultEscrow) {
-          const cfg = await window.YaultEscrow.getConfig(API_BASE);
+          const claimEscrowHeaders = await getAuthHeadersAsync().catch(function () { return {}; });
+          const cfg = await window.YaultEscrow.getConfig(API_BASE, { headers: claimEscrowHeaders });
           if (!cfg.enabled) throw new Error('Escrow not configured on server');
 
           // Contract requires msg.sender === walletOwner(walletIdHash). Get expected owner and ensure connected account matches.
@@ -4783,6 +5160,7 @@ function attachAppEvents() {
             txHash,
             message: 'Claim transaction submitted! Tx: ' + (txHash || '').slice(0, 18) + '...',
           };
+          reportActivity('claim', txHash, displayAmt, { asset: symbol });
         } else {
           // Fallback: no escrow balance, show prepared result
           state.transferResult = {
@@ -4921,6 +5299,11 @@ async function refreshWalletBalances() {
         shares: data.vault?.shares || '0.00',
         value: data.vault?.value || '0.00',
         yield: data.vault?.yield || '0.00',
+      };
+      state.escrowBalances = {
+        shares: data.escrow?.shares || '0',
+        value: data.escrow?.value || '0',
+        recipient_indices: data.escrow?.recipient_indices || [],
       };
       state.vaultUnderlyingSymbol = data.vault?.underlying_symbol || 'USDC';
       // Only re-render if on wallet page to avoid thrashing

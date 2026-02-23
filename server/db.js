@@ -39,7 +39,7 @@ let _saveTimer = null;
 /** Whether there are unsaved changes */
 let _dirty = false;
 
-const TABLES = ['authorities', 'bindings', 'triggers', 'revenue', 'withdrawals', 'auditLog', 'vaultPositions', 'adminSessions', 'authoritySessions', 'insurancePolicies', 'subAccounts', 'allowances', 'trialApplications', 'recipientPaths', 'releasedFactors', 'kyc', 'accountInvites', 'walletPlans', 'walletAddresses', 'users', 'recipientMnemonicAdmin', 'authorityReleaseLinks', 'userCustomTokens', 'rwaReleaseRegistry', 'rwaDeliveryLog', 'campaigns', 'referrals'];
+const TABLES = ['authorities', 'bindings', 'triggers', 'revenue', 'withdrawals', 'auditLog', 'vaultPositions', 'adminSessions', 'authoritySessions', 'insurancePolicies', 'subAccounts', 'allowances', 'trialApplications', 'recipientPaths', 'releasedFactors', 'kyc', 'accountInvites', 'walletPlans', 'walletAddresses', 'users', 'recipientMnemonicAdmin', 'authorityReleaseLinks', 'userCustomTokens', 'rwaReleaseRegistry', 'rwaDeliveryLog', 'campaigns', 'referrals', 'activities'];
 
 /**
  * Initialise the database (async, called once).
@@ -435,6 +435,10 @@ referrals.findByInvitee = async function (walletId) {
   return this.findByField('invitee_wallet_id', walletId);
 };
 
+// Activities: global activity log (login, deposit, redeem, harvest, escrow, claim, etc.)
+// id = uuid, data = { wallet, type, amount?, shares?, asset?, chain_id?, tx_hash?, status, detail?, created_at }
+const activities = createCollection('activities', { allowedJsonFields: ['wallet', 'type', 'status'] });
+
 // ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
@@ -467,6 +471,7 @@ module.exports = {
   rwaDeliveryLog,
   campaigns,
   referrals,
+  activities,
 
   /** Ensure database is initialised (call before first use). */
   ensureReady,

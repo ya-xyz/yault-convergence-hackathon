@@ -94,6 +94,7 @@ const revenueUser = require('./api/revenue/user');
 const revenueWithdraw = require('./api/revenue/withdraw');
 
 const vaultRouter = require('./api/vault');
+const activitiesRouter = require('./api/activities');
 const releasePrepareDistribute = require('./api/release/prepare-distribute');
 const insuranceRouter = require('./api/insurance');
 const { adminRouter, kycSubmitRouter } = require('./api/admin');
@@ -287,6 +288,14 @@ app.post('/api/auth/verify', async (req, res) => {
       }
     }
     const session_token = createClientSessionToken(result.pubkey);
+    // Record login activity
+    try {
+      const { recordActivity } = require('./api/activities');
+      await recordActivity(walletId, 'login', {
+        detail: wallet_type || 'wallet',
+        status: 'confirmed',
+      });
+    } catch (_) { /* best-effort */ }
     return res.json({ ...result, session_token });
   } catch (err) {
     console.error('[auth/verify] Error:', err);
@@ -385,6 +394,9 @@ app.use('/api/revenue/withdraw', revenueWithdraw);
 
 // Vault routes (wallet/vault)
 app.use('/api/vault', vaultRouter);
+
+// Activities (global activity log: login, deposit, redeem, harvest, escrow, etc.)
+app.use('/api/activities', activitiesRouter);
 
 // Insurance (DeFi insurance protocol integration)
 app.use('/api/insurance', insuranceRouter);
