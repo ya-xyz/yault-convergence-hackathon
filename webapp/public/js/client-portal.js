@@ -4111,15 +4111,35 @@ function attachAppEvents() {
             const amountWei = parseUnits(amount, decimals);
             const vaultAddress = data.transaction.to ? (data.transaction.to.startsWith('0x') ? data.transaction.to : '0x' + data.transaction.to) : null;
             if (vaultAddress) {
-              showToast('Approve token for Vault first (confirm in wallet).', 'info');
-              const approveTx = {
-                to: data.asset_address.startsWith('0x') ? data.asset_address : '0x' + data.asset_address,
-                data: encodeApproveCalldata(vaultAddress, amountWei),
-                value: '0x0',
-                chainId: data.transaction.chainId || 1,
-                gasLimit: '0x186a0',
-              };
-              await sendTransactionInWallet(approveTx, addr);
+              // Check existing allowance — skip approve if sufficient (same pattern as yault-escrow.js)
+              let needApprove = true;
+              const rpcUrl = (typeof EVM_RPC_URL !== 'undefined' && EVM_RPC_URL) || 'https://ethereum-sepolia-rpc.publicnode.com';
+              try {
+                const tokenAddr = data.asset_address.startsWith('0x') ? data.asset_address : '0x' + data.asset_address;
+                const currentAllowance = await checkAllowanceRaw(rpcUrl, tokenAddr, addr, vaultAddress);
+                if (currentAllowance >= BigInt(amountWei)) {
+                  needApprove = false;
+                  console.log('[deposit] Allowance sufficient (' + currentAllowance.toString() + '), skipping approve');
+                }
+              } catch (e) {
+                console.warn('[deposit] allowance check failed, will approve:', e.message);
+              }
+              if (needApprove) {
+                showToast('Approve token for Vault (confirm in wallet).', 'info');
+                // Use max approval (type(uint256).max) so subsequent deposits skip approve
+                const MAX_UINT256 = (2n ** 256n) - 1n;
+                const approveTx = {
+                  to: data.asset_address.startsWith('0x') ? data.asset_address : '0x' + data.asset_address,
+                  data: encodeApproveCalldata(vaultAddress, MAX_UINT256),
+                  value: '0x0',
+                  chainId: data.transaction.chainId || 1,
+                  gasLimit: '0x186a0',
+                };
+                const approveHash = await sendTransactionInWallet(approveTx, addr);
+                // Wait for approve to be mined before sending deposit (prevents race condition)
+                showToast('Waiting for approval to confirm...', 'info');
+                await waitForTxReceipt(rpcUrl, approveHash, 120000);
+              }
             }
           }
           showToast('Confirm deposit in the Yallet window.', 'info');
@@ -4999,6 +5019,44 @@ function normalizeHex(s) {
   const h = String(s).startsWith('0x') ? String(s).slice(2) : String(s);
   const padded = h.length % 2 === 0 ? h : '0' + h;
   return '0x' + padded;
+}
+
+/** Wait for a transaction to be mined. Uses raw JSON-RPC fetch (no ethers dependency). */
+async function waitForTxReceipt(rpcUrl, txHash, timeoutMs) {
+  const timeout = timeoutMs || 120000;
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    try {
+      const resp = await fetch(rpcUrl, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getTransactionReceipt', params: [txHash] }),
+      });
+      const json = await resp.json();
+      if (json.result) {
+        if (json.result.status === '0x0') throw new Error('Transaction reverted: ' + txHash);
+        return json.result;
+      }
+    } catch (e) {
+      if (e.message && e.message.includes('reverted')) throw e;
+      console.warn('[waitForTxReceipt] poll error:', e.message);
+    }
+    await new Promise(function (r) { setTimeout(r, 3000); });
+  }
+  throw new Error('Transaction not confirmed within ' + Math.round(timeout / 1000) + 's: ' + txHash);
+}
+
+/** Check ERC20 allowance via raw JSON-RPC eth_call (no ethers dependency). Returns BigInt. */
+async function checkAllowanceRaw(rpcUrl, tokenAddress, ownerAddress, spenderAddress) {
+  var owner = ownerAddress.replace(/^0x/i, '').padStart(64, '0');
+  var spender = spenderAddress.replace(/^0x/i, '').padStart(64, '0');
+  var calldata = '0xdd62ed3e' + owner + spender; // allowance(address,address)
+  var resp = await fetch(rpcUrl, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: tokenAddress, data: calldata }, 'latest'] }),
+  });
+  var json = await resp.json();
+  if (json.result) return BigInt(json.result);
+  return 0n;
 }
 
 /** Send a transaction payload (from API) via the user's wallet. Returns tx hash or throws. */
