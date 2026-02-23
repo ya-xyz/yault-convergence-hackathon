@@ -5183,7 +5183,20 @@ function attachAppEvents() {
 
           // Broadcast signed transaction via RPC
           const rawHex = signedRawTx.startsWith('0x') ? signedRawTx : '0x' + signedRawTx;
-          const txResp = await rpcProvider.broadcastTransaction(rawHex);
+          let txResp;
+          try {
+            txResp = await rpcProvider.broadcastTransaction(rawHex);
+          } catch (broadcastErr) {
+            const msg = (broadcastErr.message || '').toLowerCase();
+            if (msg.includes('insufficient funds') || msg.includes('insufficient balance') || msg.includes('doesn\'t have enough funds')) {
+              throw new Error(
+                'Insufficient gas balance. The signing wallet (' + ownerAddr +
+                ') does not have enough native token to cover transaction gas fees. ' +
+                'Please transfer a small amount of ETH to this address and try again.'
+              );
+            }
+            throw broadcastErr;
+          }
           const txHash = txResp.hash;
 
           // Format display amount
