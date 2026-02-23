@@ -1,0 +1,11 @@
+{
+  "name": "@yault/contracts",
+  "version": "0.1.0",
+  "description": "Yault ERC-4626 vault contracts (Foundry)",
+  "private": true,
+  "scripts": {
+    "build": "forge build",
+    "test": "forge test",
+    "clean": "forge clean"
+  }
+}

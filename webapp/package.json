@@ -1,0 +1,6 @@
+{
+  "name": "yault-webapp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Yault unified web app (client / authority / ops portals)"
+}

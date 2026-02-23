@@ -1,0 +1,39 @@
+# Yallet Asset Management Platform — Test Environment
+#
+# Usage:
+#   docker compose up              # start all services (API + ArLocal)
+#   docker compose up api          # start API server only
+#   docker compose down -v         # stop and remove volumes
+#
+# The API server serves the unified web app (client / authority / ops) at /
+# and all /api/* endpoints. ArLocal provides a local Arweave instance for testing.
+
+services:
+  # ---------- API Server (serves webapp + API) ----------------------------------
+  api:
+    build: .
+    ports:
+      - "3001:3001"
+    env_file: .env
+    environment:
+      - NODE_ENV=development
+      - PORT=3001
+      - CORS_ORIGIN=*
+      - EMAIL_PROVIDER=console
+      # Use local ArLocal for Arweave testing
+      - ARWEAVE_GATEWAY=http://arlocal:1984
+    depends_on:
+      arlocal:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3001/health').then(r=>{if(!r.ok)throw 1})"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ---------- ArLocal (local Arweave for testing) ------------------------------
+  arlocal:
+    image: textury/arlocal:v1.1.1
+    ports:
+      - "1984:1984"

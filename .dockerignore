@@ -1,0 +1,15 @@
+node_modules
+.env
+.env.local
+wasm-core/target
+wasm-core/pkg
+contracts/out
+contracts/cache
+contracts/lib
+.git
+.idea
+.vscode
+coverage
+*.swp
+*.swo
+.DS_Store

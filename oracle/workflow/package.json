@@ -1,0 +1,17 @@
+{
+  "name": "yault-release-attestation-workflow",
+  "version": "0.1.0",
+  "description": "CRE workflow: Oracle authority — submit release attestations to ReleaseAttestation contract",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "simulate": "cre workflow simulate . --target staging-settings"
+  },
+  "dependencies": {
+    "@chainlink/cre-sdk": "latest"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

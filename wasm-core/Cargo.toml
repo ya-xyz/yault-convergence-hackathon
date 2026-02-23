@@ -1,0 +1,40 @@
+[package]
+name = "yault-custody-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "Custody-specific crypto primitives for Yault (WASM target)"
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Crypto primitives (match versions in dev.yallet-chrome/Cargo.toml)
+sha2 = "0.10"
+hkdf = "0.12"
+aes-gcm-siv = "0.11"
+aead = "0.5"
+rand = { version = "0.8", features = ["getrandom"] }
+zeroize = { version = "1.8", features = ["derive"] }
+hex = "0.4"
+
+# E2E Encryption (User → Authority): X25519 + XSalsa20-Poly1305
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+
+# WASM interop
+wasm-bindgen = { version = "0.2", features = ["serde-serialize"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde-wasm-bindgen = "0.6"
+getrandom = { version = "0.2", features = ["js"] }
+thiserror = "2.0.17"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[profile.release]
+opt-level = "s"
+lto = true

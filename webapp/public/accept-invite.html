@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Accept Invite — Yault</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0a0f1a; --surface: #141b2d; --surface-2: #1e293b;
+      --border: #2d3a50; --text: #e2e8f0; --text-secondary: #94a3b8;
+      --text-muted: #64748b; --primary: #3b82f6; --primary-hover: #2563eb;
+      --success: #22c55e; --warning: #f59e0b; --danger: #ef4444;
+      --radius: 8px; --font: 'Inter', -apple-system, sans-serif;
+    }
+    body { font-family: var(--font); background: var(--bg); color: var(--text); line-height: 1.6; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 28px; max-width: 420px; width: 100%; }
+    h1 { font-size: 22px; margin-bottom: 8px; text-align: center; }
+    .sub { font-size: 14px; color: var(--text-muted); text-align: center; margin-bottom: 24px; }
+    .email { font-size: 15px; color: var(--text-secondary); margin-bottom: 20px; padding: 12px; background: var(--surface-2); border-radius: var(--radius); }
+    .btn { display: block; width: 100%; padding: 12px 20px; border: none; border-radius: var(--radius); cursor: pointer; font-size: 15px; font-weight: 500; text-align: center; transition: background 0.2s; margin-top: 12px; }
+    .btn-primary { background: var(--primary); color: white; }
+    .btn-primary:hover:not(:disabled) { background: var(--primary-hover); }
+    .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
+    .btn-secondary { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
+    .btn-secondary:hover { background: var(--border); }
+    .alert { padding: 12px 16px; border-radius: var(--radius); margin-bottom: 16px; font-size: 14px; }
+    .alert-danger { background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); color: var(--danger); }
+    .alert-warning { background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.3); color: var(--warning); }
+    .alert-success { background: rgba(34,197,94,0.1); border: 1px solid rgba(34,197,94,0.3); color: var(--success); }
+    .hidden { display: none !important; }
+    .recheck { margin-top: 16px; font-size: 13px; color: var(--text-muted); }
+    .recheck a, .recheck button { color: var(--primary); cursor: pointer; background: none; border: none; font-size: inherit; text-decoration: underline; }
+    .recheck button:hover { color: var(--primary-hover); }
+    .spinner { width: 24px; height: 24px; border: 2px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 auto 12px; display: block; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .back-link { display: inline-block; margin-bottom: 16px; font-size: 14px; color: var(--text-muted); text-decoration: none; }
+    .back-link:hover { color: var(--primary); }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <a href="/" class="back-link">← Back to Yault</a>
+    <h1 id="title">Accept Invite</h1>
+    <p class="sub" id="subtitle">You've been invited to join as a related account.</p>
+
+    <div id="state-loading" class="email">
+      <span class="spinner"></span>
+      <p style="text-align:center;color:var(--text-muted);">Checking invite…</p>
+    </div>
+    <div id="state-invalid" class="hidden">
+      <div class="alert alert-danger">Invalid or expired invite link. Please ask the sender for a new invitation.</div>
+    </div>
+    <div id="state-valid" class="hidden">
+      <div class="email">Invitation for: <strong id="invite-email"></strong></div>
+      <div id="state-no-wallet" class="hidden">
+        <div class="alert alert-warning">
+          <strong>Please install the Yallet wallet first</strong><br>
+          This page only supports accepting invites via the Yallet browser extension. Please install Yallet and create/import a wallet, then click "I've installed Yallet, re-check" below.
+        </div>
+        <p class="sub" style="margin-top:8px;font-size:13px;">After installation:</p>
+        <button type="button" class="btn btn-secondary" id="btn-recheck">I've installed Yallet, re-check</button>
+      </div>
+      <div id="state-has-wallet" class="hidden">
+        <p class="sub" style="margin-bottom:12px;">Connect with Yallet wallet and sign in to accept the invite. You will become a sub-account of the inviter.</p>
+        <button type="button" class="btn btn-primary" id="btn-accept">Connect with Yallet and accept invite</button>
+      </div>
+    </div>
+    <div id="state-accepting" class="hidden">
+      <span class="spinner"></span>
+      <p style="text-align:center;color:var(--text-muted);">Connecting and accepting…</p>
+    </div>
+    <div id="state-done" class="hidden">
+      <div class="alert alert-success">You have accepted the invite. You are now linked as a sub-account. You can close this page or <a href="/" style="color:inherit;font-weight:600;">go to Yault</a>.</div>
+    </div>
+  </div>
+  <script src="js/env.js"></script>
+  <script>
+(function () {
+  'use strict';
+
+  var API_BASE = (typeof window !== 'undefined' && window.ENV && window.ENV.api && window.ENV.api.baseUrl)
+    ? window.ENV.api.baseUrl
+    : (typeof location !== 'undefined' ? location.origin + '/api' : '/api');
+
+  var token = '';
+  var params = typeof location !== 'undefined' && location.search
+    ? new URLSearchParams(location.search)
+    : null;
+  if (params && params.get('token')) {
+    token = params.get('token').trim();
+  }
+
+  var inviteEmail = '';
+  var sessionToken = null;
+
+  function show(id) {
+    ['state-loading', 'state-invalid', 'state-valid', 'state-accepting', 'state-done'].forEach(function (x) {
+      var el = document.getElementById(x);
+      if (el) el.classList.add('hidden');
+    });
+    var el = document.getElementById(id);
+    if (el) el.classList.remove('hidden');
+  }
+
+  function showValidParts(noWallet, hasWallet) {
+    var noEl = document.getElementById('state-no-wallet');
+    var hasEl = document.getElementById('state-has-wallet');
+    if (noEl) noEl.classList.toggle('hidden', !noWallet);
+    if (hasEl) hasEl.classList.toggle('hidden', !hasWallet);
+  }
+
+  /** Only detect Yallet extension (window.yallet), no other wallets. */
+  function checkYallet() {
+    return !!(typeof window !== 'undefined' && window.yallet);
+  }
+
+  function validateToken() {
+    if (!token) {
+      show('state-invalid');
+      return;
+    }
+    fetch(API_BASE + '/invite/validate?token=' + encodeURIComponent(token), { method: 'GET' })
+      .then(function (r) {
+        if (!r.ok) {
+          show('state-invalid');
+          return;
+        }
+        return r.json();
+      })
+      .then(function (data) {
+        if (!data || !data.valid) {
+          show('state-invalid');
+          return;
+        }
+        inviteEmail = data.email || data.label || '';
+        var emailEl = document.getElementById('invite-email');
+        if (emailEl) emailEl.textContent = inviteEmail;
+        show('state-valid');
+        if (checkYallet()) {
+          showValidParts(false, true);
+        } else {
+          showValidParts(true, false);
+        }
+      })
+      .catch(function () {
+        show('state-invalid');
+      });
+  }
+
+  function connectAndAccept() {
+    if (!checkYallet()) {
+      showValidParts(true, false);
+      return;
+    }
+    var provider = window.yallet;
+    show('state-accepting');
+
+    function fail(msg) {
+      show('state-valid');
+      showValidParts(false, true);
+      alert(msg || 'Something went wrong.');
+    }
+
+    provider.request({ method: 'eth_requestAccounts' })
+      .then(function (accounts) {
+        if (!accounts || !accounts[0]) return fail('No account selected.');
+        var address = (accounts[0] || '').toLowerCase();
+        if (address && address.indexOf('0x') !== 0) address = '0x' + address;
+        return fetch(API_BASE + '/auth/challenge', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pubkey: address, wallet_type: 'yallet' })
+        }).then(function (r) {
+          if (!r.ok) return fail('Failed to get challenge.');
+          return r.json();
+        }).then(function (ch) {
+          if (!ch.challenge_id || !ch.challenge) return fail('Invalid challenge.');
+          return provider.request({
+            method: 'personal_sign',
+            params: ['0x' + (ch.challenge.indexOf('0x') === 0 ? ch.challenge.slice(2) : ch.challenge), address]
+          }).then(function (sig) {
+            var signature = (sig && sig.indexOf('0x') === 0) ? sig.slice(2) : sig;
+            return fetch(API_BASE + '/auth/verify', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                challenge_id: ch.challenge_id,
+                signature: signature,
+                wallet_type: 'yallet'
+              })
+            });
+          });
+        }).then(function (verifyRes) {
+          if (!verifyRes || !verifyRes.ok) return fail('Sign-in failed.');
+          return verifyRes.json();
+        }).then(function (verifyData) {
+          sessionToken = verifyData && verifyData.session_token;
+          if (!sessionToken) return fail('No session.');
+          return fetch(API_BASE + '/invite/accept', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Client-Session': sessionToken
+            },
+            body: JSON.stringify({ token: token })
+          });
+        }).then(function (acceptRes) {
+          if (!acceptRes.ok) {
+            return acceptRes.json().then(function (e) { fail(e.error || 'Accept failed.'); });
+          }
+          show('state-done');
+        });
+      })
+      .catch(function (err) {
+        fail(err && (err.message || err.reason || String(err)) || 'Connection failed.');
+      });
+  }
+
+  document.getElementById('btn-recheck').addEventListener('click', function () {
+    if (checkYallet()) {
+      showValidParts(false, true);
+    }
+  });
+
+  document.getElementById('btn-accept').addEventListener('click', connectAndAccept);
+
+  if (token) {
+    validateToken();
+  } else {
+    show('state-invalid');
+  }
+})();
+  </script>
+</body>
+</html>

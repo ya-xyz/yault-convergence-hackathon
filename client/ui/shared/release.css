@@ -1,0 +1,961 @@
+/**
+ * release.css — Shared Styles for Release UI
+ *
+ * Covers:
+ * - Release status indicator (green/yellow/red)
+ * - Recipient path cards
+ * - Authority binding cards with verification badges
+ * - Credential export modal
+ * - Alert banners (trigger status warnings)
+ * - Recipient claim portal layout
+ *
+ * Uses CSS variables from base.css design system.
+ */
+
+/* ===========================
+   Namespace Container
+=========================== */
+.yallet-release {
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--text-primary);
+  padding: 12px;
+  height: 100%;
+  overflow-y: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.yallet-release::-webkit-scrollbar {
+  display: none;
+}
+
+.yallet-release h2 {
+  font-size: 16px;
+  font-weight: 700;
+  margin: 0 0 12px 0;
+  color: var(--text-primary);
+}
+
+.yallet-release h3 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 16px 0 8px 0;
+}
+
+/* ===========================
+   Release Status Bar
+=========================== */
+.release-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  margin-bottom: 14px;
+  box-shadow: var(--shadow-sm);
+}
+
+.release-status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.release-status.status-active .release-status-dot {
+  background: var(--success);
+  box-shadow: 0 0 6px var(--success);
+}
+
+.release-status.status-triggered .release-status-dot {
+  background: var(--warning);
+  box-shadow: 0 0 6px var(--warning);
+  animation: statusPulse 1.5s ease-in-out infinite;
+}
+
+.release-status.status-cooldown .release-status-dot {
+  background: var(--danger);
+  box-shadow: 0 0 8px var(--danger);
+  animation: statusPulse 0.8s ease-in-out infinite;
+}
+
+@keyframes statusPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(1.3); }
+}
+
+.release-status-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.release-status-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.release-status-text {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-top: 2px;
+}
+
+.release-status-meta {
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.release-status-meta .meta-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.release-status-meta .meta-value {
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+  margin-top: 2px;
+}
+
+/* ===========================
+   Authority Cards
+=========================== */
+.authority-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.authority-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+  transition: all var(--transition-normal);
+  cursor: pointer;
+}
+
+.authority-card:hover {
+  border-color: var(--border-hover);
+  box-shadow: var(--shadow-md);
+}
+
+.authority-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-sm);
+  background: var(--primary-light);
+  color: var(--primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.authority-details {
+  flex: 1;
+  min-width: 0;
+}
+
+.authority-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.authority-jurisdiction {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 1px;
+}
+
+.verified-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--success);
+  color: white;
+  font-size: 8px;
+  flex-shrink: 0;
+}
+
+.authority-meta {
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.shamir-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  background: var(--primary-light);
+  color: var(--primary);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+
+.authority-share-index {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 3px;
+}
+
+/* Authority search results grid */
+.authority-results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.authority-card .authority-rating {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 2px;
+}
+
+.authority-card .star {
+  color: var(--warning);
+  font-size: 10px;
+}
+
+.authority-card .star.empty {
+  color: var(--text-muted);
+}
+
+.authority-capacity {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.authority-fee {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+/* ===========================
+   Recipient Path Cards
+=========================== */
+.recipient-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.recipient-card {
+  padding: 12px;
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+  transition: all var(--transition-normal);
+}
+
+.recipient-card:hover {
+  box-shadow: var(--shadow-md);
+}
+
+.recipient-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.recipient-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.recipient-status {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.recipient-status.status-active {
+  background: var(--success-light);
+  color: var(--success);
+}
+
+.recipient-status.status-triggered {
+  background: var(--warning-light);
+  color: var(--warning);
+}
+
+.recipient-status.status-released {
+  background: var(--primary-light);
+  color: var(--primary);
+}
+
+.recipient-status.status-activated {
+  background: var(--danger-light);
+  color: var(--danger);
+}
+
+.recipient-status.status-revoked {
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+}
+
+/* tlock countdown */
+.tlock-countdown {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.tlock-countdown .tlock-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.tlock-countdown .tlock-time {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.recipient-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.recipient-actions .btn-action {
+  padding: 5px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  transition: all var(--transition-fast);
+}
+
+.recipient-actions .btn-action:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.recipient-actions .btn-action.btn-danger:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+/* Add recipient button */
+.btn-add-recipient {
+  width: 100%;
+  padding: 10px;
+  border-radius: var(--radius-md);
+  border: 2px dashed var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition-normal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.btn-add-recipient:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: var(--primary-light);
+}
+
+/* ===========================
+   Modal Overlay (Release)
+=========================== */
+.yallet-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  opacity: 0;
+  visibility: hidden;
+  transition: all 0.2s ease;
+}
+
+.yallet-modal-overlay.show {
+  opacity: 1;
+  visibility: visible;
+}
+
+.yallet-modal {
+  background: var(--bg-card);
+  border-radius: var(--radius-lg);
+  width: 92%;
+  max-width: 360px;
+  max-height: 85vh;
+  overflow-y: auto;
+  box-shadow: var(--shadow-lg);
+  transform: scale(0.9);
+  transition: transform 0.2s ease;
+  scrollbar-width: none;
+}
+
+.yallet-modal::-webkit-scrollbar {
+  display: none;
+}
+
+.yallet-modal-overlay.show .yallet-modal {
+  transform: scale(1);
+}
+
+.yallet-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.yallet-modal-header h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.yallet-modal-close {
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: var(--bg-tertiary);
+  border-radius: 50%;
+  font-size: 16px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  transition: all var(--transition-fast);
+}
+
+.yallet-modal-close:hover {
+  background: var(--border-hover);
+  color: var(--text-primary);
+}
+
+.yallet-modal-body {
+  padding: 16px;
+}
+
+.yallet-modal-footer {
+  display: flex;
+  gap: 10px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.yallet-modal-footer .btn {
+  flex: 1;
+  padding: 10px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition-normal);
+  border: none;
+}
+
+.yallet-modal-footer .btn-secondary {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+.yallet-modal-footer .btn-secondary:hover {
+  background: var(--border);
+}
+
+.yallet-modal-footer .btn-primary {
+  background: var(--primary-gradient);
+  color: var(--text-inverse);
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.3);
+}
+
+.yallet-modal-footer .btn-primary:hover {
+  box-shadow: 0 4px 16px rgba(99, 102, 241, 0.4);
+}
+
+.yallet-modal-footer .btn-danger {
+  background: var(--danger);
+  color: var(--text-inverse);
+}
+
+/* ===========================
+   Alert Banners
+=========================== */
+.alert-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 10px;
+}
+
+.alert-info {
+  background: var(--primary-light);
+  color: var(--primary);
+  border: 1px solid rgba(99, 102, 241, 0.2);
+}
+
+.alert-warning {
+  background: var(--warning-light);
+  color: var(--warning);
+  border: 1px solid rgba(245, 158, 11, 0.2);
+}
+
+.alert-critical {
+  background: var(--danger-light);
+  color: var(--danger);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+.alert-banner .alert-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+/* ===========================
+   Form Elements (Release)
+=========================== */
+.yallet-release .form-group {
+  margin-bottom: 12px;
+}
+
+.yallet-release .form-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  margin-bottom: 6px;
+}
+
+.yallet-release .form-input,
+.yallet-release .form-textarea,
+.yallet-release .form-select {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  transition: all var(--transition-fast);
+}
+
+.yallet-release .form-input:focus,
+.yallet-release .form-textarea:focus,
+.yallet-release .form-select:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-light);
+}
+
+.yallet-release .form-textarea {
+  resize: vertical;
+  min-height: 80px;
+  font-family: "SF Mono", "Consolas", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.yallet-release .form-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+.yallet-release .form-error {
+  font-size: 11px;
+  color: var(--danger);
+  margin-top: 4px;
+}
+
+/* ===========================
+   Credential Export
+=========================== */
+.credential-display {
+  padding: 12px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  margin-bottom: 12px;
+}
+
+.credential-display .credential-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  margin-bottom: 6px;
+}
+
+.credential-display .credential-value {
+  font-family: "SF Mono", "Consolas", monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  word-break: break-all;
+  user-select: all;
+}
+
+.qr-placeholder {
+  width: 160px;
+  height: 160px;
+  margin: 12px auto;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* ===========================
+   Claim Portal — Wizard Steps
+=========================== */
+.claim-wizard {
+  counter-reset: step;
+}
+
+.claim-step {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border);
+  position: relative;
+}
+
+.claim-step:last-child {
+  border-bottom: none;
+}
+
+.claim-step-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.claim-step-number {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: all var(--transition-normal);
+}
+
+.claim-step.step-active .claim-step-number {
+  background: var(--primary);
+  color: var(--text-inverse);
+}
+
+.claim-step.step-complete .claim-step-number {
+  background: var(--success);
+  color: var(--text-inverse);
+}
+
+.claim-step-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.claim-step.step-disabled .claim-step-title {
+  color: var(--text-muted);
+}
+
+.claim-step-content {
+  padding-left: 36px;
+}
+
+.claim-step.step-disabled .claim-step-content {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+/* Status indicator */
+.claim-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 14px;
+}
+
+.claim-status.status-waiting {
+  background: var(--warning-light);
+  color: var(--warning);
+}
+
+.claim-status.status-released {
+  background: var(--success-light);
+  color: var(--success);
+}
+
+.claim-status.status-activated {
+  background: var(--primary-light);
+  color: var(--primary);
+}
+
+.claim-status .status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+/* Balance display */
+.balance-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.balance-item {
+  padding: 10px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  text-align: center;
+}
+
+.balance-chain {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  margin-bottom: 4px;
+}
+
+.balance-amount {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.balance-usd {
+  font-size: 10px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+/* Transfer form */
+.transfer-section {
+  padding: 12px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+}
+
+.transfer-section h4 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0 0 10px 0;
+  color: var(--text-primary);
+}
+
+/* ===========================
+   Loading Spinner
+=========================== */
+.release-spinner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.release-spinner .spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--border);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: releaseSpin 0.7s linear infinite;
+}
+
+@keyframes releaseSpin {
+  to { transform: rotate(360deg); }
+}
+
+/* ===========================
+   Responsive / Empty State
+=========================== */
+.release-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.release-empty .empty-icon {
+  font-size: 36px;
+  margin-bottom: 10px;
+  opacity: 0.6;
+}
+
+.release-empty .empty-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.release-empty .empty-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  max-width: 240px;
+}
+
+/* ===========================
+   Search Form (Authority Selector)
+=========================== */
+.search-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.search-row {
+  display: flex;
+  gap: 8px;
+}
+
+.search-row .form-select,
+.search-row .form-input {
+  flex: 1;
+}
+
+.search-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.search-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  font-weight: 500;
+  border: 1px solid var(--border);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.search-tag:hover,
+.search-tag.active {
+  border-color: var(--primary);
+  background: var(--primary-light);
+  color: var(--primary);
+}
+
+/* ===========================
+   Bind Confirmation Dialog
+=========================== */
+.bind-confirm-detail {
+  padding: 10px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-md);
+  margin-bottom: 12px;
+}
+
+.bind-confirm-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 0;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.bind-confirm-row:last-child {
+  border-bottom: none;
+}
+
+.bind-confirm-row .label {
+  color: var(--text-muted);
+}
+
+.bind-confirm-row .value {
+  font-weight: 600;
+  color: var(--text-primary);
+}

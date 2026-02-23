@@ -1,0 +1,12 @@
+{
+  "name": "@yault/client",
+  "version": "0.1.0",
+  "description": "Yault release logic + UI — integrated into dev.yallet-chrome",
+  "private": true,
+  "type": "module",
+  "main": "release/index.js",
+  "exports": {
+    ".": "./release/index.js",
+    "./ui/*": "./ui/*"
+  }
+}

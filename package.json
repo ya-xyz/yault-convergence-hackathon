@@ -1,0 +1,50 @@
+{
+  "name": "Yault",
+  "version": "0.1.0",
+  "description": "Yault Non-Custodial Asset Management Platform",
+  "private": true,
+  "scripts": {
+    "build:wasm": "cd wasm-core && wasm-pack build --target web --release",
+    "copy:wasm": "node -e \"const fs=require('fs'); const path=require('path'); const src=path.join('wasm-core','pkg'); const dest=path.join('webapp','public','wasm'); if (!fs.existsSync(src)) { console.warn('wasm-core/pkg not found. Run: npm run build:wasm'); process.exit(0); } if (!fs.existsSync(dest)) fs.mkdirSync(dest, {recursive:true}); const files = fs.readdirSync(src).filter(f=>f.endsWith('.js')||f.endsWith('.wasm')||f.endsWith('.d.ts')); for (const f of files) fs.copyFileSync(path.join(src,f), path.join(dest,f)); console.log('Copied', files.length, 'files to webapp/public/wasm');\"",
+    "build:wasm:webapp": "npm run build:wasm && npm run copy:wasm",
+    "build:rwa-adapter": "node scripts/build-rwa-adapter.mjs",
+    "test:wasm": "cd wasm-core && cargo test",
+    "test:js": "jest tests/",
+    "test:contracts": "cd contracts && forge test",
+    "test:all": "npm run test:wasm && npm run test:js && npm run test:contracts",
+    "dev": "NODE_ENV=development node server/index.js",
+    "dev:server": "NODE_ENV=development node server/index.js",
+    "dev:server:prod": "node scripts/run-with-env.js production",
+    "seed:test-authority": "node server/scripts/seed-test-authority.js",
+    "env:dev": "node scripts/generate-env.mjs development",
+    "env:test": "node scripts/generate-env.mjs test",
+    "env:prod": "node scripts/generate-env.mjs production"
+  },
+  "dependencies": {
+    "@yallet/rwa-sdk": "file:../dev.yallet.rwa-sdk",
+    "@permaweb/aoconnect": "^0.0.57",
+    "arweave": "^1.15.0",
+    "dotenv": "^16.4.0",
+    "drand-client": "^1.2.0",
+    "ethers": "^6.13.0",
+    "express": "^4.21.0",
+    "express-rate-limit": "^7.4.0",
+    "sql.js": "^1.11.0",
+    "tlock-js": "^0.4.0",
+    "tweetnacl": "^1.0.3",
+    "uuid": "^10.0.0"
+  },
+  "optionalDependencies": {
+    "@sendgrid/mail": "^7.7.0",
+    "resend": "^4.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "@babel/core": "^7.29.0",
+    "@babel/preset-env": "^7.29.0",
+    "arlocal": "^1.1.0",
+    "babel-jest": "^29.7.0",
+    "jest": "^29.0.0",
+    "supertest": "^7.0.0"
+  }
+}

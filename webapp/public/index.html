@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en" id="html-lang">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Yault</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0a0f1a; --surface: #141b2d; --surface-2: #1e293b;
+      --border: #2d3a50; --text: #e2e8f0; --text-secondary: #94a3b8;
+      --text-muted: #64748b; --primary: #3b82f6; --primary-hover: #2563eb;
+      --success: #22c55e; --warning: #f59e0b; --danger: #ef4444;
+      --info: #06b6d4; --radius: 8px; --font: 'Inter', -apple-system, sans-serif;
+    }
+    body { font-family: var(--font); background: var(--bg); color: var(--text); line-height: 1.6; }
+    .portal-shell { max-width: 1280px; margin: 0 auto; padding: 16px 24px; }
+    .shell-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; flex-wrap: nowrap; min-width: 0; }
+    .shell-header-left { display: flex; align-items: center; gap: 20px; min-width: 0; flex-shrink: 1; }
+    .shell-header-right { display: flex; align-items: center; gap: 12px; flex-shrink: 0; white-space: nowrap; }
+    .shell-wallet-addr { display: flex; align-items: center; }
+    .portal-tabs {
+      display: flex; gap: 4px;
+      border-bottom: 1px solid var(--border); padding-bottom: 4px;
+    }
+    .lang-select-wrap { display: flex; align-items: center; gap: 8px; }
+    .lang-label { font-size: 12px; color: var(--text-muted); }
+    .lang-select { padding: 6px 10px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: 13px; cursor: pointer; }
+    .portal-tab {
+      padding: 10px 18px; border-radius: var(--radius) var(--radius) 0 0;
+      font-size: 14px; color: var(--text-secondary); text-decoration: none;
+      transition: all 0.2s; border-bottom: 2px solid transparent;
+    }
+    .portal-tab:hover { color: var(--text); }
+    .portal-tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+    #app { min-height: 320px; max-width: 100%; margin: 0 auto; padding: 24px; }
+    .loading-app { text-align: center; padding: 48px 24px; color: var(--text-muted); }
+    .loading-app .spinner {
+      width: 32px; height: 32px; border: 3px solid var(--border);
+      border-top-color: var(--primary); border-radius: 50%;
+      animation: spin 0.8s linear infinite; margin: 0 auto 16px; display: block;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    /* Shared portal UI (client / authority / ops) */
+    h1 { font-size: 24px; margin-bottom: 8px; text-align: center; }
+    h2 { font-size: 18px; margin-bottom: 12px; }
+    h3 { font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-muted); margin-bottom: 8px; }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 16px; }
+    .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+    .btn { padding: 10px 20px; border: none; border-radius: var(--radius); cursor: pointer; font-size: 14px; font-weight: 500; transition: background 0.2s; }
+    .btn-primary { background: var(--primary); color: white; }
+    .btn-primary:hover { background: var(--primary-hover); }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-success { background: var(--success); color: white; }
+    .btn-secondary { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
+    .btn-danger { background: var(--danger); color: white; }
+    .btn-sm { padding: 4px 10px; font-size: 12px; }
+    .nav { display: flex; gap: 4px; margin-bottom: 20px; border-bottom: 1px solid var(--border); padding-bottom: 4px; overflow-x: auto; }
+    .nav-item { padding: 8px 16px; cursor: pointer; border-radius: var(--radius) var(--radius) 0 0; font-size: 14px; color: var(--text-secondary); transition: all 0.2s; white-space: nowrap; }
+    .nav-item.active { background: var(--surface); color: var(--primary); border-bottom: 2px solid var(--primary); }
+    .nav-item:hover { color: var(--text); }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+    .badge-pending, .badge-warning { background: rgba(245,158,11,0.15); color: var(--warning); }
+    .badge-active, .badge-success { background: rgba(34,197,94,0.15); color: var(--success); }
+    .badge-released, .badge-info { background: rgba(59,130,246,0.15); color: var(--primary); }
+    .badge-rejected, .badge-danger { background: rgba(239,68,68,0.15); color: var(--danger); }
+    .badge-muted { background: rgba(110,118,129,0.15); color: var(--text-muted); }
+    .form-group { margin-bottom: 16px; }
+    .form-label { display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 4px; }
+    .form-input { width: 100%; padding: 10px 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: 14px; }
+    .form-input:focus { outline: none; border-color: var(--primary); }
+    .form-textarea { width: 100%; min-height: 80px; resize: vertical; }
+    .form-hint { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+    .alert { padding: 12px 16px; border-radius: var(--radius); margin-bottom: 16px; font-size: 14px; }
+    .alert-info { background: rgba(6,182,212,0.1); border: 1px solid rgba(6,182,212,0.3); color: var(--info); }
+    .alert-warning { background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.3); color: var(--warning); }
+    .alert-success { background: rgba(34,197,94,0.1); border: 1px solid rgba(34,197,94,0.3); color: var(--success); }
+    .alert-danger { background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); color: var(--danger); }
+    .step-indicator { display: flex; justify-content: center; gap: 8px; margin-bottom: 24px; }
+    .step { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 600; }
+    .step-active { background: var(--primary); color: white; }
+    .step-done { background: var(--success); color: white; }
+    .step-pending { background: var(--surface-2); color: var(--text-muted); border: 1px solid var(--border); }
+    .step-line { width: 40px; height: 2px; background: var(--border); align-self: center; }
+    .balance-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+    .balance-card { background: var(--surface-2); border-radius: var(--radius); padding: 12px; text-align: center; }
+    .balance-card-lg { padding: 14px; }
+    .balance-shortcut-btn { border: none; }
+    .balance-shortcut-btn:hover { filter: brightness(1.05); }
+    .balance-value { font-size: 18px; font-weight: 600; }
+    .balance-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; }
+    .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }
+    .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; text-align: center; }
+    .stat-value { font-size: 28px; font-weight: 700; }
+    .stat-label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; }
+    .table { width: 100%; border-collapse: collapse; }
+    .table th, .table td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); font-size: 14px; }
+    .table th { color: var(--text-muted); font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
+    .table tr:hover td { background: var(--surface-2); }
+    .toast { position: fixed; bottom: 20px; right: 20px; padding: 12px 20px; border-radius: var(--radius); font-size: 14px; z-index: 1000; animation: slideIn 0.3s ease; }
+    .toast-success { background: var(--success); color: white; }
+    .toast-error { background: var(--danger); color: white; }
+    @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+    .hidden { display: none !important; }
+    .wallet-login { max-width: 420px; margin: 0 auto; }
+    .wallet-options { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
+    .wallet-btn { display: flex; align-items: center; gap: 14px; width: 100%; padding: 14px 18px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; transition: border-color 0.2s, background 0.2s; color: var(--text); text-align: left; }
+    .wallet-btn:hover:not(:disabled) { border-color: var(--primary); background: var(--surface-2); }
+    .wallet-btn-disabled { opacity: 0.4; cursor: not-allowed; }
+    .wallet-icon { width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; border-radius: 10px; background: var(--surface-2); flex-shrink: 0; }
+    .wallet-label { display: flex; flex-direction: column; }
+    .wallet-label strong { font-size: 15px; }
+    .wallet-label small { font-size: 12px; color: var(--text-muted); }
+    .wallet-divider { display: flex; align-items: center; gap: 12px; margin: 20px 0; color: var(--text-muted); font-size: 13px; }
+    .wallet-divider::before, .wallet-divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+    .wallet-status { display: flex; align-items: center; gap: 10px; padding: 8px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); font-size: 13px; margin-bottom: 16px; }
+    .wallet-status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); flex-shrink: 0; }
+    .wallet-status-info { flex: 1; display: flex; flex-direction: column; }
+    .wallet-status-info strong { font-size: 12px; }
+    .wallet-status-addr { font-size: 11px; color: var(--text-muted); font-family: monospace; }
+    .wallet-disconnect-btn { padding: 4px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: transparent; color: var(--text-muted); font-size: 12px; cursor: pointer; }
+    .wallet-disconnect-btn:hover { color: var(--danger); border-color: var(--danger); }
+    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 100; }
+    .modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; max-width: 500px; width: 90%; }
+    .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+    .modal-close { background: none; border: none; color: var(--text-muted); font-size: 20px; cursor: pointer; }
+    .modal-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <div class="portal-shell">
+    <div class="shell-header">
+      <div class="shell-header-left">
+        <h1 class="app-title" id="app-title" style="margin:0;font-size:20px;font-weight:600;white-space:nowrap;">Yault</h1>
+        <nav class="portal-tabs" id="portal-tabs" aria-label="Choose portal">
+          <a href="?portal=client" class="portal-tab" data-portal="client" data-i18n="tabClient">Client</a>
+          <a href="?portal=authority" class="portal-tab" data-portal="authority" data-i18n="tabAuthority">Authority</a>
+          <a href="?portal=ops" class="portal-tab" data-portal="ops" data-i18n="tabOps">Operations</a>
+        </nav>
+      </div>
+      <div id="shell-context-selectors" class="shell-context-selectors" style="display:flex;align-items:center;gap:8px;margin-left:auto;margin-right:16px;">
+        <label for="global-chain-select" class="lang-label" style="margin:0 4px 0 0;">Chain</label>
+        <select id="global-chain-select" class="lang-select" aria-label="Chain">
+          <option value="ethereum">Ethereum</option>
+          <option value="solana">Solana</option>
+          <option value="bitcoin">Bitcoin</option>
+        </select>
+        <label for="global-token-select" class="lang-label" style="margin:0 4px 0 0;">Token</label>
+        <select id="global-token-select" class="lang-select" aria-label="Token">
+          <option value="ETH">ETH</option>
+          <option value="USDC">USDC</option>
+        </select>
+      </div>
+      <div class="shell-header-right">
+        <div class="lang-select-wrap">
+          <label for="lang-select" class="lang-label" data-i18n="language">Language</label>
+          <select id="lang-select" class="lang-select" aria-label="Language">
+            <option value="en">English</option>
+            <option value="zh">中文</option>
+            <option value="ko">한국어</option>
+            <option value="ja">日本語</option>
+          </select>
+        </div>
+        <div id="shell-wallet-addr" class="shell-wallet-addr"></div>
+      </div>
+    </div>
+    <main id="app">
+      <div class="loading-app" id="loading-app">
+        <span class="spinner"></span>
+        <p data-i18n="loading">Loading…</p>
+      </div>
+    </main>
+  </div>
+  <script src="js/env.js"></script>
+  <script>
+    if (typeof YAULT_ENV !== 'undefined' && YAULT_ENV.rwa) {
+      window.YAULT_RWA_CONFIG = {
+        dev: YAULT_ENV.rwa.dev,
+        uploadAndMintApiUrl: YAULT_ENV.rwa.uploadAndMintApiUrl,
+        network: YAULT_ENV.rwa.network || (YAULT_ENV.rwa.dev ? 'devnet' : 'mainnet')
+      };
+    }
+  </script>
+  <script src="https://cdn.ethers.io/lib/ethers-6.7.0.umd.min.js" crossorigin="anonymous"></script>
+  <script src="js/wallet-connect.js"></script>
+  <script src="js/e2e-client.js"></script>
+  <script src="js/i18n.js"></script>
+  <script src="js/yault-path-claim.js"></script>
+  <script src="js/yault-escrow.js"></script>
+  <script src="js/wasm-loader.js"></script>
+  <script src="js/rwa-credential-mint.js"></script>
+  <script>
+    (function applyShellI18n() {
+      if (typeof window.t !== 'function') return;
+      var doc = document;
+      doc.querySelectorAll('[data-i18n]').forEach(function (el) {
+        var key = el.getAttribute('data-i18n');
+        if (key) el.textContent = window.t(key);
+      });
+      doc.title = window.t('appTitle');
+      var nav = doc.getElementById('portal-tabs');
+      if (nav) nav.setAttribute('aria-label', window.t('portalNavLabel'));
+      var langSelect = doc.getElementById('lang-select');
+      if (langSelect) langSelect.value = window.YaultI18n && window.YaultI18n.getLocale ? window.YaultI18n.getLocale() : 'en';
+    })();
+  </script>
+  <script src="js/main.js"></script>
+  <script>
+    (function setupLangSelect() {
+      var sel = document.getElementById('lang-select');
+      if (!sel) return;
+      sel.addEventListener('change', function () {
+        if (window.YaultI18n && window.YaultI18n.setLocale) {
+          window.YaultI18n.setLocale(sel.value);
+          document.querySelectorAll('[data-i18n]').forEach(function (el) {
+            el.textContent = window.t(el.getAttribute('data-i18n'));
+          });
+          document.title = window.t('appTitle');
+          var nav = document.getElementById('portal-tabs');
+          if (nav) nav.setAttribute('aria-label', window.t('portalNavLabel'));
+          var html = document.documentElement;
+          if (html) {
+            var l = sel.value;
+            html.setAttribute('lang', l === 'zh' ? 'zh-CN' : l === 'ja' ? 'ja' : l === 'ko' ? 'ko' : 'en');
+          }
+          if (typeof window.onYaultLocaleChange === 'function') window.onYaultLocaleChange(l);
+        }
+      });
+      var locale = window.YaultI18n && window.YaultI18n.getLocale ? window.YaultI18n.getLocale() : 'en';
+      document.documentElement.setAttribute('lang', locale === 'zh' ? 'zh-CN' : locale === 'ja' ? 'ja' : locale === 'ko' ? 'ko' : 'en');
+    })();
+  </script>
+</body>
+</html>

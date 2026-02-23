@@ -1,0 +1,6 @@
+{
+  "chainSelectorName": "evm-ethereum-sepolia",
+  "rpcUrl": "https://ethereum-sepolia-rpc.publicnode.com",
+  "releaseAttestationAddress": "0x0000000000000000000000000000000000000000",
+  "platformApiBaseUrl": "https://api.yault.xyz"
+}

@@ -1,0 +1,9 @@
+# Chainlink CRE workflow configuration for Yault Release Attestation (Oracle Authority).
+# Used by: cre workflow simulate <workflow-dir>
+name: release-attestation
+description: Submit oracle attestations to ReleaseAttestation contract (HTTP trigger + optional API + EVM write)
+language: typescript
+entrypoint: src/main.ts
+config:
+  staging: config.staging.json
+  production: config.production.json

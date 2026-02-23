@@ -1,0 +1,10 @@
+{
+  "name": "@yault/server",
+  "version": "0.1.0",
+  "description": "Yault Platform API — Express backend",
+  "private": true,
+  "scripts": {
+    "start": "node index.js"
+  },
+  "main": "index.js"
+}
