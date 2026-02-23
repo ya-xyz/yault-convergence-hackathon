@@ -241,22 +241,47 @@ router.get('/me', async (req, res) => {
           admin_factor_hex: factor.admin_factor_hex,
           blob_hex: factor.blob_hex || null,
           recipient_mnemonic_hash: mp.recipient_mnemonic_hash || null,
+          created_at: latestRelease.created_at || releasedTrigger.decided_at || null,
         });
       }
     }
 
     // 2) Plan flow: recipientMnemonicAdmin (AdminFactor linked via release link)
+    //    Deduplicate: keep only the latest record per (plan_wallet_id, label).
     const planRows = await db.recipientMnemonicAdmin.findByEvmAddressWithAdminFactor(callerNorm);
+    const planLatest = new Map(); // key = "walletId|label" → latest row
     for (const r of planRows) {
+      const dedupeKey = (r.plan_wallet_id || '') + '|' + (r.label || 'Release');
+      const existing = planLatest.get(dedupeKey);
+      if (!existing || (r.created_at && (!existing.created_at || r.created_at > existing.created_at))) {
+        planLatest.set(dedupeKey, r);
+      }
+    }
+    for (const r of planLatest.values()) {
+      // Look up the correct recipient index from recipientPaths
+      let pathIndex = null;
+      const planWalletNorm = normalizeAddr(r.plan_wallet_id || '');
+      const recipientNorm = normalizeAddr(r.evm_address || '');
+      if (planWalletNorm && recipientNorm) {
+        for (const pc of allPathConfigs) {
+          if (normalizeAddr(pc.wallet_id) === planWalletNorm && Array.isArray(pc.paths)) {
+            const match = pc.paths.find(p =>
+              p.recipient_evm_address && normalizeAddr(p.recipient_evm_address) === recipientNorm
+            );
+            if (match) { pathIndex = match.index; break; }
+          }
+        }
+      }
       myEntries.push({
         wallet_id: r.plan_wallet_id || null,
-        path_index: null,
+        path_index: pathIndex,
         label: r.label || 'Release',
         admin_factor_hex: r.admin_factor,
         blob_hex: null,
         recipient_mnemonic_hash: r.mnemonic_hash || null,
         evm_address: r.evm_address || null,
         source: 'plan',
+        created_at: r.created_at || null,
       });
     }
 
@@ -295,13 +320,18 @@ router.get('/escrow-config', (req, res) => {
  */
 router.get('/escrow-balance', async (req, res) => {
   try {
-    const walletId = (req.query.walletId || req.query.wallet_id || '').trim();
+    let walletId = (req.query.walletId || req.query.wallet_id || '').trim();
     const recipientIndex = parseInt(req.query.recipientIndex || req.query.recipient_index, 10);
     if (!walletId) {
       return res.status(400).json({ error: 'walletId is required' });
     }
     if (isNaN(recipientIndex) || recipientIndex < 0) {
       return res.status(400).json({ error: 'recipientIndex must be a non-negative integer' });
+    }
+    // Ensure 0x prefix for EVM addresses — plan_wallet_id may be stored without it,
+    // but the escrow contract hashes the 0x-prefixed address.
+    if (/^[0-9a-fA-F]{40}$/.test(walletId)) {
+      walletId = '0x' + walletId;
     }
     const wHash = escrowContract.walletIdHash(walletId);
     const balance = await escrowContract.getRecipientBalance(config, wHash, recipientIndex);

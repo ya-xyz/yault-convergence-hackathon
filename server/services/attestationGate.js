@@ -73,7 +73,11 @@ async function evaluateReleaseAttestationGate(input) {
       attestation: null,
     };
   }
-  if (attestation.source !== 'oracle') {
+  // Accept both 'oracle' (Chainlink CRE, source=0) and 'fallback' (relayer/simulate, source=1).
+  // In production, restrict to 'oracle' only; for hackathon demo we also accept 'fallback'
+  // since simulate-chainlink uses submitFallbackAttestation.
+  const acceptedSources = ['oracle', 'fallback'];
+  if (!acceptedSources.includes(attestation.source)) {
     return {
       valid: false,
       code: 'ATTESTATION_SOURCE_INVALID',

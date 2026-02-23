@@ -1,7 +1,9 @@
 /* tslint:disable */
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
+export const acegf_change_passphrase_add_admin_wasm: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => void;
 export const acegf_change_passphrase_wasm: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+export const acegf_change_passphrase_with_admin_wasm: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => void;
 export const acegf_compute_dh_key_wasm: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
 export const acegf_compute_dh_key_with_prf_wasm: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
 export const acegf_decrypt_with_mnemonic_wasm: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => void;
@@ -18,6 +20,7 @@ export const bitcoin_get_address: (a: number, b: number, c: number, d: number, e
 export const bitcoin_get_taproot_address: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
 export const bitcoin_sign_transaction: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
 export const bitcoin_sign_transaction_prf: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+export const debug_unseal_test: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
 export const evm_compute_tx_hash: (a: number, b: number, c: number) => void;
 export const evm_encode_erc20_approve: (a: number, b: number, c: number, d: number, e: number) => void;
 export const evm_encode_erc20_transfer: (a: number, b: number, c: number, d: number, e: number) => void;
@@ -29,6 +32,7 @@ export const evm_sign_eip1559_transaction: (a: number, b: number, c: number, d: 
 export const evm_sign_eip1559_transaction_with_context: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: bigint, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number) => void;
 export const evm_sign_eip1559_transaction_with_context_prf: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: bigint, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number) => void;
 export const evm_sign_eip1559_transaction_with_prf: (a: number, b: number, c: number, d: number, e: number, f: bigint, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number) => void;
+export const evm_sign_eip1559_transaction_with_secondary: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: bigint, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number) => void;
 export const evm_sign_legacy_transaction: (a: number, b: number, c: number, d: number, e: number, f: bigint, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number) => void;
 export const evm_sign_legacy_transaction_with_prf: (a: number, b: number, c: number, d: number, e: number, f: bigint, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number) => void;
 export const evm_sign_personal_message: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
@@ -44,13 +48,19 @@ export const generate_rev32_with_secondary_wasm: (a: number, b: number, c: numbe
 export const generate_wasm: (a: number, b: number) => number;
 export const generate_with_secondary_wasm: (a: number, b: number, c: number, d: number) => number;
 export const init_panic_hook: () => void;
+export const solana_get_address_with_context: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+export const solana_get_address_with_context_prf: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
 export const solana_get_ata_address: (a: number, b: number, c: number, d: number, e: number) => void;
+export const solana_sign_message_with_context: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => void;
+export const solana_sign_message_with_context_prf: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => void;
 export const solana_sign_spl_transfer: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: bigint, k: number, l: number) => void;
 export const solana_sign_spl_transfer_with_create_ata: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: bigint, k: number, l: number) => void;
 export const solana_sign_system_transfer: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: bigint, i: number, j: number) => void;
 export const solana_sign_system_transfer_with_prf: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: bigint, i: number, j: number) => void;
 export const solana_sign_system_transfer_with_secondary: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: bigint, k: number, l: number) => void;
 export const solana_sign_transaction: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+export const solana_sign_transaction_with_context: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => void;
+export const solana_sign_transaction_with_context_prf: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => void;
 export const solana_sign_transaction_with_prf: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
 export const vadar_compute_commit: (a: number, b: number, c: number) => void;
 export const vadar_compute_discovery_id: (a: number, b: number, c: number, d: number, e: number) => void;

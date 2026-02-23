@@ -638,12 +638,12 @@ async function loadClaimMe() {
       state.selectedClaimItem = items[0];
       state.walletId = items[0].wallet_id;
       state.pathIndex = items[0].path_index;
-      state.releaseKey = items[0].blob_hex || items[0].admin_factor_hex || '';
+      state.releaseKey = items[0].admin_factor_hex || items[0].blob_hex || '';
     } else if (items.length > 1) {
       state.selectedClaimItem = items[0];
       state.walletId = items[0].wallet_id;
       state.pathIndex = items[0].path_index;
-      state.releaseKey = items[0].blob_hex || items[0].admin_factor_hex || '';
+      state.releaseKey = items[0].admin_factor_hex || items[0].blob_hex || '';
     } else {
       state.selectedClaimItem = null;
       state.error = 'No released assets for your address. Ensure you are logged in as the designated recipient and the authority has released.';
@@ -2038,7 +2038,7 @@ function renderClaimStep1() {
   const seenAF = new Set();
   const meItems = [];
   for (const item of rawItems) {
-    const afKey = item.blob_hex || item.admin_factor_hex || '';
+    const afKey = item.admin_factor_hex || item.blob_hex || '';
     if (afKey && seenAF.has(afKey)) continue;
     if (afKey) seenAF.add(afKey);
     meItems.push(item);
@@ -2046,7 +2046,8 @@ function renderClaimStep1() {
   const merged = meItems.map((item, i) => ({
     label: item.label || ('Release #' + (item.path_index || '')),
     walletId: item.wallet_id || item.plan_wallet_id || '',
-    af: item.blob_hex || item.admin_factor_hex || '',
+    af: item.admin_factor_hex || item.blob_hex || '',
+    created_at: item.created_at || null,
     _meIdx: i,
   }));
   const hasReleases = merged.length > 0;
@@ -2063,16 +2064,11 @@ function renderClaimStep1() {
         <div style="margin-bottom:20px;padding:12px;background:var(--surface);border-radius:8px;border:1px solid var(--border);">
           <div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:8px;text-transform:uppercase;">Your Releases</div>
           ${merged.map((item, i) => `
-            <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;${i > 0 ? 'border-top:1px solid var(--border);' : ''}">
-              <div style="min-width:0;flex:1;">
-                <span style="font-weight:500;">${esc(item.label || 'Release')}</span>
-                <span style="font-size:11px;color:var(--text-muted);margin-left:8px;">${item.walletId ? esc(item.walletId.substring(0, 12)) + '...' : ''}</span>
-              </div>
-              ${item.af ? `
-                <button type="button" class="btn btn-secondary btn-use-release-af" data-release-af="${esc(item.af)}" data-release-src-idx="${item._meIdx}" style="font-size:12px;padding:4px 12px;white-space:nowrap;margin-left:12px;">
-                  Use
-                </button>
-              ` : '<span style="font-size:11px;color:var(--text-muted);margin-left:12px;">Pending</span>'}
+            <div style="padding:6px 0;${i > 0 ? 'border-top:1px solid var(--border);' : ''}">
+              <span style="font-weight:500;">${esc(item.label || 'Release')}</span>
+              <span style="font-size:11px;color:var(--text-muted);margin-left:8px;">${item.walletId ? esc(item.walletId.substring(0, 12)) + '...' : ''}</span>
+              ${item.created_at ? '<span style="font-size:10px;color:var(--text-muted);margin-left:8px;">' + esc(new Date(typeof item.created_at === 'number' ? item.created_at : item.created_at).toLocaleString()) + '</span>' : ''}
+              ${!item.af ? '<span style="font-size:11px;color:var(--text-muted);margin-left:8px;">Pending</span>' : ''}
             </div>
           `).join('')}
         </div>
@@ -2106,7 +2102,10 @@ function renderClaimStep2() {
   if (!wj) return `<div class="card"><p style="color:var(--text-muted);">Deriving wallet...</p></div>`;
 
   const evmAddr = wj.evm_address || '';
-  const connectedAddr = wallet && wallet.connected ? wallet.address : '';
+  const rawConnected = wallet && wallet.connected ? wallet.address : '';
+  // Ensure 0x prefix for EVM addresses (wallet connector may store without it)
+  const connectedAddr = rawConnected && !rawConnected.startsWith('0x') && /^[0-9a-fA-F]{40}$/.test(rawConnected)
+    ? '0x' + rawConnected : rawConnected;
 
   // Path Claim section
   const releaseKeyHex = (state.releaseKey || '').replace(/^0x/i, '').trim();
@@ -2116,11 +2115,13 @@ function renderClaimStep2() {
   // Escrow balance
   const eb = state.escrowBalance;
   let balanceDisplay = '';
-  if (eb && eb.configured && eb.remainingAssets) {
+  if (eb && eb.configured && (eb.remainingShares || eb.remainingAssets)) {
     const decimals = eb.underlyingDecimals || 18;
     const symbol = eb.underlyingSymbol || 'TOKEN';
-    const remainWei = BigInt(eb.remainingAssets);
-    const allocWei = BigInt(eb.allocatedAssets || '0');
+    const remainShares = BigInt(eb.remainingShares || '0');
+    const allocShares = BigInt(eb.allocatedShares || '0');
+    const remainAssets = BigInt(eb.remainingAssets || '0');
+    const allocAssets = BigInt(eb.allocatedAssets || '0');
     // Format: divide by 10^decimals, show up to 6 decimal places
     const formatVal = (wei) => {
       const divisor = 10n ** BigInt(decimals);
@@ -2133,11 +2134,14 @@ function renderClaimStep2() {
       <div class="card" style="margin-top:16px;border:1px solid var(--success);background:var(--surface);">
         <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:8px;">
           <span style="font-size:13px;color:var(--text-muted);">Claimable</span>
-          <span style="font-size:24px;font-weight:700;color:var(--success);">${formatVal(remainWei)} ${esc(symbol)}</span>
+          <span style="font-size:24px;font-weight:700;color:var(--success);">${formatVal(remainShares)} shares</span>
         </div>
-        ${allocWei > remainWei ? `
+        <div style="font-size:12px;color:var(--text-muted);">
+          Value: ~${formatVal(remainAssets)} ${esc(symbol)}
+        </div>
+        ${allocShares > remainShares ? `
           <div style="font-size:12px;color:var(--text-muted);">
-            Total allocated: ${formatVal(allocWei)} ${esc(symbol)}
+            Total allocated: ${formatVal(allocShares)} shares (~${formatVal(allocAssets)} ${esc(symbol)})
           </div>
         ` : ''}
       </div>
@@ -4946,12 +4950,14 @@ function attachAppEvents() {
         // Query escrow balance in background
         if (state.walletId) {
           const recipientIdx = state.pathIndex || 1;
-          apiFetch(API_BASE + '/claim/escrow-balance?walletId=' + encodeURIComponent(state.walletId) + '&recipientIndex=' + encodeURIComponent(recipientIdx))
-            .then(r => r.ok ? r.json() : null)
-            .then(data => {
-              if (data) { state.escrowBalance = data; render(); }
-            })
-            .catch(() => {});
+          getAuthHeadersAsync().catch(() => ({})).then(function (claimAuthHeaders) {
+            apiFetch(API_BASE + '/claim/escrow-balance?walletId=' + encodeURIComponent(state.walletId) + '&recipientIndex=' + encodeURIComponent(recipientIdx), { headers: claimAuthHeaders })
+              .then(r => r.ok ? r.json() : null)
+              .then(data => {
+                if (data) { state.escrowBalance = data; render(); }
+              })
+              .catch(() => {});
+          });
         }
       } catch (err) {
         state.error = 'Wallet derivation failed: ' + (err.message || err);
@@ -5100,36 +5106,33 @@ function attachAppEvents() {
       render();
       try {
         const bal = state.escrowBalance;
-        const fromAddr = state.redeemWalletJson ? (state.redeemWalletJson.evm_address || '') : '';
 
-        // If escrow balance is available, execute on-chain claim
+        // If escrow balance is available, execute on-chain claim via acegf signing
         if (bal && bal.configured && bal.remainingShares && bal.remainingShares !== '0' && window.YaultEscrow) {
+          // Verify acegf WASM is available
+          if (!window.YaultWasm || !window.YaultWasm.acegf || typeof window.YaultWasm.acegf.evm_sign_eip1559_transaction_with_secondary !== 'function') {
+            throw new Error('acegf WASM not loaded or outdated. Please hard-refresh (Ctrl+Shift+R) to load the latest WASM.');
+          }
+          await window.YaultWasm.init();
+
+          // Verify mnemonic, passphrase & adminFactor are available from Step 1
+          if (!state.mnemonic || !state.passphrase) {
+            throw new Error('Credentials not available. Please go back to Step 1 and re-enter your mnemonic and passphrase.');
+          }
+          if (!state.releaseKey) {
+            throw new Error('AdminFactor not available. Please go back to Step 1 and re-enter your AdminFactor.');
+          }
+
+          // Derive the plan owner's address using all 3 factors
+          const ownerWallet = window.YaultWasm.acegf.view_wallet_unified_with_secondary_wasm(state.mnemonic, state.passphrase, state.releaseKey);
+          const ownerAddr = ownerWallet && ownerWallet.evm_address ? ownerWallet.evm_address : '';
+          if (!ownerAddr) {
+            throw new Error('Failed to derive plan owner address from mnemonic+passphrase+adminFactor.');
+          }
+
           const claimEscrowHeaders = await getAuthHeadersAsync().catch(function () { return {}; });
           const cfg = await window.YaultEscrow.getConfig(API_BASE, { headers: claimEscrowHeaders });
           if (!cfg.enabled) throw new Error('Escrow not configured on server');
-
-          // Contract requires msg.sender === walletOwner(walletIdHash). Get expected owner and ensure connected account matches.
-          const expectedOwner = await window.YaultEscrow.getWalletOwner(cfg.rpcUrl, cfg.escrowAddress, bal.walletIdHash);
-          const expectedOwnerNorm = (expectedOwner || '').toLowerCase();
-          const zeroAddr = '0x0000000000000000000000000000000000000000';
-          if (!expectedOwnerNorm || expectedOwnerNorm === zeroAddr) {
-            throw new Error('This escrow slot has no registered plan owner. Cannot claim.');
-          }
-
-          let connectedAccount = null;
-          if (window.ethereum && typeof window.ethereum.request === 'function') {
-            const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-            connectedAccount = (accounts && accounts[0]) ? accounts[0].toLowerCase() : null;
-          }
-          if (!connectedAccount) {
-            throw new Error('No EVM wallet connected. Please connect the plan owner wallet (the address used when the plan was created) to claim.');
-          }
-          if (expectedOwnerNorm && connectedAccount !== expectedOwnerNorm) {
-            throw new Error(
-              'Connected wallet is not the plan owner. The escrow contract only allows the plan owner to claim. ' +
-              'Please connect with the plan owner\'s EVM address (the same address that was used when depositing into escrow / that you can derive from your credential).'
-            );
-          }
 
           const claimTx = window.YaultEscrow.buildClaimTx(
             cfg.escrowAddress,
@@ -5140,10 +5143,48 @@ function attachAppEvents() {
             true,                 // redeemToAsset (C-05: must be true)
             cfg.chainId
           );
-          claimTx.from = connectedAccount;
 
-          let txHash = null;
-          txHash = await window.ethereum.request({ method: 'eth_sendTransaction', params: [claimTx] });
+          // Set up provider for nonce & gas estimation
+          const _ethersLib = typeof ethers !== 'undefined' ? ethers : window.ethers;
+          const rpcProvider = new _ethersLib.JsonRpcProvider(cfg.rpcUrl);
+
+          // Get nonce and gas params for the plan owner address
+          const nonce = await rpcProvider.getTransactionCount(ownerAddr);
+          const feeData = await rpcProvider.getFeeData();
+          const gasLimitBig = 300000n;
+          const maxPriorityFeeBig = feeData.maxPriorityFeePerGas || 1500000000n;
+          const maxFeeBig = feeData.maxFeePerGas || 30000000000n;
+          const chainIdBigInt = BigInt(cfg.chainId || 11155111);
+
+          // acegf expects all numeric params as hex strings
+          const toHex = (n) => '0x' + BigInt(n).toString(16);
+          const txData = claimTx.data || '0x';
+
+          // Sign with all 3 factors: mnemonic + passphrase + adminFactor → plan owner's signing key.
+          // The mnemonic was sealed with combine_passphrase(passphrase, adminFactor),
+          // so derive_keypair needs all 3 to correctly unseal and derive the EVM signing key.
+          const signedRawTx = window.YaultWasm.acegf.evm_sign_eip1559_transaction_with_secondary(
+            state.mnemonic,
+            state.passphrase,
+            state.releaseKey,    // adminFactor as secondary_passphrase
+            chainIdBigInt,
+            toHex(nonce),
+            toHex(maxPriorityFeeBig),
+            toHex(maxFeeBig),
+            toHex(gasLimitBig),
+            cfg.escrowAddress,   // to: escrow contract
+            '0x0',               // value = 0
+            txData               // data: claim() calldata
+          );
+
+          if (!signedRawTx || signedRawTx.startsWith('error:')) {
+            throw new Error('acegf signing failed: ' + (signedRawTx || 'unknown error'));
+          }
+
+          // Broadcast signed transaction via RPC
+          const rawHex = signedRawTx.startsWith('0x') ? signedRawTx : '0x' + signedRawTx;
+          const txResp = await rpcProvider.broadcastTransaction(rawHex);
+          const txHash = txResp.hash;
 
           // Format display amount
           const decimals = bal.underlyingDecimals || 18;
@@ -5152,7 +5193,7 @@ function attachAppEvents() {
 
           state.transferResult = {
             chain: 'ethereum (sepolia)',
-            from: fromAddr,
+            from: ownerAddr,
             to,
             amount: displayAmt + ' ' + symbol,
             shares: bal.remainingShares,
@@ -5162,6 +5203,7 @@ function attachAppEvents() {
           };
           reportActivity('claim', txHash, displayAmt, { asset: symbol });
         } else {
+          const fromAddr = state.redeemWalletJson ? (state.redeemWalletJson.evm_address || '') : '';
           // Fallback: no escrow balance, show prepared result
           state.transferResult = {
             chain: 'ethereum',
