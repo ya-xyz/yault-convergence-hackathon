@@ -146,18 +146,279 @@ function passArray8ToWasm0(arg, malloc) {
     return ptr;
 }
 /**
- * View wallet using PRF key (skips passphrase decryption in JS)
+ * Decrypt with mnemonic - returns base64-encoded plaintext on success, or "error:..." on failure
  * @param {string} mnemonic
- * @param {Uint8Array} prf_key
+ * @param {string} passphrase
+ * @param {string} ephemeral_pub_b64
+ * @param {string} encrypted_aes_key_b64
+ * @param {string} iv_b64
+ * @param {Uint8Array} encrypted_data
+ * @returns {string}
+ */
+export function acegf_decrypt_with_mnemonic_wasm(mnemonic, passphrase, ephemeral_pub_b64, encrypted_aes_key_b64, iv_b64, encrypted_data) {
+    let deferred7_0;
+    let deferred7_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(ephemeral_pub_b64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(encrypted_aes_key_b64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len3 = WASM_VECTOR_LEN;
+        const ptr4 = passStringToWasm0(iv_b64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len4 = WASM_VECTOR_LEN;
+        const ptr5 = passArray8ToWasm0(encrypted_data, wasm.__wbindgen_export3);
+        const len5 = WASM_VECTOR_LEN;
+        wasm.acegf_decrypt_with_mnemonic_wasm(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred7_0 = r0;
+        deferred7_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred7_0, deferred7_1, 1);
+    }
+}
+
+/**
+ * Same as change_passphrase but with AdminFactor as secondary_passphrase (for path credential generation).
+ * Use for wallets that were CREATED with secondary. Returns new mnemonic on success, None on failure.
+ * @param {string} existing_mnemonic
+ * @param {string} existing_passphrase
+ * @param {string} new_passphrase
+ * @param {string} admin_factor
+ * @returns {string | undefined}
+ */
+export function acegf_change_passphrase_with_admin_wasm(existing_mnemonic, existing_passphrase, new_passphrase, admin_factor) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(existing_mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(existing_passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(new_passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(admin_factor, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len3 = WASM_VECTOR_LEN;
+        wasm.acegf_change_passphrase_with_admin_wasm(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        let v5;
+        if (r0 !== 0) {
+            v5 = getStringFromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export2(r0, r1 * 1, 1);
+        }
+        return v5;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * @param {string} mnemonic
+ * @param {string} passphrase
+ * @param {string | null} [secondary_passphrase]
  * @returns {any}
  */
-export function view_wallet_with_prf_wasm(mnemonic, prf_key) {
+export function view_wallet_rev32_with_secondary_wasm(mnemonic, passphrase, secondary_passphrase) {
     const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
     const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
+    const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
     const len1 = WASM_VECTOR_LEN;
-    const ret = wasm.view_wallet_with_prf_wasm(ptr0, len0, ptr1, len1);
+    var ptr2 = isLikeNone(secondary_passphrase) ? 0 : passStringToWasm0(secondary_passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+    var len2 = WASM_VECTOR_LEN;
+    const ret = wasm.view_wallet_rev32_with_secondary_wasm(ptr0, len0, ptr1, len1, ptr2, len2);
     return takeObject(ret);
+}
+
+/**
+ * Get EVM address from mnemonic
+ *
+ * Returns the same address for all EVM chains (Ethereum, BSC, Polygon, etc.)
+ * since they all use the same address derivation.
+ *
+ * Parameters:
+ * - mnemonic: ACE-GF mnemonic
+ * - passphrase: wallet passphrase
+ *
+ * Returns: checksummed address (EIP-55 format, e.g., "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"),
+ *          or "error:..." on failure
+ * @param {string} mnemonic
+ * @param {string} passphrase
+ * @returns {string}
+ */
+export function evm_get_address(mnemonic, passphrase) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.evm_get_address(retptr, ptr0, len0, ptr1, len1);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred3_0 = r0;
+        deferred3_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * Sign a Solana serialized transaction with context isolation (passphrase path)
+ * @param {string} mnemonic
+ * @param {string} passphrase
+ * @param {string} context
+ * @param {string} serialized_tx_base64
+ * @returns {string}
+ */
+export function solana_sign_transaction_with_context(mnemonic, passphrase, context, serialized_tx_base64) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(context, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(serialized_tx_base64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len3 = WASM_VECTOR_LEN;
+        wasm.solana_sign_transaction_with_context(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred5_0 = r0;
+        deferred5_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
+ * 获取 Associated Token Account 地址
+ *
+ * 参数:
+ * - wallet: 钱包地址 (base58)
+ * - mint: Token mint 地址 (base58)
+ *
+ * 返回: ATA 地址 (base58)
+ * @param {string} wallet
+ * @param {string} mint
+ * @returns {string}
+ */
+export function solana_get_ata_address(wallet, mint) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(wallet, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(mint, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.solana_get_ata_address(retptr, ptr0, len0, ptr1, len1);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred3_0 = r0;
+        deferred3_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * Get Bitcoin address from mnemonic
+ *
+ * Returns Native SegWit address (bc1q...) for mainnet
+ *
+ * Parameters:
+ * - mnemonic: ACE-GF mnemonic
+ * - passphrase: wallet passphrase
+ * - testnet: true for testnet (tb1q...), false for mainnet (bc1q...)
+ *
+ * Returns: Bitcoin address or "error:..." on failure
+ * @param {string} mnemonic
+ * @param {string} passphrase
+ * @param {boolean} testnet
+ * @returns {string}
+ */
+export function bitcoin_get_address(mnemonic, passphrase, testnet) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.bitcoin_get_address(retptr, ptr0, len0, ptr1, len1, testnet);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred3_0 = r0;
+        deferred3_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * View REV32 wallet (restore from 24-word mnemonic)
+ * Automatically detects REV32 format and uses the new derivation path
+ * @param {string} mnemonic
+ * @param {string} passphrase
+ * @returns {any}
+ */
+export function view_wallet_rev32_wasm(mnemonic, passphrase) {
+    const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.view_wallet_rev32_wasm(ptr0, len0, ptr1, len1);
+    return takeObject(ret);
+}
+
+/**
+ * Sign EVM personal message using PRF key
+ * @param {string} mnemonic
+ * @param {Uint8Array} prf_key
+ * @param {string} message
+ * @returns {string}
+ */
+export function evm_sign_personal_message_with_prf(mnemonic, prf_key, message) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(message, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        wasm.evm_sign_personal_message_with_prf(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred4_0 = r0;
+        deferred4_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
+    }
 }
 
 /**
@@ -192,80 +453,130 @@ export function acegf_sign_message_with_prf_wasm(mnemonic, prf_key, message, cur
 }
 
 /**
- * @param {string} passphrase
- * @param {string | null} [secondary_passphrase]
- * @returns {any}
- */
-export function generate_with_secondary_wasm(passphrase, secondary_passphrase) {
-    const ptr0 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-    const len0 = WASM_VECTOR_LEN;
-    var ptr1 = isLikeNone(secondary_passphrase) ? 0 : passStringToWasm0(secondary_passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-    var len1 = WASM_VECTOR_LEN;
-    const ret = wasm.generate_with_secondary_wasm(ptr0, len0, ptr1, len1);
-    return takeObject(ret);
-}
-
-/**
- * Sign EVM EIP-1559 transaction with context isolation (PRF path)
- * @param {string} mnemonic
- * @param {Uint8Array} prf_key
- * @param {string} context
- * @param {bigint} chain_id
- * @param {string} nonce
- * @param {string} max_priority_fee_per_gas
- * @param {string} max_fee_per_gas
- * @param {string} gas_limit
- * @param {string} to
- * @param {string} value
- * @param {string} data
+ * Convert a Bitcoin bech32/bech32m address between mainnet and testnet
+ *
+ * Examples:
+ *   bc1p... → tb1p... (mainnet to testnet)
+ *   tb1p... → bc1p... (testnet to mainnet)
+ *   bc1q... → tb1q... (mainnet to testnet)
+ *
+ * Parameters:
+ * - address: Bitcoin bech32/bech32m address
+ * - testnet: true to convert to testnet (tb1...), false for mainnet (bc1...)
+ *
+ * Returns: converted address, or "error:..." on failure
+ * @param {string} address
+ * @param {boolean} testnet
  * @returns {string}
  */
-export function evm_sign_eip1559_transaction_with_context_prf(mnemonic, prf_key, context, chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas, gas_limit, to, value, data) {
-    let deferred11_0;
-    let deferred11_1;
+export function bitcoin_convert_address_network(address, testnet) {
+    let deferred2_0;
+    let deferred2_1;
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const ptr0 = passStringToWasm0(address, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
         const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(context, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len2 = WASM_VECTOR_LEN;
-        const ptr3 = passStringToWasm0(nonce, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len3 = WASM_VECTOR_LEN;
-        const ptr4 = passStringToWasm0(max_priority_fee_per_gas, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len4 = WASM_VECTOR_LEN;
-        const ptr5 = passStringToWasm0(max_fee_per_gas, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len5 = WASM_VECTOR_LEN;
-        const ptr6 = passStringToWasm0(gas_limit, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len6 = WASM_VECTOR_LEN;
-        const ptr7 = passStringToWasm0(to, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len7 = WASM_VECTOR_LEN;
-        const ptr8 = passStringToWasm0(value, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len8 = WASM_VECTOR_LEN;
-        const ptr9 = passStringToWasm0(data, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len9 = WASM_VECTOR_LEN;
-        wasm.evm_sign_eip1559_transaction_with_context_prf(retptr, ptr0, len0, ptr1, len1, ptr2, len2, chain_id, ptr3, len3, ptr4, len4, ptr5, len5, ptr6, len6, ptr7, len7, ptr8, len8, ptr9, len9);
+        wasm.bitcoin_convert_address_network(retptr, ptr0, len0, testnet);
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred11_0 = r0;
-        deferred11_1 = r1;
+        deferred2_0 = r0;
+        deferred2_1 = r1;
         return getStringFromWasm0(r0, r1);
     } finally {
         wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred11_0, deferred11_1, 1);
+        wasm.__wbindgen_export2(deferred2_0, deferred2_1, 1);
     }
 }
 
 /**
- * Sign EVM personal message with context isolation (passphrase path)
+ * Sign a Bitcoin SegWit transaction
+ *
+ * Parameters:
+ * - mnemonic: ACE-GF mnemonic
+ * - passphrase: wallet passphrase
+ * - tx_json: JSON string containing unsigned transaction data
+ *   Format: {
+ *     "version": 2,
+ *     "inputs": [{"txid": "hex", "vout": 0, "value": 10000, "sequence": 4294967293}],
+ *     "outputs": [{"value": 9000, "script_pubkey": "hex"}],
+ *     "locktime": 0
+ *   }
+ *
+ * Returns: signed transaction as hex string, or "error:..." on failure
+ * @param {string} mnemonic
+ * @param {string} passphrase
+ * @param {string} tx_json
+ * @returns {string}
+ */
+export function bitcoin_sign_transaction(mnemonic, passphrase, tx_json) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(tx_json, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        wasm.bitcoin_sign_transaction(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred4_0 = r0;
+        deferred4_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * Get Bitcoin Taproot address from mnemonic
+ *
+ * Returns Taproot address (bc1p... for mainnet, tb1p... for testnet)
+ *
+ * Parameters:
+ * - mnemonic: ACE-GF mnemonic
+ * - passphrase: wallet passphrase
+ * - testnet: true for testnet (tb1p...), false for mainnet (bc1p...)
+ *
+ * Returns: Bitcoin Taproot address or "error:..." on failure
+ * @param {string} mnemonic
+ * @param {string} passphrase
+ * @param {boolean} testnet
+ * @returns {string}
+ */
+export function bitcoin_get_taproot_address(mnemonic, passphrase, testnet) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.bitcoin_get_taproot_address(retptr, ptr0, len0, ptr1, len1, testnet);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred3_0 = r0;
+        deferred3_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * Sign EVM typed data with context isolation (passphrase path)
  * @param {string} mnemonic
  * @param {string} passphrase
  * @param {string} context
- * @param {string} message
+ * @param {string} typed_data_hash
  * @returns {string}
  */
-export function evm_sign_personal_message_with_context(mnemonic, passphrase, context, message) {
+export function evm_sign_typed_data_with_context(mnemonic, passphrase, context, typed_data_hash) {
     let deferred5_0;
     let deferred5_1;
     try {
@@ -276,9 +587,9 @@ export function evm_sign_personal_message_with_context(mnemonic, passphrase, con
         const len1 = WASM_VECTOR_LEN;
         const ptr2 = passStringToWasm0(context, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
         const len2 = WASM_VECTOR_LEN;
-        const ptr3 = passStringToWasm0(message, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const ptr3 = passStringToWasm0(typed_data_hash, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
         const len3 = WASM_VECTOR_LEN;
-        wasm.evm_sign_personal_message_with_context(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+        wasm.evm_sign_typed_data_with_context(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         deferred5_0 = r0;
@@ -291,14 +602,494 @@ export function evm_sign_personal_message_with_context(mnemonic, passphrase, con
 }
 
 /**
+ * Sign an arbitrary message with Solana context-derived Ed25519 key (passphrase path)
+ * @param {string} mnemonic
  * @param {string} passphrase
- * @returns {any}
+ * @param {string} context
+ * @param {string} message
+ * @returns {string}
  */
-export function generate_wasm(passphrase) {
-    const ptr0 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-    const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.generate_wasm(ptr0, len0);
-    return takeObject(ret);
+export function solana_sign_message_with_context(mnemonic, passphrase, context, message) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(context, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(message, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len3 = WASM_VECTOR_LEN;
+        wasm.solana_sign_message_with_context(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred5_0 = r0;
+        deferred5_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
+ * Sign EVM EIP-1559 Transaction using PRF key
+ * @param {string} mnemonic
+ * @param {Uint8Array} prf_key
+ * @param {bigint} chain_id
+ * @param {string} nonce
+ * @param {string} max_priority_fee_per_gas
+ * @param {string} max_fee_per_gas
+ * @param {string} gas_limit
+ * @param {string} to
+ * @param {string} value
+ * @param {string} data
+ * @returns {string}
+ */
+export function evm_sign_eip1559_transaction_with_prf(mnemonic, prf_key, chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas, gas_limit, to, value, data) {
+    let deferred10_0;
+    let deferred10_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(nonce, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(max_priority_fee_per_gas, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len3 = WASM_VECTOR_LEN;
+        const ptr4 = passStringToWasm0(max_fee_per_gas, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len4 = WASM_VECTOR_LEN;
+        const ptr5 = passStringToWasm0(gas_limit, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len5 = WASM_VECTOR_LEN;
+        const ptr6 = passStringToWasm0(to, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len6 = WASM_VECTOR_LEN;
+        const ptr7 = passStringToWasm0(value, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len7 = WASM_VECTOR_LEN;
+        const ptr8 = passStringToWasm0(data, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len8 = WASM_VECTOR_LEN;
+        wasm.evm_sign_eip1559_transaction_with_prf(retptr, ptr0, len0, ptr1, len1, chain_id, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5, ptr6, len6, ptr7, len7, ptr8, len8);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred10_0 = r0;
+        deferred10_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred10_0, deferred10_1, 1);
+    }
+}
+
+/**
+ * Get EVM address with context isolation (PRF path)
+ * @param {string} mnemonic
+ * @param {Uint8Array} prf_key
+ * @param {string} context
+ * @returns {string}
+ */
+export function evm_get_address_with_context_prf(mnemonic, prf_key, context) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(context, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        wasm.evm_get_address_with_context_prf(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred4_0 = r0;
+        deferred4_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * Sign EVM typed data using PRF key
+ * @param {string} mnemonic
+ * @param {Uint8Array} prf_key
+ * @param {string} typed_data_hash
+ * @returns {string}
+ */
+export function evm_sign_typed_data_with_prf(mnemonic, prf_key, typed_data_hash) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(typed_data_hash, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        wasm.evm_sign_typed_data_with_prf(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred4_0 = r0;
+        deferred4_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * Compute transaction hash from signed transaction
+ *
+ * Parameters:
+ * - signed_tx: signed transaction hex string
+ *
+ * Returns: transaction hash as hex string (e.g., "0x..."),
+ *          or "error:..." on failure
+ * @param {string} signed_tx
+ * @returns {string}
+ */
+export function evm_compute_tx_hash(signed_tx) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(signed_tx, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.evm_compute_tx_hash(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred2_0 = r0;
+        deferred2_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
+ * Decrypt with PRF key (no passphrase in JS)
+ * @param {string} mnemonic
+ * @param {Uint8Array} prf_key
+ * @param {string} ephemeral_pub_b64
+ * @param {string} encrypted_aes_key_b64
+ * @param {string} iv_b64
+ * @param {Uint8Array} encrypted_data
+ * @returns {string}
+ */
+export function acegf_decrypt_with_prf_wasm(mnemonic, prf_key, ephemeral_pub_b64, encrypted_aes_key_b64, iv_b64, encrypted_data) {
+    let deferred7_0;
+    let deferred7_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(ephemeral_pub_b64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(encrypted_aes_key_b64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len3 = WASM_VECTOR_LEN;
+        const ptr4 = passStringToWasm0(iv_b64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len4 = WASM_VECTOR_LEN;
+        const ptr5 = passArray8ToWasm0(encrypted_data, wasm.__wbindgen_export3);
+        const len5 = WASM_VECTOR_LEN;
+        wasm.acegf_decrypt_with_prf_wasm(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred7_0 = r0;
+        deferred7_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred7_0, deferred7_1, 1);
+    }
+}
+
+/**
+ * Sign EVM personal message with context isolation (PRF path)
+ * @param {string} mnemonic
+ * @param {Uint8Array} prf_key
+ * @param {string} context
+ * @param {string} message
+ * @returns {string}
+ */
+export function evm_sign_personal_message_with_context_prf(mnemonic, prf_key, context, message) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(context, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(message, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len3 = WASM_VECTOR_LEN;
+        wasm.evm_sign_personal_message_with_context_prf(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred5_0 = r0;
+        deferred5_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
+ * @param {string} mnemonic
+ * @param {string} passphrase
+ * @param {string | null | undefined} secondary_passphrase
+ * @param {string} to_pubkey
+ * @param {bigint} lamports
+ * @param {string} recent_blockhash
+ * @returns {string}
+ */
+export function solana_sign_system_transfer_with_secondary(mnemonic, passphrase, secondary_passphrase, to_pubkey, lamports, recent_blockhash) {
+    let deferred6_0;
+    let deferred6_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        var ptr2 = isLikeNone(secondary_passphrase) ? 0 : passStringToWasm0(secondary_passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        var len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(to_pubkey, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len3 = WASM_VECTOR_LEN;
+        const ptr4 = passStringToWasm0(recent_blockhash, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len4 = WASM_VECTOR_LEN;
+        wasm.solana_sign_system_transfer_with_secondary(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, lamports, ptr4, len4);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred6_0 = r0;
+        deferred6_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred6_0, deferred6_1, 1);
+    }
+}
+
+/**
+ * Get owner public key for registry authorization
+ * Returns base64-encoded Ed25519 public key, or "error:..." on failure
+ * @param {string} password
+ * @param {string} normalized_email
+ * @returns {string}
+ */
+export function vadar_get_owner_pubkey(password, normalized_email) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(password, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(normalized_email, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.vadar_get_owner_pubkey(retptr, ptr0, len0, ptr1, len1);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred3_0 = r0;
+        deferred3_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * Encode ERC20 transfer function call data
+ *
+ * Use this to build the `data` field for ERC20 token transfers.
+ *
+ * Parameters:
+ * - to: recipient address (hex string)
+ * - amount: amount to transfer in token's smallest unit (hex string)
+ *
+ * Returns: encoded function call data as hex string,
+ *          or "error:..." on failure
+ * @param {string} to
+ * @param {string} amount
+ * @returns {string}
+ */
+export function evm_encode_erc20_transfer(to, amount) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(to, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(amount, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.evm_encode_erc20_transfer(retptr, ptr0, len0, ptr1, len1);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred3_0 = r0;
+        deferred3_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * Sign Solana system transfer using PRF key
+ * @param {string} mnemonic
+ * @param {Uint8Array} prf_key
+ * @param {string} to_pubkey
+ * @param {bigint} lamports
+ * @param {string} recent_blockhash
+ * @returns {string}
+ */
+export function solana_sign_system_transfer_with_prf(mnemonic, prf_key, to_pubkey, lamports, recent_blockhash) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(to_pubkey, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(recent_blockhash, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len3 = WASM_VECTOR_LEN;
+        wasm.solana_sign_system_transfer_with_prf(retptr, ptr0, len0, ptr1, len1, ptr2, len2, lamports, ptr3, len3);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred5_0 = r0;
+        deferred5_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
+ * Normalize email for VA-DAR
+ * - Lowercase
+ * - Trim whitespace
+ * - Remove dots from local part
+ * - Remove +suffix from local part
+ * @param {string} email
+ * @returns {string}
+ */
+export function vadar_normalize_email(email) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(email, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.vadar_normalize_email(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred2_0 = r0;
+        deferred2_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
+ * Compute commit hash of SA2 artifact
+ * Returns hex-encoded SHA256 hash, or "error:..." on failure
+ * @param {string} sa2_base64
+ * @returns {string}
+ */
+export function vadar_compute_commit(sa2_base64) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(sa2_base64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.vadar_compute_commit(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred2_0 = r0;
+        deferred2_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
+ * DEBUG: Test unseal with exact parameters and return detailed results
+ * @param {string} mnemonic
+ * @param {string} passphrase
+ * @param {string} admin_factor
+ * @returns {string}
+ */
+export function debug_unseal_test(mnemonic, passphrase, admin_factor) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(admin_factor, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        wasm.debug_unseal_test(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred4_0 = r0;
+        deferred4_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * XIdentity sign - returns base64 signature on success, or "error:..." on failure
+ * @param {string} mnemonic
+ * @param {string} passphrase
+ * @param {Uint8Array} message
+ * @returns {string}
+ */
+export function acegf_xidentity_sign_wasm(mnemonic, passphrase, message) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passArray8ToWasm0(message, wasm.__wbindgen_export3);
+        const len2 = WASM_VECTOR_LEN;
+        wasm.acegf_xidentity_sign_wasm(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred4_0 = r0;
+        deferred4_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
+    }
 }
 
 /**
@@ -369,83 +1160,25 @@ export function evm_sign_eip1559_transaction(mnemonic, passphrase, chain_id, non
 }
 
 /**
- * Compute commit hash of SA2 artifact
- * Returns hex-encoded SHA256 hash, or "error:..." on failure
+ * Unseal SA2 artifact to recover mnemonic
+ * Returns mnemonic string, or "error:..." on failure
  * @param {string} sa2_base64
+ * @param {string} password
+ * @param {string} normalized_email
  * @returns {string}
  */
-export function vadar_compute_commit(sa2_base64) {
-    let deferred2_0;
-    let deferred2_1;
+export function vadar_unseal_sa2(sa2_base64, password, normalized_email) {
+    let deferred4_0;
+    let deferred4_1;
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
         const ptr0 = passStringToWasm0(sa2_base64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
         const len0 = WASM_VECTOR_LEN;
-        wasm.vadar_compute_commit(retptr, ptr0, len0);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred2_0 = r0;
-        deferred2_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred2_0, deferred2_1, 1);
-    }
-}
-
-/**
- * Compute transaction hash from signed transaction
- *
- * Parameters:
- * - signed_tx: signed transaction hex string
- *
- * Returns: transaction hash as hex string (e.g., "0x..."),
- *          or "error:..." on failure
- * @param {string} signed_tx
- * @returns {string}
- */
-export function evm_compute_tx_hash(signed_tx) {
-    let deferred2_0;
-    let deferred2_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(signed_tx, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        wasm.evm_compute_tx_hash(retptr, ptr0, len0);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred2_0 = r0;
-        deferred2_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred2_0, deferred2_1, 1);
-    }
-}
-
-/**
- * Sign a Bitcoin SegWit transaction using PRF key (no passphrase in JS)
- *
- * Parameters same as bitcoin_sign_transaction, but uses prf_key instead of passphrase.
- *
- * Returns: signed transaction as hex string, or "error:..." on failure
- * @param {string} mnemonic
- * @param {Uint8Array} prf_key
- * @param {string} tx_json
- * @returns {string}
- */
-export function bitcoin_sign_transaction_prf(mnemonic, prf_key, tx_json) {
-    let deferred4_0;
-    let deferred4_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
+        const ptr1 = passStringToWasm0(password, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
         const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(tx_json, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const ptr2 = passStringToWasm0(normalized_email, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
         const len2 = WASM_VECTOR_LEN;
-        wasm.bitcoin_sign_transaction_prf(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        wasm.vadar_unseal_sa2(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         deferred4_0 = r0;
@@ -458,733 +1191,55 @@ export function bitcoin_sign_transaction_prf(mnemonic, prf_key, tx_json) {
 }
 
 /**
- * Sign Solana system transfer using PRF key
- * @param {string} mnemonic
- * @param {Uint8Array} prf_key
- * @param {string} to_pubkey
- * @param {bigint} lamports
- * @param {string} recent_blockhash
- * @returns {string}
- */
-export function solana_sign_system_transfer_with_prf(mnemonic, prf_key, to_pubkey, lamports, recent_blockhash) {
-    let deferred5_0;
-    let deferred5_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(to_pubkey, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len2 = WASM_VECTOR_LEN;
-        const ptr3 = passStringToWasm0(recent_blockhash, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len3 = WASM_VECTOR_LEN;
-        wasm.solana_sign_system_transfer_with_prf(retptr, ptr0, len0, ptr1, len1, ptr2, len2, lamports, ptr3, len3);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred5_0 = r0;
-        deferred5_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred5_0, deferred5_1, 1);
-    }
-}
-
-/**
+ * Sign message - returns base64 signature on success, or "error:..." on failure
  * @param {string} mnemonic
  * @param {string} passphrase
- * @param {string | null} [secondary_passphrase]
- * @returns {any}
- */
-export function view_wallet_unified_with_secondary_wasm(mnemonic, passphrase, secondary_passphrase) {
-    const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-    const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-    const len1 = WASM_VECTOR_LEN;
-    var ptr2 = isLikeNone(secondary_passphrase) ? 0 : passStringToWasm0(secondary_passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-    var len2 = WASM_VECTOR_LEN;
-    const ret = wasm.view_wallet_unified_with_secondary_wasm(ptr0, len0, ptr1, len1, ptr2, len2);
-    return takeObject(ret);
-}
-
-/**
- * Sign Solana external transaction using PRF key
- * @param {string} mnemonic
- * @param {Uint8Array} prf_key
- * @param {string} serialized_tx_base64
- * @returns {string}
- */
-export function solana_sign_transaction_with_prf(mnemonic, prf_key, serialized_tx_base64) {
-    let deferred4_0;
-    let deferred4_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(serialized_tx_base64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len2 = WASM_VECTOR_LEN;
-        wasm.solana_sign_transaction_with_prf(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred4_0 = r0;
-        deferred4_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
-    }
-}
-
-/**
- * View wallet with context isolation (PRF path)
- * Uses PRF key → base_key → identity_root → context-isolated seeds
- * @param {string} mnemonic
- * @param {Uint8Array} prf_key
- * @param {string} context
- * @returns {any}
- */
-export function view_wallet_with_context_prf_wasm(mnemonic, prf_key, context) {
-    const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-    const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
-    const len1 = WASM_VECTOR_LEN;
-    const ptr2 = passStringToWasm0(context, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-    const len2 = WASM_VECTOR_LEN;
-    const ret = wasm.view_wallet_with_context_prf_wasm(ptr0, len0, ptr1, len1, ptr2, len2);
-    return takeObject(ret);
-}
-
-/**
- * Sign message - returns signature bytes on success, or error string prefixed with "error:" on failure
- * @param {string} mnemonic
- * @param {string} passphrase
- * @param {string | null | undefined} secondary_passphrase
  * @param {Uint8Array} message
  * @param {number} curve
  * @returns {string}
  */
-export function acegf_sign_message_with_secondary_wasm(mnemonic, passphrase, secondary_passphrase, message, curve) {
-    let deferred5_0;
-    let deferred5_1;
+export function acegf_sign_message_wasm(mnemonic, passphrase, message, curve) {
+    let deferred4_0;
+    let deferred4_1;
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
         const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
         const len1 = WASM_VECTOR_LEN;
-        var ptr2 = isLikeNone(secondary_passphrase) ? 0 : passStringToWasm0(secondary_passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        var len2 = WASM_VECTOR_LEN;
-        const ptr3 = passArray8ToWasm0(message, wasm.__wbindgen_export3);
-        const len3 = WASM_VECTOR_LEN;
-        wasm.acegf_sign_message_with_secondary_wasm(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, curve);
+        const ptr2 = passArray8ToWasm0(message, wasm.__wbindgen_export3);
+        const len2 = WASM_VECTOR_LEN;
+        wasm.acegf_sign_message_wasm(retptr, ptr0, len0, ptr1, len1, ptr2, len2, curve);
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred5_0 = r0;
-        deferred5_1 = r1;
+        deferred4_0 = r0;
+        deferred4_1 = r1;
         return getStringFromWasm0(r0, r1);
     } finally {
         wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred5_0, deferred5_1, 1);
+        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
     }
 }
 
 /**
- * Sign a Bitcoin SegWit transaction
+ * Sign a personal message (EIP-191)
+ *
+ * Used for "Sign Message" functionality in wallets.
+ * The message is prefixed with "\x19Ethereum Signed Message:\n{length}"
  *
  * Parameters:
  * - mnemonic: ACE-GF mnemonic
  * - passphrase: wallet passphrase
- * - tx_json: JSON string containing unsigned transaction data
- *   Format: {
- *     "version": 2,
- *     "inputs": [{"txid": "hex", "vout": 0, "value": 10000, "sequence": 4294967293}],
- *     "outputs": [{"value": 9000, "script_pubkey": "hex"}],
- *     "locktime": 0
- *   }
- *
- * Returns: signed transaction as hex string, or "error:..." on failure
- * @param {string} mnemonic
- * @param {string} passphrase
- * @param {string} tx_json
- * @returns {string}
- */
-export function bitcoin_sign_transaction(mnemonic, passphrase, tx_json) {
-    let deferred4_0;
-    let deferred4_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(tx_json, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len2 = WASM_VECTOR_LEN;
-        wasm.bitcoin_sign_transaction(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred4_0 = r0;
-        deferred4_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
-    }
-}
-
-/**
- * @param {string} mnemonic
- * @param {string} passphrase
- * @param {string | null} [secondary_passphrase]
- * @returns {any}
- */
-export function view_wallet_with_secondary_wasm(mnemonic, passphrase, secondary_passphrase) {
-    const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-    const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-    const len1 = WASM_VECTOR_LEN;
-    var ptr2 = isLikeNone(secondary_passphrase) ? 0 : passStringToWasm0(secondary_passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-    var len2 = WASM_VECTOR_LEN;
-    const ret = wasm.view_wallet_with_secondary_wasm(ptr0, len0, ptr1, len1, ptr2, len2);
-    return takeObject(ret);
-}
-
-/**
- * Sign registry update for create/update operations
- * Returns base64-encoded Ed25519 signature, or "error:..." on failure
- * @param {string} password
- * @param {string} normalized_email
- * @param {string} discovery_id
- * @param {string} cid
- * @param {bigint} version
- * @param {string} commit
- * @returns {string}
- */
-export function vadar_sign_registry_update(password, normalized_email, discovery_id, cid, version, commit) {
-    let deferred6_0;
-    let deferred6_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(password, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(normalized_email, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(discovery_id, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len2 = WASM_VECTOR_LEN;
-        const ptr3 = passStringToWasm0(cid, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len3 = WASM_VECTOR_LEN;
-        const ptr4 = passStringToWasm0(commit, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len4 = WASM_VECTOR_LEN;
-        wasm.vadar_sign_registry_update(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, version, ptr4, len4);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred6_0 = r0;
-        deferred6_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred6_0, deferred6_1, 1);
-    }
-}
-
-/**
- * Get EVM address with context isolation (PRF path)
- * @param {string} mnemonic
- * @param {Uint8Array} prf_key
- * @param {string} context
- * @returns {string}
- */
-export function evm_get_address_with_context_prf(mnemonic, prf_key, context) {
-    let deferred4_0;
-    let deferred4_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(context, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len2 = WASM_VECTOR_LEN;
-        wasm.evm_get_address_with_context_prf(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred4_0 = r0;
-        deferred4_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
-    }
-}
-
-/**
- * Get EVM address with context isolation (passphrase path)
- * @param {string} mnemonic
- * @param {string} passphrase
- * @param {string} context
- * @returns {string}
- */
-export function evm_get_address_with_context(mnemonic, passphrase, context) {
-    let deferred4_0;
-    let deferred4_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(context, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len2 = WASM_VECTOR_LEN;
-        wasm.evm_get_address_with_context(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred4_0 = r0;
-        deferred4_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
-    }
-}
-
-/**
- * Generate a new REV32 wallet with passphrase and optional secondary passphrase
- * @param {string} passphrase
- * @param {string | null} [secondary_passphrase]
- * @returns {any}
- */
-export function generate_rev32_with_secondary_wasm(passphrase, secondary_passphrase) {
-    const ptr0 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-    const len0 = WASM_VECTOR_LEN;
-    var ptr1 = isLikeNone(secondary_passphrase) ? 0 : passStringToWasm0(secondary_passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-    var len1 = WASM_VECTOR_LEN;
-    const ret = wasm.generate_rev32_with_secondary_wasm(ptr0, len0, ptr1, len1);
-    return takeObject(ret);
-}
-
-/**
- * Decrypt with mnemonic - returns base64-encoded plaintext on success, or "error:..." on failure
- * @param {string} mnemonic
- * @param {string} passphrase
- * @param {string} ephemeral_pub_b64
- * @param {string} encrypted_aes_key_b64
- * @param {string} iv_b64
- * @param {Uint8Array} encrypted_data
- * @returns {string}
- */
-export function acegf_decrypt_with_mnemonic_wasm(mnemonic, passphrase, ephemeral_pub_b64, encrypted_aes_key_b64, iv_b64, encrypted_data) {
-    let deferred7_0;
-    let deferred7_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(ephemeral_pub_b64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len2 = WASM_VECTOR_LEN;
-        const ptr3 = passStringToWasm0(encrypted_aes_key_b64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len3 = WASM_VECTOR_LEN;
-        const ptr4 = passStringToWasm0(iv_b64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len4 = WASM_VECTOR_LEN;
-        const ptr5 = passArray8ToWasm0(encrypted_data, wasm.__wbindgen_export3);
-        const len5 = WASM_VECTOR_LEN;
-        wasm.acegf_decrypt_with_mnemonic_wasm(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred7_0 = r0;
-        deferred7_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred7_0, deferred7_1, 1);
-    }
-}
-
-/**
- * Compute DH shared key using PRF key
- * @param {string} mnemonic
- * @param {Uint8Array} prf_key
- * @param {string} peer_pub_b64
- * @returns {string}
- */
-export function acegf_compute_dh_key_with_prf_wasm(mnemonic, prf_key, peer_pub_b64) {
-    let deferred4_0;
-    let deferred4_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(peer_pub_b64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len2 = WASM_VECTOR_LEN;
-        wasm.acegf_compute_dh_key_with_prf_wasm(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred4_0 = r0;
-        deferred4_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
-    }
-}
-
-/**
- * Sign EVM EIP-1559 Transaction using PRF key
- * @param {string} mnemonic
- * @param {Uint8Array} prf_key
- * @param {bigint} chain_id
- * @param {string} nonce
- * @param {string} max_priority_fee_per_gas
- * @param {string} max_fee_per_gas
- * @param {string} gas_limit
- * @param {string} to
- * @param {string} value
- * @param {string} data
- * @returns {string}
- */
-export function evm_sign_eip1559_transaction_with_prf(mnemonic, prf_key, chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas, gas_limit, to, value, data) {
-    let deferred10_0;
-    let deferred10_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(nonce, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len2 = WASM_VECTOR_LEN;
-        const ptr3 = passStringToWasm0(max_priority_fee_per_gas, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len3 = WASM_VECTOR_LEN;
-        const ptr4 = passStringToWasm0(max_fee_per_gas, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len4 = WASM_VECTOR_LEN;
-        const ptr5 = passStringToWasm0(gas_limit, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len5 = WASM_VECTOR_LEN;
-        const ptr6 = passStringToWasm0(to, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len6 = WASM_VECTOR_LEN;
-        const ptr7 = passStringToWasm0(value, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len7 = WASM_VECTOR_LEN;
-        const ptr8 = passStringToWasm0(data, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len8 = WASM_VECTOR_LEN;
-        wasm.evm_sign_eip1559_transaction_with_prf(retptr, ptr0, len0, ptr1, len1, chain_id, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5, ptr6, len6, ptr7, len7, ptr8, len8);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred10_0 = r0;
-        deferred10_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred10_0, deferred10_1, 1);
-    }
-}
-
-/**
- * View REV32 wallet (restore from 24-word mnemonic)
- * Automatically detects REV32 format and uses the new derivation path
- * @param {string} mnemonic
- * @param {string} passphrase
- * @returns {any}
- */
-export function view_wallet_rev32_wasm(mnemonic, passphrase) {
-    const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-    const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-    const len1 = WASM_VECTOR_LEN;
-    const ret = wasm.view_wallet_rev32_wasm(ptr0, len0, ptr1, len1);
-    return takeObject(ret);
-}
-
-/**
- * Sign EVM personal message with context isolation (PRF path)
- * @param {string} mnemonic
- * @param {Uint8Array} prf_key
- * @param {string} context
- * @param {string} message
- * @returns {string}
- */
-export function evm_sign_personal_message_with_context_prf(mnemonic, prf_key, context, message) {
-    let deferred5_0;
-    let deferred5_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(context, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len2 = WASM_VECTOR_LEN;
-        const ptr3 = passStringToWasm0(message, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len3 = WASM_VECTOR_LEN;
-        wasm.evm_sign_personal_message_with_context_prf(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred5_0 = r0;
-        deferred5_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred5_0, deferred5_1, 1);
-    }
-}
-
-/**
- * Compute Discovery ID from password and normalized email
- * Returns hex-encoded 32-byte discovery ID, or "error:..." on failure
- * @param {string} password
- * @param {string} normalized_email
- * @returns {string}
- */
-export function vadar_compute_discovery_id(password, normalized_email) {
-    let deferred3_0;
-    let deferred3_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(password, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(normalized_email, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len1 = WASM_VECTOR_LEN;
-        wasm.vadar_compute_discovery_id(retptr, ptr0, len0, ptr1, len1);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred3_0 = r0;
-        deferred3_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred3_0, deferred3_1, 1);
-    }
-}
-
-/**
- * Convert a Bitcoin bech32/bech32m address between mainnet and testnet
- *
- * Examples:
- *   bc1p... → tb1p... (mainnet to testnet)
- *   tb1p... → bc1p... (testnet to mainnet)
- *   bc1q... → tb1q... (mainnet to testnet)
- *
- * Parameters:
- * - address: Bitcoin bech32/bech32m address
- * - testnet: true to convert to testnet (tb1...), false for mainnet (bc1...)
- *
- * Returns: converted address, or "error:..." on failure
- * @param {string} address
- * @param {boolean} testnet
- * @returns {string}
- */
-export function bitcoin_convert_address_network(address, testnet) {
-    let deferred2_0;
-    let deferred2_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(address, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        wasm.bitcoin_convert_address_network(retptr, ptr0, len0, testnet);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred2_0 = r0;
-        deferred2_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred2_0, deferred2_1, 1);
-    }
-}
-
-/**
- * Sign an externally serialized transaction (Legacy Transaction)
- *
- * Parameters:
- * - mnemonic: ACE-GF mnemonic
- * - passphrase: passphrase
- * - serialized_tx_base64: base64-encoded serialized transaction
- *
- * Returns: base64-encoded signed transaction, or "error:..." error message
- * @param {string} mnemonic
- * @param {string} passphrase
- * @param {string} serialized_tx_base64
- * @returns {string}
- */
-export function solana_sign_transaction(mnemonic, passphrase, serialized_tx_base64) {
-    let deferred4_0;
-    let deferred4_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(serialized_tx_base64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len2 = WASM_VECTOR_LEN;
-        wasm.solana_sign_transaction(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred4_0 = r0;
-        deferred4_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
-    }
-}
-
-/**
- * Sign EVM personal message using PRF key
- * @param {string} mnemonic
- * @param {Uint8Array} prf_key
- * @param {string} message
- * @returns {string}
- */
-export function evm_sign_personal_message_with_prf(mnemonic, prf_key, message) {
-    let deferred4_0;
-    let deferred4_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(message, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len2 = WASM_VECTOR_LEN;
-        wasm.evm_sign_personal_message_with_prf(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred4_0 = r0;
-        deferred4_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
-    }
-}
-
-/**
- * Encode ERC20 approve function call data
- *
- * Use this to approve a spender (DEX router) to spend tokens.
- * For unlimited approval, use max uint256: "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
- *
- * Parameters:
- * - spender: spender address (DEX router, etc.)
- * - amount: amount to approve in token's smallest unit (hex string)
- *
- * Returns: encoded function call data as hex string,
- *          or "error:..." on failure
- * @param {string} spender
- * @param {string} amount
- * @returns {string}
- */
-export function evm_encode_erc20_approve(spender, amount) {
-    let deferred3_0;
-    let deferred3_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(spender, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(amount, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len1 = WASM_VECTOR_LEN;
-        wasm.evm_encode_erc20_approve(retptr, ptr0, len0, ptr1, len1);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred3_0 = r0;
-        deferred3_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred3_0, deferred3_1, 1);
-    }
-}
-
-export function init_panic_hook() {
-    wasm.init_panic_hook();
-}
-
-/**
- * Get the Associated Token Account address
- *
- * Parameters:
- * - wallet: wallet address (base58)
- * - mint: Token mint address (base58)
- *
- * Returns: ATA address (base58)
- * @param {string} wallet
- * @param {string} mint
- * @returns {string}
- */
-export function solana_get_ata_address(wallet, mint) {
-    let deferred3_0;
-    let deferred3_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(wallet, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(mint, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len1 = WASM_VECTOR_LEN;
-        wasm.solana_get_ata_address(retptr, ptr0, len0, ptr1, len1);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred3_0 = r0;
-        deferred3_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred3_0, deferred3_1, 1);
-    }
-}
-
-/**
- * Sign EVM typed data using PRF key
- * @param {string} mnemonic
- * @param {Uint8Array} prf_key
- * @param {string} typed_data_hash
- * @returns {string}
- */
-export function evm_sign_typed_data_with_prf(mnemonic, prf_key, typed_data_hash) {
-    let deferred4_0;
-    let deferred4_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(typed_data_hash, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len2 = WASM_VECTOR_LEN;
-        wasm.evm_sign_typed_data_with_prf(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred4_0 = r0;
-        deferred4_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
-    }
-}
-
-/**
- * Sign typed structured data (EIP-712)
- *
- * Used for permit signatures, NFT marketplace approvals, etc.
- * The typed data hash should be pre-computed by the frontend.
- *
- * Parameters:
- * - mnemonic: ACE-GF mnemonic
- * - passphrase: wallet passphrase
- * - typed_data_hash: pre-computed EIP-712 hash (32 bytes as hex string)
+ * - message: raw message as UTF-8 string
  *
  * Returns: signature as hex string (65 bytes: r[32] + s[32] + v[1]),
  *          or "error:..." on failure
  * @param {string} mnemonic
  * @param {string} passphrase
- * @param {string} typed_data_hash
+ * @param {string} message
  * @returns {string}
  */
-export function evm_sign_typed_data(mnemonic, passphrase, typed_data_hash) {
+export function evm_sign_personal_message(mnemonic, passphrase, message) {
     let deferred4_0;
     let deferred4_1;
     try {
@@ -1193,9 +1248,9 @@ export function evm_sign_typed_data(mnemonic, passphrase, typed_data_hash) {
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
         const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(typed_data_hash, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const ptr2 = passStringToWasm0(message, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
         const len2 = WASM_VECTOR_LEN;
-        wasm.evm_sign_typed_data(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        wasm.evm_sign_personal_message(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         deferred4_0 = r0;
@@ -1204,86 +1259,6 @@ export function evm_sign_typed_data(mnemonic, passphrase, typed_data_hash) {
     } finally {
         wasm.__wbindgen_add_to_stack_pointer(16);
         wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
-    }
-}
-
-/**
- * @param {string} mnemonic
- * @param {string} passphrase
- * @param {string | null | undefined} secondary_passphrase
- * @param {string} to_pubkey
- * @param {bigint} lamports
- * @param {string} recent_blockhash
- * @returns {string}
- */
-export function solana_sign_system_transfer_with_secondary(mnemonic, passphrase, secondary_passphrase, to_pubkey, lamports, recent_blockhash) {
-    let deferred6_0;
-    let deferred6_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len1 = WASM_VECTOR_LEN;
-        var ptr2 = isLikeNone(secondary_passphrase) ? 0 : passStringToWasm0(secondary_passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        var len2 = WASM_VECTOR_LEN;
-        const ptr3 = passStringToWasm0(to_pubkey, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len3 = WASM_VECTOR_LEN;
-        const ptr4 = passStringToWasm0(recent_blockhash, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len4 = WASM_VECTOR_LEN;
-        wasm.solana_sign_system_transfer_with_secondary(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, lamports, ptr4, len4);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred6_0 = r0;
-        deferred6_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred6_0, deferred6_1, 1);
-    }
-}
-
-/**
- * @param {string} mnemonic
- * @param {string} passphrase
- * @returns {any}
- */
-export function view_wallet_wasm(mnemonic, passphrase) {
-    const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-    const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-    const len1 = WASM_VECTOR_LEN;
-    const ret = wasm.view_wallet_wasm(ptr0, len0, ptr1, len1);
-    return takeObject(ret);
-}
-
-/**
- * Generate scriptPubKey for any Bitcoin address
- *
- * Supports all address types:
- * - Bech32/Bech32m: bc1q... (P2WPKH), bc1p... (P2TR), tb1q..., tb1p...
- * - Legacy Base58Check: 1... (P2PKH), 3... (P2SH), m.../n... (testnet P2PKH), 2... (testnet P2SH)
- *
- * Returns: scriptPubKey as hex string, or "error:..." on failure
- * @param {string} address
- * @returns {string}
- */
-export function bitcoin_address_to_script_pubkey(address) {
-    let deferred2_0;
-    let deferred2_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(address, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        wasm.bitcoin_address_to_script_pubkey(retptr, ptr0, len0);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred2_0 = r0;
-        deferred2_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred2_0, deferred2_1, 1);
     }
 }
 
@@ -1340,25 +1315,66 @@ export function evm_sign_eip1559_transaction_with_context(mnemonic, passphrase, 
 }
 
 /**
- * Unseal SA2 artifact to recover mnemonic
- * Returns mnemonic string, or "error:..." on failure
- * @param {string} sa2_base64
- * @param {string} password
- * @param {string} normalized_email
+ * Change passphrase for wallets created WITHOUT secondary (e.g. extension via generate_wasm).
+ * Unseals with (existing_passphrase, None), seals with (new_passphrase, Some(admin_factor)).
+ * Use this for extension wallets. Returns new mnemonic on success, None on failure.
+ * @param {string} existing_mnemonic
+ * @param {string} existing_passphrase
+ * @param {string} new_passphrase
+ * @param {string} admin_factor
+ * @returns {string | undefined}
+ */
+export function acegf_change_passphrase_add_admin_wasm(existing_mnemonic, existing_passphrase, new_passphrase, admin_factor) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(existing_mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(existing_passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(new_passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(admin_factor, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len3 = WASM_VECTOR_LEN;
+        wasm.acegf_change_passphrase_add_admin_wasm(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        let v5;
+        if (r0 !== 0) {
+            v5 = getStringFromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export2(r0, r1 * 1, 1);
+        }
+        return v5;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * 签名外部序列化的交易 (Legacy Transaction)
+ *
+ * 参数:
+ * - mnemonic: ACE-GF 助记词
+ * - passphrase: 密码
+ * - serialized_tx_base64: base64 编码的序列化交易
+ *
+ * 返回: base64 编码的签名交易，或者 "error:..." 错误信息
+ * @param {string} mnemonic
+ * @param {string} passphrase
+ * @param {string} serialized_tx_base64
  * @returns {string}
  */
-export function vadar_unseal_sa2(sa2_base64, password, normalized_email) {
+export function solana_sign_transaction(mnemonic, passphrase, serialized_tx_base64) {
     let deferred4_0;
     let deferred4_1;
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(sa2_base64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
         const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(password, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
         const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(normalized_email, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const ptr2 = passStringToWasm0(serialized_tx_base64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
         const len2 = WASM_VECTOR_LEN;
-        wasm.vadar_unseal_sa2(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        wasm.solana_sign_transaction(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         deferred4_0 = r0;
@@ -1371,361 +1387,32 @@ export function vadar_unseal_sa2(sa2_base64, password, normalized_email) {
 }
 
 /**
- * Decrypt with PRF key (no passphrase in JS)
+ * View wallet using PRF key (skips passphrase decryption in JS)
  * @param {string} mnemonic
  * @param {Uint8Array} prf_key
- * @param {string} ephemeral_pub_b64
- * @param {string} encrypted_aes_key_b64
- * @param {string} iv_b64
- * @param {Uint8Array} encrypted_data
- * @returns {string}
+ * @returns {any}
  */
-export function acegf_decrypt_with_prf_wasm(mnemonic, prf_key, ephemeral_pub_b64, encrypted_aes_key_b64, iv_b64, encrypted_data) {
-    let deferred7_0;
-    let deferred7_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(ephemeral_pub_b64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len2 = WASM_VECTOR_LEN;
-        const ptr3 = passStringToWasm0(encrypted_aes_key_b64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len3 = WASM_VECTOR_LEN;
-        const ptr4 = passStringToWasm0(iv_b64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len4 = WASM_VECTOR_LEN;
-        const ptr5 = passArray8ToWasm0(encrypted_data, wasm.__wbindgen_export3);
-        const len5 = WASM_VECTOR_LEN;
-        wasm.acegf_decrypt_with_prf_wasm(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred7_0 = r0;
-        deferred7_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred7_0, deferred7_1, 1);
-    }
+export function view_wallet_with_prf_wasm(mnemonic, prf_key) {
+    const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.view_wallet_with_prf_wasm(ptr0, len0, ptr1, len1);
+    return takeObject(ret);
 }
 
 /**
- * Sign a personal message (EIP-191)
- *
- * Used for "Sign Message" functionality in wallets.
- * The message is prefixed with "\x19Ethereum Signed Message:\n{length}"
- *
- * Parameters:
- * - mnemonic: ACE-GF mnemonic
- * - passphrase: wallet passphrase
- * - message: raw message as UTF-8 string
- *
- * Returns: signature as hex string (65 bytes: r[32] + s[32] + v[1]),
- *          or "error:..." on failure
- * @param {string} mnemonic
- * @param {string} passphrase
- * @param {string} message
- * @returns {string}
- */
-export function evm_sign_personal_message(mnemonic, passphrase, message) {
-    let deferred4_0;
-    let deferred4_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(message, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len2 = WASM_VECTOR_LEN;
-        wasm.evm_sign_personal_message(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred4_0 = r0;
-        deferred4_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
-    }
-}
-
-/**
- * SPL Token transfer signing (with target ATA creation)
- *
- * Use this function when the recipient's ATA does not exist
- * Transaction contains two instructions: createAssociatedTokenAccount + Transfer
- *
- * Parameters:
- * - mnemonic: mnemonic
- * - passphrase: passphrase
- * - mint: SPL Token mint address (base58)
- * - to_wallet: recipient wallet address (base58, not ATA — the function calculates ATA internally)
- * - amount: transfer amount (raw amount, already multiplied by 10^decimals)
- * - recent_blockhash: recent blockhash
- *
- * Returns: base64-encoded signed transaction
- * @param {string} mnemonic
- * @param {string} passphrase
- * @param {string} mint
- * @param {string} to_wallet
- * @param {bigint} amount
- * @param {string} recent_blockhash
- * @returns {string}
- */
-export function solana_sign_spl_transfer_with_create_ata(mnemonic, passphrase, mint, to_wallet, amount, recent_blockhash) {
-    let deferred6_0;
-    let deferred6_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(mint, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len2 = WASM_VECTOR_LEN;
-        const ptr3 = passStringToWasm0(to_wallet, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len3 = WASM_VECTOR_LEN;
-        const ptr4 = passStringToWasm0(recent_blockhash, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len4 = WASM_VECTOR_LEN;
-        wasm.solana_sign_spl_transfer_with_create_ata(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, amount, ptr4, len4);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred6_0 = r0;
-        deferred6_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred6_0, deferred6_1, 1);
-    }
-}
-
-/**
- * Compute DH shared key - returns base64-encoded key on success, or "error:..." on failure
- * @param {string} mnemonic
- * @param {string} passphrase
- * @param {string} peer_pub_b64
- * @returns {string}
- */
-export function acegf_compute_dh_key_wasm(mnemonic, passphrase, peer_pub_b64) {
-    let deferred4_0;
-    let deferred4_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(peer_pub_b64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len2 = WASM_VECTOR_LEN;
-        wasm.acegf_compute_dh_key_wasm(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred4_0 = r0;
-        deferred4_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
-    }
-}
-
-/**
- * Get Bitcoin address from mnemonic
- *
- * Returns Native SegWit address (bc1q...) for mainnet
- *
- * Parameters:
- * - mnemonic: ACE-GF mnemonic
- * - passphrase: wallet passphrase
- * - testnet: true for testnet (tb1q...), false for mainnet (bc1q...)
- *
- * Returns: Bitcoin address or "error:..." on failure
- * @param {string} mnemonic
- * @param {string} passphrase
- * @param {boolean} testnet
- * @returns {string}
- */
-export function bitcoin_get_address(mnemonic, passphrase, testnet) {
-    let deferred3_0;
-    let deferred3_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len1 = WASM_VECTOR_LEN;
-        wasm.bitcoin_get_address(retptr, ptr0, len0, ptr1, len1, testnet);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred3_0 = r0;
-        deferred3_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred3_0, deferred3_1, 1);
-    }
-}
-
-/**
- * Get EVM address from mnemonic
- *
- * Returns the same address for all EVM chains (Ethereum, BSC, Polygon, etc.)
- * since they all use the same address derivation.
- *
- * Parameters:
- * - mnemonic: ACE-GF mnemonic
- * - passphrase: wallet passphrase
- *
- * Returns: checksummed address (EIP-55 format, e.g., "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"),
- *          or "error:..." on failure
- * @param {string} mnemonic
- * @param {string} passphrase
- * @returns {string}
- */
-export function evm_get_address(mnemonic, passphrase) {
-    let deferred3_0;
-    let deferred3_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len1 = WASM_VECTOR_LEN;
-        wasm.evm_get_address(retptr, ptr0, len0, ptr1, len1);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred3_0 = r0;
-        deferred3_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred3_0, deferred3_1, 1);
-    }
-}
-
-/**
- * @param {string} mnemonic
  * @param {string} passphrase
  * @param {string | null} [secondary_passphrase]
  * @returns {any}
  */
-export function view_wallet_rev32_with_secondary_wasm(mnemonic, passphrase, secondary_passphrase) {
-    const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+export function generate_with_secondary_wasm(passphrase, secondary_passphrase) {
+    const ptr0 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
     const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-    const len1 = WASM_VECTOR_LEN;
-    var ptr2 = isLikeNone(secondary_passphrase) ? 0 : passStringToWasm0(secondary_passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-    var len2 = WASM_VECTOR_LEN;
-    const ret = wasm.view_wallet_rev32_with_secondary_wasm(ptr0, len0, ptr1, len1, ptr2, len2);
+    var ptr1 = isLikeNone(secondary_passphrase) ? 0 : passStringToWasm0(secondary_passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+    var len1 = WASM_VECTOR_LEN;
+    const ret = wasm.generate_with_secondary_wasm(ptr0, len0, ptr1, len1);
     return takeObject(ret);
-}
-
-/**
- * Unified wallet view - auto-detects UUID vs REV32 format
- * Works with both 18-word (legacy UUID) and 24-word (REV32) mnemonics
- * @param {string} mnemonic
- * @param {string} passphrase
- * @returns {any}
- */
-export function view_wallet_unified_wasm(mnemonic, passphrase) {
-    const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-    const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-    const len1 = WASM_VECTOR_LEN;
-    const ret = wasm.view_wallet_unified_wasm(ptr0, len0, ptr1, len1);
-    return takeObject(ret);
-}
-
-/**
- * Sign message - returns base64 signature on success, or "error:..." on failure
- * @param {string} mnemonic
- * @param {string} passphrase
- * @param {Uint8Array} message
- * @param {number} curve
- * @returns {string}
- */
-export function acegf_sign_message_wasm(mnemonic, passphrase, message, curve) {
-    let deferred4_0;
-    let deferred4_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passArray8ToWasm0(message, wasm.__wbindgen_export3);
-        const len2 = WASM_VECTOR_LEN;
-        wasm.acegf_sign_message_wasm(retptr, ptr0, len0, ptr1, len1, ptr2, len2, curve);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred4_0 = r0;
-        deferred4_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
-    }
-}
-
-/**
- * @param {string} mnemonic
- * @param {string} passphrase
- * @param {string} to_pubkey
- * @param {bigint} lamports
- * @param {string} recent_blockhash
- * @returns {string}
- */
-export function solana_sign_system_transfer(mnemonic, passphrase, to_pubkey, lamports, recent_blockhash) {
-    let deferred5_0;
-    let deferred5_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(to_pubkey, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len2 = WASM_VECTOR_LEN;
-        const ptr3 = passStringToWasm0(recent_blockhash, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len3 = WASM_VECTOR_LEN;
-        wasm.solana_sign_system_transfer(retptr, ptr0, len0, ptr1, len1, ptr2, len2, lamports, ptr3, len3);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred5_0 = r0;
-        deferred5_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred5_0, deferred5_1, 1);
-    }
-}
-
-/**
- * Get EVM address using PRF key
- * @param {string} mnemonic
- * @param {Uint8Array} prf_key
- * @returns {string}
- */
-export function evm_get_address_with_prf(mnemonic, prf_key) {
-    let deferred3_0;
-    let deferred3_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
-        const len1 = WASM_VECTOR_LEN;
-        wasm.evm_get_address_with_prf(retptr, ptr0, len0, ptr1, len1);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred3_0 = r0;
-        deferred3_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred3_0, deferred3_1, 1);
-    }
 }
 
 /**
@@ -1758,31 +1445,40 @@ export function acegf_xidentity_verify_wasm(xidentity_b64, message, signature) {
     }
 }
 
+export function init_panic_hook() {
+    wasm.init_panic_hook();
+}
+
 /**
- * Encode ERC20 transfer function call data
- *
- * Use this to build the `data` field for ERC20 token transfers.
- *
- * Parameters:
- * - to: recipient address (hex string)
- * - amount: amount to transfer in token's smallest unit (hex string)
- *
- * Returns: encoded function call data as hex string,
- *          or "error:..." on failure
- * @param {string} to
- * @param {string} amount
+ * @param {string} mnemonic
+ * @param {string} passphrase
+ * @returns {any}
+ */
+export function view_wallet_wasm(mnemonic, passphrase) {
+    const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.view_wallet_wasm(ptr0, len0, ptr1, len1);
+    return takeObject(ret);
+}
+
+/**
+ * Get EVM address using PRF key
+ * @param {string} mnemonic
+ * @param {Uint8Array} prf_key
  * @returns {string}
  */
-export function evm_encode_erc20_transfer(to, amount) {
+export function evm_get_address_with_prf(mnemonic, prf_key) {
     let deferred3_0;
     let deferred3_1;
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(to, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
         const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(amount, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
         const len1 = WASM_VECTOR_LEN;
-        wasm.evm_encode_erc20_transfer(retptr, ptr0, len0, ptr1, len1);
+        wasm.evm_get_address_with_prf(retptr, ptr0, len0, ptr1, len1);
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         deferred3_0 = r0;
@@ -1841,24 +1537,25 @@ export function evm_sign_legacy_transaction_with_prf(mnemonic, prf_key, chain_id
 }
 
 /**
- * XIdentity sign - returns base64 signature on success, or "error:..." on failure
+ * Seal mnemonic into SA2 artifact
+ * Returns base64-encoded SA2, or "error:..." on failure
  * @param {string} mnemonic
- * @param {string} passphrase
- * @param {Uint8Array} message
+ * @param {string} password
+ * @param {string} normalized_email
  * @returns {string}
  */
-export function acegf_xidentity_sign_wasm(mnemonic, passphrase, message) {
+export function vadar_seal_sa2(mnemonic, password, normalized_email) {
     let deferred4_0;
     let deferred4_1;
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
         const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
         const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const ptr1 = passStringToWasm0(password, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
         const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passArray8ToWasm0(message, wasm.__wbindgen_export3);
+        const ptr2 = passStringToWasm0(normalized_email, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
         const len2 = WASM_VECTOR_LEN;
-        wasm.acegf_xidentity_sign_wasm(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        wasm.vadar_seal_sa2(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         deferred4_0 = r0;
@@ -1871,106 +1568,110 @@ export function acegf_xidentity_sign_wasm(mnemonic, passphrase, message) {
 }
 
 /**
- * Sign EVM typed data with context isolation (PRF path)
+ * Compute DH shared key using PRF key
  * @param {string} mnemonic
  * @param {Uint8Array} prf_key
- * @param {string} context
- * @param {string} typed_data_hash
+ * @param {string} peer_pub_b64
  * @returns {string}
  */
-export function evm_sign_typed_data_with_context_prf(mnemonic, prf_key, context, typed_data_hash) {
-    let deferred5_0;
-    let deferred5_1;
+export function acegf_compute_dh_key_with_prf_wasm(mnemonic, prf_key, peer_pub_b64) {
+    let deferred4_0;
+    let deferred4_1;
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
         const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
         const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(context, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const ptr2 = passStringToWasm0(peer_pub_b64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
         const len2 = WASM_VECTOR_LEN;
-        const ptr3 = passStringToWasm0(typed_data_hash, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        wasm.acegf_compute_dh_key_with_prf_wasm(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred4_0 = r0;
+        deferred4_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * SPL Token 转账签名 (带创建目标 ATA)
+ *
+ * 当接收方的 ATA 不存在时使用此函数
+ * 交易包含两个指令：createAssociatedTokenAccount + Transfer
+ *
+ * 参数:
+ * - mnemonic: 助记词
+ * - passphrase: 密码
+ * - mint: SPL Token mint 地址 (base58)
+ * - to_wallet: 接收方钱包地址 (base58，不是 ATA，函数内部会自动计算 ATA)
+ * - amount: 转账数量 (raw amount，已经乘以 10^decimals)
+ * - recent_blockhash: 最新区块哈希
+ *
+ * 返回: base64 编码的签名交易
+ * @param {string} mnemonic
+ * @param {string} passphrase
+ * @param {string} mint
+ * @param {string} to_wallet
+ * @param {bigint} amount
+ * @param {string} recent_blockhash
+ * @returns {string}
+ */
+export function solana_sign_spl_transfer_with_create_ata(mnemonic, passphrase, mint, to_wallet, amount, recent_blockhash) {
+    let deferred6_0;
+    let deferred6_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(mint, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(to_wallet, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
         const len3 = WASM_VECTOR_LEN;
-        wasm.evm_sign_typed_data_with_context_prf(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+        const ptr4 = passStringToWasm0(recent_blockhash, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len4 = WASM_VECTOR_LEN;
+        wasm.solana_sign_spl_transfer_with_create_ata(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, amount, ptr4, len4);
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred5_0 = r0;
-        deferred5_1 = r1;
+        deferred6_0 = r0;
+        deferred6_1 = r1;
         return getStringFromWasm0(r0, r1);
     } finally {
         wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred5_0, deferred5_1, 1);
+        wasm.__wbindgen_export2(deferred6_0, deferred6_1, 1);
     }
 }
 
 /**
- * Encrypt data for a recipient's xidentity public key
- * Returns JSON: { ephemeral_pub, encrypted_aes_key, iv, encrypted_data }
- * or "error:..." on failure
- * @param {string} recipient_xidentity_b64
- * @param {Uint8Array} plaintext
- * @returns {string}
+ * @param {string} mnemonic
+ * @param {string} passphrase
+ * @param {string | null} [secondary_passphrase]
+ * @returns {any}
  */
-export function acegf_encrypt_for_xidentity(recipient_xidentity_b64, plaintext) {
-    let deferred3_0;
-    let deferred3_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(recipient_xidentity_b64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passArray8ToWasm0(plaintext, wasm.__wbindgen_export3);
-        const len1 = WASM_VECTOR_LEN;
-        wasm.acegf_encrypt_for_xidentity(retptr, ptr0, len0, ptr1, len1);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred3_0 = r0;
-        deferred3_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred3_0, deferred3_1, 1);
-    }
+export function view_wallet_unified_with_secondary_wasm(mnemonic, passphrase, secondary_passphrase) {
+    const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+    const len1 = WASM_VECTOR_LEN;
+    var ptr2 = isLikeNone(secondary_passphrase) ? 0 : passStringToWasm0(secondary_passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+    var len2 = WASM_VECTOR_LEN;
+    const ret = wasm.view_wallet_unified_with_secondary_wasm(ptr0, len0, ptr1, len1, ptr2, len2);
+    return takeObject(ret);
 }
 
 /**
- * Get owner public key for registry authorization
- * Returns base64-encoded Ed25519 public key, or "error:..." on failure
- * @param {string} password
- * @param {string} normalized_email
- * @returns {string}
- */
-export function vadar_get_owner_pubkey(password, normalized_email) {
-    let deferred3_0;
-    let deferred3_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(password, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(normalized_email, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len1 = WASM_VECTOR_LEN;
-        wasm.vadar_get_owner_pubkey(retptr, ptr0, len0, ptr1, len1);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred3_0 = r0;
-        deferred3_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred3_0, deferred3_1, 1);
-    }
-}
-
-/**
- * Generate a new REV32 wallet with passphrase
- * Returns JSON: { mnemonic, solana_address, evm_address, bitcoin_address, cosmos_address, polkadot_address, xaddress, xidentity }
- * or JSON: { error: true, message: "..." }
  * @param {string} passphrase
  * @returns {any}
  */
-export function generate_rev32_wasm(passphrase) {
+export function generate_wasm(passphrase) {
     const ptr0 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
     const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.generate_rev32_wasm(ptr0, len0);
+    const ret = wasm.generate_wasm(ptr0, len0);
     return takeObject(ret);
 }
 
@@ -2004,17 +1705,631 @@ export function acegf_change_passphrase_wasm(mnemonic, old_passphrase, new_passp
 }
 
 /**
- * SPL Token transfer signing
+ * Generate scriptPubKey for any Bitcoin address
+ *
+ * Supports all address types:
+ * - Bech32/Bech32m: bc1q... (P2WPKH), bc1p... (P2TR), tb1q..., tb1p...
+ * - Legacy Base58Check: 1... (P2PKH), 3... (P2SH), m.../n... (testnet P2PKH), 2... (testnet P2SH)
+ *
+ * Returns: scriptPubKey as hex string, or "error:..." on failure
+ * @param {string} address
+ * @returns {string}
+ */
+export function bitcoin_address_to_script_pubkey(address) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(address, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.bitcoin_address_to_script_pubkey(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred2_0 = r0;
+        deferred2_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
+ * View wallet with context isolation (passphrase path)
+ * Returns 7 chain addresses for the given context, or error for legacy wallets.
+ * @param {string} mnemonic
+ * @param {string} passphrase
+ * @param {string} context
+ * @returns {any}
+ */
+export function view_wallet_unified_with_context_wasm(mnemonic, passphrase, context) {
+    const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passStringToWasm0(context, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.view_wallet_unified_with_context_wasm(ptr0, len0, ptr1, len1, ptr2, len2);
+    return takeObject(ret);
+}
+
+/**
+ * Get Solana address with context isolation (PRF path)
+ * @param {string} mnemonic
+ * @param {Uint8Array} prf_key
+ * @param {string} context
+ * @returns {string}
+ */
+export function solana_get_address_with_context_prf(mnemonic, prf_key, context) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(context, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        wasm.solana_get_address_with_context_prf(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred4_0 = r0;
+        deferred4_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * Compute Discovery ID from password and normalized email
+ * Returns hex-encoded 32-byte discovery ID, or "error:..." on failure
+ * @param {string} password
+ * @param {string} normalized_email
+ * @returns {string}
+ */
+export function vadar_compute_discovery_id(password, normalized_email) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(password, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(normalized_email, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.vadar_compute_discovery_id(retptr, ptr0, len0, ptr1, len1);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred3_0 = r0;
+        deferred3_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * Encrypt data for a recipient's xidentity public key
+ * Returns JSON: { ephemeral_pub, encrypted_aes_key, iv, encrypted_data }
+ * or "error:..." on failure
+ * @param {string} recipient_xidentity_b64
+ * @param {Uint8Array} plaintext
+ * @returns {string}
+ */
+export function acegf_encrypt_for_xidentity(recipient_xidentity_b64, plaintext) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(recipient_xidentity_b64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(plaintext, wasm.__wbindgen_export3);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.acegf_encrypt_for_xidentity(retptr, ptr0, len0, ptr1, len1);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred3_0 = r0;
+        deferred3_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * Sign typed structured data (EIP-712)
+ *
+ * Used for permit signatures, NFT marketplace approvals, etc.
+ * The typed data hash should be pre-computed by the frontend.
  *
  * Parameters:
- * - mnemonic: mnemonic
- * - passphrase: passphrase
- * - mint: SPL Token mint address (base58)
- * - to_wallet: recipient wallet address (base58, not ATA — the function calculates ATA internally)
- * - amount: transfer amount (raw amount, already multiplied by 10^decimals)
- * - recent_blockhash: recent blockhash
+ * - mnemonic: ACE-GF mnemonic
+ * - passphrase: wallet passphrase
+ * - typed_data_hash: pre-computed EIP-712 hash (32 bytes as hex string)
  *
- * Returns: base64-encoded signed transaction
+ * Returns: signature as hex string (65 bytes: r[32] + s[32] + v[1]),
+ *          or "error:..." on failure
+ * @param {string} mnemonic
+ * @param {string} passphrase
+ * @param {string} typed_data_hash
+ * @returns {string}
+ */
+export function evm_sign_typed_data(mnemonic, passphrase, typed_data_hash) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(typed_data_hash, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        wasm.evm_sign_typed_data(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred4_0 = r0;
+        deferred4_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * Sign an arbitrary message with Solana context-derived Ed25519 key (PRF path)
+ * @param {string} mnemonic
+ * @param {Uint8Array} prf_key
+ * @param {string} context
+ * @param {string} message
+ * @returns {string}
+ */
+export function solana_sign_message_with_context_prf(mnemonic, prf_key, context, message) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(context, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(message, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len3 = WASM_VECTOR_LEN;
+        wasm.solana_sign_message_with_context_prf(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred5_0 = r0;
+        deferred5_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
+ * Sign registry update for create/update operations
+ * Returns base64-encoded Ed25519 signature, or "error:..." on failure
+ * @param {string} password
+ * @param {string} normalized_email
+ * @param {string} discovery_id
+ * @param {string} cid
+ * @param {bigint} version
+ * @param {string} commit
+ * @returns {string}
+ */
+export function vadar_sign_registry_update(password, normalized_email, discovery_id, cid, version, commit) {
+    let deferred6_0;
+    let deferred6_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(password, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(normalized_email, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(discovery_id, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(cid, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len3 = WASM_VECTOR_LEN;
+        const ptr4 = passStringToWasm0(commit, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len4 = WASM_VECTOR_LEN;
+        wasm.vadar_sign_registry_update(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, version, ptr4, len4);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred6_0 = r0;
+        deferred6_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred6_0, deferred6_1, 1);
+    }
+}
+
+/**
+ * Sign Solana external transaction using PRF key
+ * @param {string} mnemonic
+ * @param {Uint8Array} prf_key
+ * @param {string} serialized_tx_base64
+ * @returns {string}
+ */
+export function solana_sign_transaction_with_prf(mnemonic, prf_key, serialized_tx_base64) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(serialized_tx_base64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        wasm.solana_sign_transaction_with_prf(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred4_0 = r0;
+        deferred4_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * Generate a new REV32 wallet with passphrase
+ * Returns JSON: { mnemonic, solana_address, evm_address, bitcoin_address, cosmos_address, polkadot_address, xaddress, xidentity }
+ * or JSON: { error: true, message: "..." }
+ * @param {string} passphrase
+ * @returns {any}
+ */
+export function generate_rev32_wasm(passphrase) {
+    const ptr0 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.generate_rev32_wasm(ptr0, len0);
+    return takeObject(ret);
+}
+
+/**
+ * Sign a Solana serialized transaction with context isolation (PRF path)
+ * @param {string} mnemonic
+ * @param {Uint8Array} prf_key
+ * @param {string} context
+ * @param {string} serialized_tx_base64
+ * @returns {string}
+ */
+export function solana_sign_transaction_with_context_prf(mnemonic, prf_key, context, serialized_tx_base64) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(context, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(serialized_tx_base64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len3 = WASM_VECTOR_LEN;
+        wasm.solana_sign_transaction_with_context_prf(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred5_0 = r0;
+        deferred5_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
+ * @param {string} mnemonic
+ * @param {string} passphrase
+ * @param {string | null} [secondary_passphrase]
+ * @returns {any}
+ */
+export function view_wallet_with_secondary_wasm(mnemonic, passphrase, secondary_passphrase) {
+    const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+    const len1 = WASM_VECTOR_LEN;
+    var ptr2 = isLikeNone(secondary_passphrase) ? 0 : passStringToWasm0(secondary_passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+    var len2 = WASM_VECTOR_LEN;
+    const ret = wasm.view_wallet_with_secondary_wasm(ptr0, len0, ptr1, len1, ptr2, len2);
+    return takeObject(ret);
+}
+
+/**
+ * Sign message - returns signature bytes on success, or error string prefixed with "error:" on failure
+ * @param {string} mnemonic
+ * @param {string} passphrase
+ * @param {string | null | undefined} secondary_passphrase
+ * @param {Uint8Array} message
+ * @param {number} curve
+ * @returns {string}
+ */
+export function acegf_sign_message_with_secondary_wasm(mnemonic, passphrase, secondary_passphrase, message, curve) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        var ptr2 = isLikeNone(secondary_passphrase) ? 0 : passStringToWasm0(secondary_passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        var len2 = WASM_VECTOR_LEN;
+        const ptr3 = passArray8ToWasm0(message, wasm.__wbindgen_export3);
+        const len3 = WASM_VECTOR_LEN;
+        wasm.acegf_sign_message_with_secondary_wasm(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, curve);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred5_0 = r0;
+        deferred5_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
+ * Compute DH shared key - returns base64-encoded key on success, or "error:..." on failure
+ * @param {string} mnemonic
+ * @param {string} passphrase
+ * @param {string} peer_pub_b64
+ * @returns {string}
+ */
+export function acegf_compute_dh_key_wasm(mnemonic, passphrase, peer_pub_b64) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(peer_pub_b64, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        wasm.acegf_compute_dh_key_wasm(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred4_0 = r0;
+        deferred4_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * Sign an EIP-1559 Transaction with secondary passphrase (e.g. admin factor)
+ *
+ * Same as evm_sign_eip1559_transaction but combines passphrase with secondary_passphrase
+ * for key derivation. This allows recipients holding 3-factor credentials
+ * (mnemonic + passphrase + admin_factor) to sign as the wallet owner.
+ * @param {string} mnemonic
+ * @param {string} passphrase
+ * @param {string | null | undefined} secondary_passphrase
+ * @param {bigint} chain_id
+ * @param {string} nonce
+ * @param {string} max_priority_fee_per_gas
+ * @param {string} max_fee_per_gas
+ * @param {string} gas_limit
+ * @param {string} to
+ * @param {string} value
+ * @param {string} data
+ * @returns {string}
+ */
+export function evm_sign_eip1559_transaction_with_secondary(mnemonic, passphrase, secondary_passphrase, chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas, gas_limit, to, value, data) {
+    let deferred11_0;
+    let deferred11_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        var ptr2 = isLikeNone(secondary_passphrase) ? 0 : passStringToWasm0(secondary_passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        var len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(nonce, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len3 = WASM_VECTOR_LEN;
+        const ptr4 = passStringToWasm0(max_priority_fee_per_gas, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len4 = WASM_VECTOR_LEN;
+        const ptr5 = passStringToWasm0(max_fee_per_gas, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len5 = WASM_VECTOR_LEN;
+        const ptr6 = passStringToWasm0(gas_limit, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len6 = WASM_VECTOR_LEN;
+        const ptr7 = passStringToWasm0(to, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len7 = WASM_VECTOR_LEN;
+        const ptr8 = passStringToWasm0(value, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len8 = WASM_VECTOR_LEN;
+        const ptr9 = passStringToWasm0(data, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len9 = WASM_VECTOR_LEN;
+        wasm.evm_sign_eip1559_transaction_with_secondary(retptr, ptr0, len0, ptr1, len1, ptr2, len2, chain_id, ptr3, len3, ptr4, len4, ptr5, len5, ptr6, len6, ptr7, len7, ptr8, len8, ptr9, len9);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred11_0 = r0;
+        deferred11_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred11_0, deferred11_1, 1);
+    }
+}
+
+/**
+ * Sign EVM personal message with context isolation (passphrase path)
+ * @param {string} mnemonic
+ * @param {string} passphrase
+ * @param {string} context
+ * @param {string} message
+ * @returns {string}
+ */
+export function evm_sign_personal_message_with_context(mnemonic, passphrase, context, message) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(context, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(message, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len3 = WASM_VECTOR_LEN;
+        wasm.evm_sign_personal_message_with_context(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred5_0 = r0;
+        deferred5_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
+ * Get Solana address with context isolation (passphrase path)
+ * @param {string} mnemonic
+ * @param {string} passphrase
+ * @param {string} context
+ * @returns {string}
+ */
+export function solana_get_address_with_context(mnemonic, passphrase, context) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(context, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        wasm.solana_get_address_with_context(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred4_0 = r0;
+        deferred4_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * Sign EVM EIP-1559 transaction with context isolation (PRF path)
+ * @param {string} mnemonic
+ * @param {Uint8Array} prf_key
+ * @param {string} context
+ * @param {bigint} chain_id
+ * @param {string} nonce
+ * @param {string} max_priority_fee_per_gas
+ * @param {string} max_fee_per_gas
+ * @param {string} gas_limit
+ * @param {string} to
+ * @param {string} value
+ * @param {string} data
+ * @returns {string}
+ */
+export function evm_sign_eip1559_transaction_with_context_prf(mnemonic, prf_key, context, chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas, gas_limit, to, value, data) {
+    let deferred11_0;
+    let deferred11_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(context, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(nonce, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len3 = WASM_VECTOR_LEN;
+        const ptr4 = passStringToWasm0(max_priority_fee_per_gas, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len4 = WASM_VECTOR_LEN;
+        const ptr5 = passStringToWasm0(max_fee_per_gas, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len5 = WASM_VECTOR_LEN;
+        const ptr6 = passStringToWasm0(gas_limit, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len6 = WASM_VECTOR_LEN;
+        const ptr7 = passStringToWasm0(to, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len7 = WASM_VECTOR_LEN;
+        const ptr8 = passStringToWasm0(value, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len8 = WASM_VECTOR_LEN;
+        const ptr9 = passStringToWasm0(data, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len9 = WASM_VECTOR_LEN;
+        wasm.evm_sign_eip1559_transaction_with_context_prf(retptr, ptr0, len0, ptr1, len1, ptr2, len2, chain_id, ptr3, len3, ptr4, len4, ptr5, len5, ptr6, len6, ptr7, len7, ptr8, len8, ptr9, len9);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred11_0 = r0;
+        deferred11_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred11_0, deferred11_1, 1);
+    }
+}
+
+/**
+ * Encode ERC20 approve function call data
+ *
+ * Use this to approve a spender (DEX router) to spend tokens.
+ * For unlimited approval, use max uint256: "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+ *
+ * Parameters:
+ * - spender: spender address (DEX router, etc.)
+ * - amount: amount to approve in token's smallest unit (hex string)
+ *
+ * Returns: encoded function call data as hex string,
+ *          or "error:..." on failure
+ * @param {string} spender
+ * @param {string} amount
+ * @returns {string}
+ */
+export function evm_encode_erc20_approve(spender, amount) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(spender, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(amount, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.evm_encode_erc20_approve(retptr, ptr0, len0, ptr1, len1);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred3_0 = r0;
+        deferred3_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * SPL Token 转账签名
+ *
+ * 参数:
+ * - mnemonic: 助记词
+ * - passphrase: 密码
+ * - mint: SPL Token mint 地址 (base58)
+ * - to_wallet: 接收方钱包地址 (base58，不是 ATA，函数内部会自动计算 ATA)
+ * - amount: 转账数量 (raw amount，已经乘以 10^decimals)
+ * - recent_blockhash: 最新区块哈希
+ *
+ * 返回: base64 编码的签名交易
  * @param {string} mnemonic
  * @param {string} passphrase
  * @param {string} mint
@@ -2047,135 +2362,6 @@ export function solana_sign_spl_transfer(mnemonic, passphrase, mint, to_wallet, 
     } finally {
         wasm.__wbindgen_add_to_stack_pointer(16);
         wasm.__wbindgen_export2(deferred6_0, deferred6_1, 1);
-    }
-}
-
-/**
- * Get Bitcoin Taproot address from mnemonic
- *
- * Returns Taproot address (bc1p... for mainnet, tb1p... for testnet)
- *
- * Parameters:
- * - mnemonic: ACE-GF mnemonic
- * - passphrase: wallet passphrase
- * - testnet: true for testnet (tb1p...), false for mainnet (bc1p...)
- *
- * Returns: Bitcoin Taproot address or "error:..." on failure
- * @param {string} mnemonic
- * @param {string} passphrase
- * @param {boolean} testnet
- * @returns {string}
- */
-export function bitcoin_get_taproot_address(mnemonic, passphrase, testnet) {
-    let deferred3_0;
-    let deferred3_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len1 = WASM_VECTOR_LEN;
-        wasm.bitcoin_get_taproot_address(retptr, ptr0, len0, ptr1, len1, testnet);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred3_0 = r0;
-        deferred3_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred3_0, deferred3_1, 1);
-    }
-}
-
-/**
- * Normalize email for VA-DAR
- * - Lowercase
- * - Trim whitespace
- * - Remove dots from local part
- * - Remove +suffix from local part
- * @param {string} email
- * @returns {string}
- */
-export function vadar_normalize_email(email) {
-    let deferred2_0;
-    let deferred2_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(email, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        wasm.vadar_normalize_email(retptr, ptr0, len0);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred2_0 = r0;
-        deferred2_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred2_0, deferred2_1, 1);
-    }
-}
-
-/**
- * Seal mnemonic into SA2 artifact
- * Returns base64-encoded SA2, or "error:..." on failure
- * @param {string} mnemonic
- * @param {string} password
- * @param {string} normalized_email
- * @returns {string}
- */
-export function vadar_seal_sa2(mnemonic, password, normalized_email) {
-    let deferred4_0;
-    let deferred4_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(password, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(normalized_email, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len2 = WASM_VECTOR_LEN;
-        wasm.vadar_seal_sa2(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred4_0 = r0;
-        deferred4_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
-    }
-}
-
-/**
- * Sign EVM typed data with context isolation (passphrase path)
- * @param {string} mnemonic
- * @param {string} passphrase
- * @param {string} context
- * @param {string} typed_data_hash
- * @returns {string}
- */
-export function evm_sign_typed_data_with_context(mnemonic, passphrase, context, typed_data_hash) {
-    let deferred5_0;
-    let deferred5_1;
-    try {
-        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(context, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len2 = WASM_VECTOR_LEN;
-        const ptr3 = passStringToWasm0(typed_data_hash, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
-        const len3 = WASM_VECTOR_LEN;
-        wasm.evm_sign_typed_data_with_context(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
-        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-        deferred5_0 = r0;
-        deferred5_1 = r1;
-        return getStringFromWasm0(r0, r1);
-    } finally {
-        wasm.__wbindgen_add_to_stack_pointer(16);
-        wasm.__wbindgen_export2(deferred5_0, deferred5_1, 1);
     }
 }
 
@@ -2243,22 +2429,183 @@ export function evm_sign_legacy_transaction(mnemonic, passphrase, chain_id, nonc
 }
 
 /**
- * View wallet with context isolation (passphrase path)
- * Returns 7 chain addresses for the given context, or error for legacy wallets.
+ * Sign a Bitcoin SegWit transaction using PRF key (no passphrase in JS)
+ *
+ * Parameters same as bitcoin_sign_transaction, but uses prf_key instead of passphrase.
+ *
+ * Returns: signed transaction as hex string, or "error:..." on failure
+ * @param {string} mnemonic
+ * @param {Uint8Array} prf_key
+ * @param {string} tx_json
+ * @returns {string}
+ */
+export function bitcoin_sign_transaction_prf(mnemonic, prf_key, tx_json) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(tx_json, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        wasm.bitcoin_sign_transaction_prf(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred4_0 = r0;
+        deferred4_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * Get EVM address with context isolation (passphrase path)
  * @param {string} mnemonic
  * @param {string} passphrase
  * @param {string} context
+ * @returns {string}
+ */
+export function evm_get_address_with_context(mnemonic, passphrase, context) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(context, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        wasm.evm_get_address_with_context(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred4_0 = r0;
+        deferred4_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * Generate a new REV32 wallet with passphrase and optional secondary passphrase
+ * @param {string} passphrase
+ * @param {string | null} [secondary_passphrase]
  * @returns {any}
  */
-export function view_wallet_unified_with_context_wasm(mnemonic, passphrase, context) {
+export function generate_rev32_with_secondary_wasm(passphrase, secondary_passphrase) {
+    const ptr0 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+    const len0 = WASM_VECTOR_LEN;
+    var ptr1 = isLikeNone(secondary_passphrase) ? 0 : passStringToWasm0(secondary_passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+    var len1 = WASM_VECTOR_LEN;
+    const ret = wasm.generate_rev32_with_secondary_wasm(ptr0, len0, ptr1, len1);
+    return takeObject(ret);
+}
+
+/**
+ * Unified wallet view - auto-detects UUID vs REV32 format
+ * Works with both 18-word (legacy UUID) and 24-word (REV32) mnemonics
+ * @param {string} mnemonic
+ * @param {string} passphrase
+ * @returns {any}
+ */
+export function view_wallet_unified_wasm(mnemonic, passphrase) {
     const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
     const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.view_wallet_unified_wasm(ptr0, len0, ptr1, len1);
+    return takeObject(ret);
+}
+
+/**
+ * View wallet with context isolation (PRF path)
+ * Uses PRF key → base_key → identity_root → context-isolated seeds
+ * @param {string} mnemonic
+ * @param {Uint8Array} prf_key
+ * @param {string} context
+ * @returns {any}
+ */
+export function view_wallet_with_context_prf_wasm(mnemonic, prf_key, context) {
+    const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
+    const len1 = WASM_VECTOR_LEN;
     const ptr2 = passStringToWasm0(context, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
     const len2 = WASM_VECTOR_LEN;
-    const ret = wasm.view_wallet_unified_with_context_wasm(ptr0, len0, ptr1, len1, ptr2, len2);
+    const ret = wasm.view_wallet_with_context_prf_wasm(ptr0, len0, ptr1, len1, ptr2, len2);
     return takeObject(ret);
+}
+
+/**
+ * @param {string} mnemonic
+ * @param {string} passphrase
+ * @param {string} to_pubkey
+ * @param {bigint} lamports
+ * @param {string} recent_blockhash
+ * @returns {string}
+ */
+export function solana_sign_system_transfer(mnemonic, passphrase, to_pubkey, lamports, recent_blockhash) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(passphrase, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(to_pubkey, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(recent_blockhash, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len3 = WASM_VECTOR_LEN;
+        wasm.solana_sign_system_transfer(retptr, ptr0, len0, ptr1, len1, ptr2, len2, lamports, ptr3, len3);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred5_0 = r0;
+        deferred5_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
+ * Sign EVM typed data with context isolation (PRF path)
+ * @param {string} mnemonic
+ * @param {Uint8Array} prf_key
+ * @param {string} context
+ * @param {string} typed_data_hash
+ * @returns {string}
+ */
+export function evm_sign_typed_data_with_context_prf(mnemonic, prf_key, context, typed_data_hash) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(prf_key, wasm.__wbindgen_export3);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(context, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(typed_data_hash, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len3 = WASM_VECTOR_LEN;
+        wasm.evm_sign_typed_data_with_context_prf(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred5_0 = r0;
+        deferred5_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export2(deferred5_0, deferred5_1, 1);
+    }
 }
 
 const EXPECTED_RESPONSE_TYPES = new Set(['basic', 'cors', 'default']);
