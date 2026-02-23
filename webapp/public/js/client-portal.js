@@ -4185,10 +4185,20 @@ function attachAppEvents() {
         if (!resp.ok) throw new Error(data.error || 'Redeem failed');
         if (data.status === 'pending_signature' && data.transaction) {
           showToast('Confirm in the Yallet window.', 'info');
-          await sendTransactionInWallet(data.transaction, addr);
-          showToast('Transaction submitted.', 'success');
+          const txHash = await sendTransactionInWallet(data.transaction, addr);
+          const chainId = data.transaction.chainId || 1;
+          const explorerUrl = getExplorerTxUrl(chainId, txHash);
+          const explorerName = getExplorerName(chainId);
+          const existing = document.querySelector('.toast');
+          if (existing) existing.remove();
+          const toast = document.createElement('div');
+          toast.className = 'toast toast-success';
+          toast.innerHTML = `Redeemed ${esc(amount)} shares → Wallet (${explorerName}). <a href="${explorerUrl}" target="_blank" rel="noopener">View on block explorer</a>`;
+          document.body.appendChild(toast);
+          setTimeout(() => toast.remove(), 10000);
           state.vaultAmount = '';
           refreshWalletBalances();
+          setTimeout(function () { refreshWalletBalances(); setTimeout(refreshWalletBalances, 5000); }, 3000);
         } else {
           showToast(`Redeemed ${amount} shares → Wallet`, 'success');
           state.vaultAmount = '';

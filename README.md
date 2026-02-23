@@ -14,6 +14,23 @@ Crypto inheritance and conditional release systems today face a trilemma:
 2. **Weak enforcement** — purely social or legal mechanisms have no on-chain teeth
 3. **No audit trail** — release decisions are opaque and hard to verify after the fact
 
+## Landscape: Why Existing Solutions Fall Short
+
+| Approach | Self-Custody | Yield | Auto Trigger | Low Trust Dependency | Revocable | Main Weakness |
+|----------|:---:|:---:|:---:|:---:|:---:|---------------|
+| Centralized Custodial Inheritance | — | Partial | — | — | — | Platform risk; policy changes; lock-up; not self-custody |
+| Legal / Trust Custody | — | — | — | — | ~| Single point of trust; key exposure; slow; expensive |
+| Multi-Sig Inheritance | Yes | Theoretical | — | ~ | ~ | Coordination burden; signer collusion; no yield management |
+| MPC Custody | ~ | Yes | — | — | — | High cost; service disruption risk; still centralized nodes |
+| Dead Man's Switch | Yes | — | Time-based | ~ | ~ | Time ≠ death; irreversible misfire; can't manage DeFi state |
+| Social Recovery | Yes | Yes | — | ~ | Yes | Collusion risk; not true inheritance; no yield handoff |
+| DeFi Vaults (non-inheritance) | Yes | Yes | — | Yes | Yes | No inheritance logic; liquidation risk; complex state |
+| **Yault Guardian Vault** | **Yes** | **Yes** | **Yes** | **Yes** | **Yes** | Hackathon build; requires production audit |
+
+> Legend: Yes = fully supported, ~ = partial / depends, — = not supported
+
+Yault is the only approach that combines self-custody, native yield, oracle-driven automatic triggers, low institutional dependency, and revocability in a single system.
+
 ## Our Approach
 
 Yault is a **fully non-custodial** platform where no single party — not the platform, not the authority, not the recipient — can unilaterally access or move assets. The system is built entirely on cryptographic primitives:

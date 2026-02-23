@@ -125,6 +125,7 @@ async function buildRedeemTx(config, sharesHuman, receiverAddress, ownerAddress)
     data: dataHex.length % 2 === 0 ? dataHex : '0x0' + dataHex.slice(2),
     value: '0x00',
     chainId,
+    gasLimit: '0x493E0', // 300,000 — redeem may trigger nested Aave withdraw with cold storage writes
   };
 }
 
@@ -144,6 +145,7 @@ async function buildHarvestTx(config) {
     data: dataHex.length % 2 === 0 ? dataHex : '0x0' + dataHex.slice(2),
     value: '0x00',
     chainId,
+    gasLimit: '0x493E0', // 300,000 — harvest involves nested Aave withdraw with cold storage writes
   };
 }
 

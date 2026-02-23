@@ -279,9 +279,22 @@ router.post('/redeem', dualAuthMiddleware, async (req, res) => {
   }
 
   const pos = await db.vaultPositions.findById(normalizedAddr) || { shares: 0, deposited: 0 };
-  const numShares = shares === 'max' ? (pos.shares || 0) : parseFloat(shares);
+  let numShares = shares === 'max' ? (pos.shares || 0) : parseFloat(shares);
+
+  // When on-chain vault exists and shares === 'max', prefer on-chain balance
+  // (local DB may be out of sync with direct on-chain deposits/harvests)
+  if (shares === 'max' && hasVaultContract()) {
+    const onChain = await vaultContract.getVaultBalance(config, normalizedAddr);
+    if (onChain && parseFloat(onChain.shares) > 0) {
+      numShares = parseFloat(onChain.shares);
+    }
+  }
+
   if (shares !== 'max' && (isNaN(numShares) || numShares <= 0)) {
     return res.status(400).json({ error: 'shares must be a positive number or "max"' });
+  }
+  if (numShares <= 0) {
+    return res.status(400).json({ error: 'No shares available to redeem' });
   }
 
   if (hasVaultContract()) {
