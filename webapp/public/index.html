@@ -120,8 +120,11 @@
     .wallet-status-addr { font-size: 11px; color: var(--text-muted); font-family: monospace; }
     .wallet-disconnect-btn { padding: 4px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: transparent; color: var(--text-muted); font-size: 12px; cursor: pointer; }
     .wallet-disconnect-btn:hover { color: var(--danger); border-color: var(--danger); }
-    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 100; }
-    .modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; max-width: 500px; width: 90%; }
+    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.55); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; z-index: 100; }
+    .modal, .modal-content { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 28px 32px; max-width: 600px; width: 92%; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
+    .input, select.input { width: 100%; padding: 10px 12px; background: var(--surface-2, #1a2236); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: 14px; box-sizing: border-box; transition: border-color 0.2s; }
+    .input:focus, select.input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 2px rgba(59,130,246,0.15); }
+    .input::placeholder { color: var(--text-muted, #666); }
     .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
     .modal-close { background: none; border: none; color: var(--text-muted); font-size: 20px; cursor: pointer; }
     .modal-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
