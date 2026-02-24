@@ -191,21 +191,20 @@ async function processDueAllowances() {
       const cooldownTriggers = allTriggers.filter(
         (t) => t.status === 'cooldown' && t.effective_at && t.effective_at <= now
       );
+      let finalizedCount = 0;
       for (const trigger of cooldownTriggers) {
         try {
-          // Lazy-import to avoid circular require at module load.
-          // decision.js exports the router which has _maybeFinalizeDecision attached.
           const decisionRouter = require('../api/trigger/decision');
           if (typeof decisionRouter._maybeFinalizeDecision === 'function') {
-            await decisionRouter._maybeFinalizeDecision(trigger.trigger_id, trigger);
-            console.log(`[scheduler] Finalized cooldown trigger ${trigger.trigger_id}`);
+            const updated = await decisionRouter._maybeFinalizeDecision(trigger.trigger_id, trigger);
+            if (updated && updated.status === 'released') finalizedCount++;
           }
         } catch (tErr) {
           console.error(`[scheduler] Finalize trigger ${trigger.trigger_id} error:`, tErr.message);
         }
       }
-      if (cooldownTriggers.length > 0) {
-        console.log(`[scheduler] Finalized ${cooldownTriggers.length} cooldown trigger(s)`);
+      if (finalizedCount > 0) {
+        console.log(`[scheduler] Finalized ${finalizedCount} cooldown trigger(s) → released`);
       }
     } catch (tErr) {
       console.error('[scheduler] Trigger finalization error:', tErr.message);

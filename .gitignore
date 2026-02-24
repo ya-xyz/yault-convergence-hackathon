@@ -44,4 +44,7 @@ cloudflare-worker/.dev.vars
 dev.yallet.proxy-api/.dev.vars
 
 # Rust
-Cargo.lockarweave-key.json
+Cargo.lock
+
+# Keys / secrets (do not commit)
+arweave-key.json

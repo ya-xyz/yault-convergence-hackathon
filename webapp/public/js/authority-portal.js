@@ -262,9 +262,9 @@ async function submitDecision(trigger, decision, evidenceHash, reason) {
       } catch { /* signing optional for hold/reject */ }
     }
 
-    const resp = await apiFetch(`${API_BASE}/trigger/${encodeURIComponent(trigger.trigger_id)}/decision`, {
+    const resp = await fetch(`${API_BASE}/trigger/${encodeURIComponent(trigger.trigger_id)}/decision`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(await getAuthHeadersAsync()) },
       body: JSON.stringify({
         decision,
         evidence_hash: evidenceHash,
@@ -272,11 +272,15 @@ async function submitDecision(trigger, decision, evidenceHash, reason) {
         reason,
       }),
     });
+    const result = await resp.json().catch(() => ({}));
     if (!resp.ok) {
-      const errBody = await resp.json().catch(() => ({}));
-      throw new Error(errBody.error || 'Decision submission failed');
+      throw new Error(result.error || result.detail || 'Decision submission failed');
     }
-    showToast(`Decision "${decision}" recorded`, 'success');
+    if (decision === 'release' && (result.status === 'cooldown' || result.cooldown_remaining_ms != null)) {
+      showToast('Release decision recorded. A cooldown period applies; the recipient will be able to claim after it ends.', 'success');
+    } else {
+      showToast(`Decision "${decision}" recorded`, 'success');
+    }
     await loadTriggers();
     render();
   } catch (err) {
@@ -430,8 +434,10 @@ function renderOverview() {
 
 function renderTriggers() {
   const pending = state.triggers.filter((t) => t.status === 'pending');
+  const cooldown = state.triggers.filter((t) => t.status === 'cooldown');
   const released = state.triggers.filter((t) => t.status === 'released');
   const blocked = state.triggers.filter((t) => t.status === 'attestation_blocked');
+  const aborted = state.triggers.filter((t) => t.status === 'aborted');
 
   const pendingCards = pending.length === 0 ? `
     <div class="card empty-state">
@@ -467,6 +473,40 @@ function renderTriggers() {
     </div>
   `;
   }).join('');
+
+  const cooldownCards = cooldown.length === 0 ? '' : cooldown.map((t) => {
+    const remaining = t.cooldown_remaining_ms != null ? Math.max(0, t.cooldown_remaining_ms) : 0;
+    const days = Math.floor(remaining / (24 * 60 * 60 * 1000));
+    const hours = Math.floor((remaining % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
+    const remainingText = days > 0 ? days + ' day(s)' : hours + ' hour(s)';
+    return `
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <strong>Wallet:</strong> ${esc(t.wallet_id?.substring(0, 16))}...
+          <span class="badge badge-info">cooldown</span>
+        </div>
+        <div style="font-size:12px;color:var(--text-muted);">Path #${t.recipient_index} &bull; ${remainingText} remaining</div>
+      </div>
+      <p style="font-size:13px;color:var(--text-secondary);margin-top:8px;">Release will take effect after the cooldown period. You may submit an additional legal confirmation if required for this case.</p>
+      <button class="btn btn-secondary btn-sm" style="margin-top:10px;" data-action="legal-confirm" data-trigger-id="${esc(t.trigger_id)}">Submit legal confirmation</button>
+    </div>
+  `;
+  }).join('');
+
+  const abortedCards = aborted.length === 0 ? '' : aborted.map((t) => `
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <strong>Wallet:</strong> ${esc(t.wallet_id?.substring(0, 16))}...
+          <span class="badge badge-muted">aborted</span>
+        </div>
+        <div style="font-size:12px;color:var(--text-muted);">Path #${t.recipient_index}</div>
+      </div>
+      <p style="font-size:13px;color:var(--text-secondary);margin-top:8px;">This release was paused by operations. ${t.aborted_reason ? 'Reason: ' + esc(t.aborted_reason) : ''}</p>
+      ${t.remaining_cooldown_ms != null ? `<p style="font-size:12px;color:var(--text-muted);margin-top:4px;">If resumed, ${Math.floor(t.remaining_cooldown_ms / (24 * 60 * 60 * 1000))} day(s) would apply.</p>` : ''}
+    </div>
+  `).join('');
 
   const releasedCards = released.map((t, i) => {
     const idx = state.triggers.indexOf(t);
@@ -513,12 +553,20 @@ function renderTriggers() {
     <h2>Triggers</h2>
     <h3 style="margin-top:16px;font-size:14px;color:var(--text-muted);">Pending</h3>
     ${pendingCards}
+    ${cooldown.length > 0 ? `
+    <h3 style="margin-top:24px;font-size:14px;color:var(--text-muted);">Cooldown — release will take effect after the waiting period</h3>
+    ${cooldownCards}
+    ` : ''}
     ${released.length > 0 ? `
     <h3 style="margin-top:24px;font-size:14px;color:var(--text-muted);">Released — submit factors for recipient claim</h3>
     ${releasedCards}
     ` : ''}
+    ${aborted.length > 0 ? `
+    <h3 style="margin-top:24px;font-size:14px;color:var(--text-muted);">Paused</h3>
+    ${abortedCards}
+    ` : ''}
     ${blocked.length > 0 ? `
-    <h3 style="margin-top:24px;font-size:14px;color:var(--text-muted);">Blocked by Attestation Policy</h3>
+    <h3 style="margin-top:24px;font-size:14px;color:var(--text-muted);">Blocked</h3>
     ${blockedCards}
     ` : ''}
   `;
@@ -762,6 +810,29 @@ function attachAppEvents() {
       }
 
       await submitDecision(trigger, decision, evidence, reason);
+    });
+  });
+
+  // Legal confirmation (for triggers in cooldown — dual attestation)
+  app.querySelectorAll('[data-action="legal-confirm"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const triggerId = btn.dataset.triggerId;
+      if (!triggerId) return;
+      try {
+        const authHeaders = await getAuthHeadersAsync();
+        const resp = await fetch(`${API_BASE}/trigger/${encodeURIComponent(triggerId)}/legal-confirm`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
+          body: JSON.stringify({}),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || data.detail || 'Request failed');
+        showToast('Legal confirmation recorded.', 'success');
+        await loadTriggers();
+        render();
+      } catch (err) {
+        showToast(err.message, 'error');
+      }
     });
   });
 

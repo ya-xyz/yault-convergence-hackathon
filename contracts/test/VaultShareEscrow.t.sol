@@ -400,4 +400,77 @@ contract VaultShareEscrowTest is Test {
         // After all shares moved to escrow, alice's principal should be 0
         assertEq(vault.userPrincipal(alice), 0, "principal should be 0 after full escrow deposit");
     }
+
+    // -----------------------------------------------------------------------
+    //  Threat-model / edge: allocation mismatch, reclaim overflow
+    // -----------------------------------------------------------------------
+
+    function testThreat_Deposit_LengthMismatchReverts() public {
+        uint256 shares = vault.balanceOf(alice);
+        uint256[] memory indices = new uint256[](2);
+        uint256[] memory amounts = new uint256[](1); // length 1 != 2
+        indices[0] = 1;
+        indices[1] = 2;
+        amounts[0] = shares;
+
+        vm.prank(alice);
+        vault.approve(address(escrow), shares);
+        vm.prank(alice);
+        vm.expectRevert(VaultShareEscrow.AllocationSumMismatch.selector);
+        escrow.deposit(WALLET_HASH, shares, indices, amounts);
+    }
+
+    function testThreat_Deposit_SumNotEqualSharesReverts() public {
+        uint256 shares = vault.balanceOf(alice);
+        uint256[] memory indices = new uint256[](2);
+        uint256[] memory amounts = new uint256[](2);
+        indices[0] = 1;
+        indices[1] = 2;
+        amounts[0] = shares;
+        amounts[1] = 1; // sum = shares + 1 != shares
+
+        vm.prank(alice);
+        vault.approve(address(escrow), shares);
+        vm.prank(alice);
+        vm.expectRevert(VaultShareEscrow.AllocationSumMismatch.selector);
+        escrow.deposit(WALLET_HASH, shares, indices, amounts);
+    }
+
+    function testThreat_Claim_AmountExceedsRemainingReverts() public {
+        uint256 shares = vault.balanceOf(alice);
+        uint256[] memory indices = new uint256[](1);
+        uint256[] memory amounts = new uint256[](1);
+        indices[0] = 1;
+        amounts[0] = shares;
+
+        _approveAndDeposit(shares, indices, amounts);
+        _submitRelease(1);
+
+        vm.prank(alice);
+        vm.expectRevert(VaultShareEscrow.ClaimExceedsRemaining.selector);
+        escrow.claim(WALLET_HASH, 1, bob, shares + 1, true);
+    }
+
+    function testThreat_Reclaim_AmountExceedsUnclaimedReverts() public {
+        uint256 shares = vault.balanceOf(alice);
+        uint256[] memory indices = new uint256[](1);
+        uint256[] memory amounts = new uint256[](1);
+        indices[0] = 1;
+        amounts[0] = shares;
+
+        _approveAndDeposit(shares, indices, amounts);
+
+        vm.prank(alice);
+        vm.expectRevert(VaultShareEscrow.ReclaimExceedsUnclaimed.selector);
+        escrow.reclaim(WALLET_HASH, 1, shares + 1);
+    }
+
+    function testThreat_RegisterWallet_TwiceReverts() public {
+        // setUp already registered WALLET_HASH for alice
+        assertEq(escrow.walletOwner(WALLET_HASH), alice);
+
+        vm.prank(attacker);
+        vm.expectRevert(VaultShareEscrow.WalletAlreadyRegistered.selector);
+        escrow.registerWallet(WALLET_HASH);
+    }
 }

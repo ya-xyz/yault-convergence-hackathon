@@ -220,4 +220,73 @@ contract YaultPathClaimTest is Test {
         bytes32 digest = pool.getClaimHash(WALLET_HASH, PATH_INDEX, amount, to, nonce, deadline);
         (v, r, s) = vm.sign(pathControllerPk, digest);
     }
+
+    // -----------------------------------------------------------------------
+    //  Threat-model: signature replay, deadline
+    // -----------------------------------------------------------------------
+
+    function testThreat_SignatureReplay_SameSignatureFailsSecondTime() public {
+        vm.startPrank(walletOwnerAddr);
+        token.approve(address(pool), type(uint256).max);
+        pool.registerWallet(WALLET_HASH);
+        pool.deposit(WALLET_HASH, PATH_TOTAL_AMOUNT);
+        pool.registerPath(WALLET_HASH, PATH_INDEX, pathController, PATH_TOTAL_AMOUNT);
+        vm.stopPrank();
+
+        _submitReleaseAttestation();
+
+        uint256 amount = 400e6;
+        uint256 deadline = block.timestamp + 3600;
+        (uint8 v, bytes32 r, bytes32 s) = _signClaim(amount, recipient, deadline);
+
+        pool.claim(WALLET_HASH, PATH_INDEX, amount, recipient, deadline, v, r, s);
+        assertEq(token.balanceOf(recipient), amount);
+
+        // Replay same signature — nonce has incremented, so digest differs; signer would need to sign (nonce+1).
+        // Same (v,r,s) was for nonce=0; now nonce=1, so getClaimHash returns different digest → invalid signature.
+        vm.expectRevert(YaultPathClaim.InvalidSignature.selector);
+        pool.claim(WALLET_HASH, PATH_INDEX, amount, recipient, deadline, v, r, s);
+    }
+
+    function testThreat_Claim_DeadlineExpiredReverts() public {
+        vm.startPrank(walletOwnerAddr);
+        token.approve(address(pool), type(uint256).max);
+        pool.registerWallet(WALLET_HASH);
+        pool.deposit(WALLET_HASH, PATH_TOTAL_AMOUNT);
+        pool.registerPath(WALLET_HASH, PATH_INDEX, pathController, PATH_TOTAL_AMOUNT);
+        vm.stopPrank();
+
+        _submitReleaseAttestation();
+
+        uint256 deadline = block.timestamp - 1; // already expired
+        (uint8 v, bytes32 r, bytes32 s) = _signClaim(PATH_TOTAL_AMOUNT, recipient, deadline);
+
+        vm.expectRevert(YaultPathClaim.DeadlineExpired.selector);
+        pool.claim(WALLET_HASH, PATH_INDEX, PATH_TOTAL_AMOUNT, recipient, deadline, v, r, s);
+    }
+
+    function testThreat_Claim_WrongSignerReverts() public {
+        vm.startPrank(walletOwnerAddr);
+        token.approve(address(pool), type(uint256).max);
+        pool.registerWallet(WALLET_HASH);
+        pool.deposit(WALLET_HASH, PATH_TOTAL_AMOUNT);
+        pool.registerPath(WALLET_HASH, PATH_INDEX, pathController, PATH_TOTAL_AMOUNT);
+        vm.stopPrank();
+
+        _submitReleaseAttestation();
+
+        uint256 deadline = block.timestamp + 3600;
+        (uint8 v, bytes32 r, bytes32 s) = _signClaim(PATH_TOTAL_AMOUNT, recipient, deadline);
+
+        // Sign with a different key (not pathController)
+        uint256 wrongPk = 0xB0B;
+        bytes32 digest = pool.getClaimHash(
+            WALLET_HASH, PATH_INDEX, PATH_TOTAL_AMOUNT, recipient,
+            pool.claimNonce(WALLET_HASH, PATH_INDEX), deadline
+        );
+        (v, r, s) = vm.sign(wrongPk, digest);
+
+        vm.expectRevert(YaultPathClaim.InvalidSignature.selector);
+        pool.claim(WALLET_HASH, PATH_INDEX, PATH_TOTAL_AMOUNT, recipient, deadline, v, r, s);
+    }
 }

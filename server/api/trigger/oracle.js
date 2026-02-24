@@ -22,9 +22,15 @@ const { evaluateReleaseAttestationGate } = require('../../services/attestationGa
 const { submitFallbackAttestation } = require('../../services/attestationSubmitter');
 const { dualAuthMiddleware, authorityAuthMiddleware } = require('../../middleware/auth');
 const { TriggerEvent, ReleaseDecision } = require('../../models/schemas');
+const { sendCooldownNotification } = require('../../services/email');
 // Note: RWA delivery for oracle triggers happens in decision.js maybeFinalizeDecision() when cooldown expires.
 
 const router = Router();
+
+function getDefaultCooldownMs() {
+  const h = config.cooldown && config.cooldown.defaultHours != null ? config.cooldown.defaultHours : 168;
+  return h * 60 * 60 * 1000;
+}
 
 /** When set, POST /from-oracle requires X-Oracle-Internal-Key header to match (for cron/CRE only). */
 const ORACLE_INTERNAL_API_KEY = process.env.ORACLE_INTERNAL_API_KEY || '';
@@ -226,7 +232,7 @@ router.post('/from-oracle', async (req, res) => {
 
     const triggerId = crypto.randomBytes(16).toString('hex');
     const now = Date.now();
-    const cooldownMs = ReleaseDecision.DEFAULT_COOLDOWN_MS;
+    const cooldownMs = getDefaultCooldownMs();
     const effectiveAt = now + cooldownMs;
 
     const triggerValidation = TriggerEvent.validate({
@@ -281,8 +287,28 @@ router.post('/from-oracle', async (req, res) => {
         created_at: now,
       });
     } catch (auditErr) {
-      // #19 FIX: Log non-fatal errors instead of silently swallowing
       console.warn('[trigger/oracle] Non-fatal: audit log write failed:', auditErr.message);
+    }
+
+    try {
+      const bindings = await db.bindings.findByWallet(walletIdTrimmed);
+      const binding = bindings.find((b) => b.status === 'active');
+      const emails = [];
+      if (binding && binding.authority_id) {
+        const authority = await db.authorities.findById(binding.authority_id);
+        if (authority && authority.email) emails.push(authority.email);
+      }
+      if (process.env.COOLDOWN_NOTIFY_EMAIL) emails.push(process.env.COOLDOWN_NOTIFY_EMAIL);
+      if (emails.length > 0) {
+        await sendCooldownNotification(emails, {
+          triggerId,
+          walletId: walletIdTrimmed,
+          recipientIndex,
+          effectiveAt,
+        });
+      }
+    } catch (emailErr) {
+      console.warn('[trigger/oracle] Cooldown notification failed:', emailErr.message);
     }
 
     return res.status(201).json({
@@ -336,7 +362,7 @@ router.post('/simulate-chainlink', dualAuthMiddleware, async (req, res) => {
     }
 
     const indices = binding.recipient_indices.map(Number);
-    const cooldownMs = ReleaseDecision.DEFAULT_COOLDOWN_MS;
+    const cooldownMs = getDefaultCooldownMs();
     const cooldownHours = cooldownMs / (60 * 60 * 1000);
     const cooldownMinutes = Math.round(cooldownMs / 60000);
     const now = Date.now();
@@ -413,6 +439,24 @@ router.post('/simulate-chainlink', dualAuthMiddleware, async (req, res) => {
           decided_by: 'oracle',
         };
         await db.triggers.create(triggerId, record);
+        try {
+          const emails = [];
+          if (binding.authority_id) {
+            const authority = await db.authorities.findById(binding.authority_id);
+            if (authority && authority.email) emails.push(authority.email);
+          }
+          if (process.env.COOLDOWN_NOTIFY_EMAIL) emails.push(process.env.COOLDOWN_NOTIFY_EMAIL);
+          if (emails.length > 0) {
+            await sendCooldownNotification(emails, {
+              triggerId,
+              walletId,
+              recipientIndex,
+              effectiveAt,
+            });
+          }
+        } catch (emailErr) {
+          console.warn('[simulate-chainlink] Cooldown notification failed:', emailErr.message);
+        }
         results.push({ recipientIndex, status: 'created', trigger_id: triggerId, attestation_tx: attestationTxHash });
       } catch (indexErr) {
         console.error(`[simulate-chainlink] Error for index ${recipientIndex}:`, indexErr);
