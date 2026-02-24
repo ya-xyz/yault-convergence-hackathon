@@ -101,9 +101,26 @@ module.exports = {
   // Note: heartbeat/activity-detection config removed.
   // Triggers are now initiated by authorities via legal-event API.
   cooldown: {
-    defaultHours: 24,          // default cooldown before release takes effect
-    maxHours: 168,             // max allowed cooldown (7 days)
-    minHours: 0,               // 0 = allow immediate release (for hold/reject)
+    // Allow explicit 0 (immediate); default 168 (1 week). NaN/empty → 168.
+    defaultHours: (() => {
+      const raw = process.env.COOLDOWN_DEFAULT_HOURS;
+      if (raw === undefined || raw === '') return 168;
+      const n = parseInt(raw, 10);
+      return (Number.isInteger(n) && n >= 0) ? n : 168;
+    })(),
+    maxHours: (() => {
+      const raw = process.env.COOLDOWN_MAX_HOURS;
+      if (raw === undefined || raw === '') return 168;
+      const n = parseInt(raw, 10);
+      return (Number.isInteger(n) && n >= 0) ? n : 168;
+    })(),
+    minHours: 0,
+  },
+
+  // Trigger release safety: global pause, high-value wallets (dual attestation), fallback = emergency only.
+  trigger: {
+    releasePaused: process.env.TRIGGER_RELEASE_PAUSED === 'true',  // when true, cooldown finalizer does not release
+    highValueWalletIds: (process.env.HIGH_VALUE_WALLET_IDS || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
   },
 
   // Campaign / Rebate — placeholder config for future referral and fee-waiver incentives.

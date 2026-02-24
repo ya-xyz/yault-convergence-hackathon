@@ -207,7 +207,8 @@ router.get('/stats', async (_req, res) => {
     const verifiedFirms = authorityArr.filter(l => l.verified).length;
     const activeBindings = bindingArr.filter(b => b.status === 'active').length;
     const pendingTriggers = triggerArr.filter(t => t.status === 'pending' || t.status === 'cooldown').length;
-    const releasedTriggers = triggerArr.filter(t => t.decision === 'release').length;
+    const releasedTriggers = triggerArr.filter(t => t.status === 'released').length;
+    const abortedTriggers = triggerArr.filter(t => t.status === 'aborted').length;
 
     // Unique wallet IDs
     const walletIds = new Set();
@@ -229,6 +230,7 @@ router.get('/stats', async (_req, res) => {
         total_triggers: triggerArr.length,
         pending_triggers: pendingTriggers,
         released_triggers: releasedTriggers,
+        aborted_triggers: abortedTriggers,
       },
       kyc: {
         pending: kycPending,
@@ -514,6 +516,290 @@ router.get('/triggers', async (_req, res) => {
   } catch (err) {
     console.error('[admin/triggers] Error:', err);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ─── GET /trigger/policy — Release pause and high-value wallet list (from config/env) ───
+
+router.get('/trigger/policy', (_req, res) => {
+  const triggerConfig = config.trigger || {};
+  res.json({
+    releasePaused: !!triggerConfig.releasePaused,
+    highValueWalletIds: Array.isArray(triggerConfig.highValueWalletIds) ? triggerConfig.highValueWalletIds : [],
+  });
+});
+
+// ─── POST /trigger/:id/legal-confirm — Admin legal confirmation for dual attestation ───
+
+router.post('/trigger/:id/legal-confirm', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const trigger = await db.triggers.findById(id);
+    if (!trigger) {
+      return res.status(404).json({ error: 'Not found', detail: `Trigger ${id} not found` });
+    }
+    if (trigger.status !== 'cooldown') {
+      return res.status(400).json({
+        error: 'Invalid state',
+        detail: `Trigger is in "${trigger.status}". Legal confirmation only applies to triggers in cooldown.`,
+      });
+    }
+    const now = Date.now();
+    const updated = { ...trigger, legal_confirmation_received_at: now };
+    await db.triggers.update(id, updated);
+    return res.json({
+      trigger_id: id,
+      legal_confirmation_received_at: now,
+      message: 'Legal confirmation recorded by admin.',
+    });
+  } catch (err) {
+    console.error('[admin/trigger/legal-confirm] Error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ─── POST /trigger/:id/abort — Emergency abort: pause cooldown (remaining time is preserved for resume) ───
+
+router.post('/trigger/:id/abort', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const reason = (req.body && req.body.reason) ? String(req.body.reason).trim().substring(0, 2000) : '';
+    const trigger = await db.triggers.findById(id);
+    if (!trigger) {
+      return res.status(404).json({ error: 'Not found', detail: `Trigger ${id} not found` });
+    }
+    if (trigger.status !== 'cooldown') {
+      return res.status(400).json({
+        error: 'Invalid state',
+        detail: `Trigger is in "${trigger.status}". Emergency abort only applies to triggers in cooldown.`,
+      });
+    }
+    const now = Date.now();
+    const remainingCooldownMs = Math.max(0, (trigger.effective_at || 0) - now);
+    const adminId = req.adminAuth && (req.adminAuth.address || req.adminAuth.method) ? (req.adminAuth.address || req.adminAuth.method) : 'admin';
+    const updated = {
+      ...trigger,
+      status: 'aborted',
+      aborted_at: now,
+      aborted_by: adminId,
+      aborted_reason: reason || null,
+      remaining_cooldown_ms: remainingCooldownMs,
+    };
+    await db.triggers.update(id, updated);
+    try {
+      await db.auditLog.create(`abort_${id}_${now}`, {
+        type: 'TRIGGER_EMERGENCY_ABORT',
+        trigger_id: id,
+        wallet_id: trigger.wallet_id,
+        recipient_index: trigger.recipient_index,
+        aborted_at: now,
+        aborted_by: adminId,
+        aborted_reason: reason || null,
+        remaining_cooldown_ms: remainingCooldownMs,
+      });
+    } catch (auditErr) {
+      console.warn('[admin/trigger/abort] Audit log failed:', auditErr.message);
+    }
+    return res.json({
+      trigger_id: id,
+      status: 'aborted',
+      aborted_at: now,
+      remaining_cooldown_ms: remainingCooldownMs,
+      message: 'Trigger aborted. Cooldown paused; on resume the remaining time will apply.',
+    });
+  } catch (err) {
+    console.error('[admin/trigger/abort] Error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ─── POST /trigger/:id/resume — Resume an aborted trigger; cooldown restarts with remaining time ───
+
+router.post('/trigger/:id/resume', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const trigger = await db.triggers.findById(id);
+    if (!trigger) {
+      return res.status(404).json({ error: 'Not found', detail: `Trigger ${id} not found` });
+    }
+    if (trigger.status !== 'aborted') {
+      return res.status(400).json({
+        error: 'Invalid state',
+        detail: `Trigger is in "${trigger.status}". Resume only applies to aborted triggers.`,
+      });
+    }
+    const now = Date.now();
+    const remainingMs = typeof trigger.remaining_cooldown_ms === 'number' && trigger.remaining_cooldown_ms >= 0
+      ? trigger.remaining_cooldown_ms
+      : 0;
+    const newEffectiveAt = now + remainingMs;
+    const adminId = req.adminAuth && (req.adminAuth.address || req.adminAuth.method) ? (req.adminAuth.address || req.adminAuth.method) : 'admin';
+    const updated = {
+      ...trigger,
+      status: 'cooldown',
+      effective_at: newEffectiveAt,
+      cooldown_ms: remainingMs,
+    };
+    delete updated.aborted_at;
+    delete updated.aborted_by;
+    delete updated.aborted_reason;
+    delete updated.remaining_cooldown_ms;
+    await db.triggers.update(id, updated);
+    try {
+      await db.auditLog.create(`resume_${id}_${now}`, {
+        type: 'TRIGGER_ABORT_RESUMED',
+        trigger_id: id,
+        wallet_id: trigger.wallet_id,
+        recipient_index: trigger.recipient_index,
+        resumed_at: now,
+        resumed_by: adminId,
+        remaining_cooldown_ms: remainingMs,
+        new_effective_at: newEffectiveAt,
+      });
+    } catch (auditErr) {
+      console.warn('[admin/trigger/resume] Audit log failed:', auditErr.message);
+    }
+    return res.json({
+      trigger_id: id,
+      status: 'cooldown',
+      effective_at: newEffectiveAt,
+      cooldown_remaining_ms: remainingMs,
+      message: remainingMs > 0
+        ? 'Trigger resumed. Cooldown restarted with remaining time; it will finalize when that expires (if not paused).'
+        : 'Trigger resumed. Remaining time was 0; it will finalize on the next run (if not paused).',
+    });
+  } catch (err) {
+    console.error('[admin/trigger/resume] Error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ─── POST /trigger/emergency-release — Manual emergency release via fallback attestation ───
+
+router.post('/trigger/emergency-release', async (req, res) => {
+  try {
+    const { wallet_id, recipient_index, evidence_hash } = req.body || {};
+    const walletId = (wallet_id || '').trim();
+    const recipientIndex = parseInt(recipient_index, 10);
+    let evidenceHash = (evidence_hash || '').trim().replace(/^0x/i, '');
+    if (!walletId || !Number.isInteger(recipientIndex) || recipientIndex < 0) {
+      return res.status(400).json({ error: 'wallet_id and recipient_index (non-negative integer) are required' });
+    }
+    if (!evidenceHash || evidenceHash.length !== 64 || !/^[0-9a-fA-F]+$/.test(evidenceHash)) {
+      return res.status(400).json({ error: 'evidence_hash must be a 64-char hex SHA-256 hash' });
+    }
+    const crypto = require('crypto');
+    const { TriggerEvent } = require('../../models/schemas');
+    const { submitFallbackAttestation } = require('../../services/attestationSubmitter');
+    const { sendCooldownNotification } = require('../../services/email');
+    const cooldownDefaultHours = (config.cooldown && config.cooldown.defaultHours) != null ? config.cooldown.defaultHours : 168;
+    const cooldownMs = cooldownDefaultHours * 60 * 60 * 1000;
+    const ORACLE_AUTHORITY_ID =
+      config.oracle?.oracleAuthorityId ||
+      crypto.createHash('sha256').update('yault-chainlink-oracle', 'utf8').digest('hex');
+    const walletIdNo0x = walletId.replace(/^0x/i, '').toLowerCase();
+    const walletIdNorm = `0x${walletIdNo0x}`;
+    const existingWith0x = await db.triggers.findByWallet(walletIdNorm);
+    const existingWithout0x = await db.triggers.findByWallet(walletIdNo0x);
+    const existing = [...(existingWith0x || []), ...(existingWithout0x || [])];
+    const normalizeWalletId = (v) => String(v || '').replace(/^0x/i, '').toLowerCase();
+    const dup = existing.find(
+      (t) =>
+        normalizeWalletId(t.wallet_id) === walletIdNo0x &&
+        Number(t.recipient_index) === recipientIndex &&
+        (t.status === 'pending' || t.status === 'cooldown')
+    );
+    if (dup) {
+      return res.status(409).json({
+        error: 'Duplicate trigger',
+        detail: 'An active trigger already exists for this wallet/recipient',
+        trigger_id: dup.trigger_id,
+      });
+    }
+    const now = Date.now();
+    const effectiveAt = now + cooldownMs;
+    const triggerId = crypto.randomBytes(16).toString('hex');
+    const triggerValidation = TriggerEvent.validate({
+      wallet_id: walletIdNorm,
+      authority_id: ORACLE_AUTHORITY_ID,
+      recipient_index: recipientIndex,
+      tlock_round: undefined,
+      arweave_tx_id: null,
+      release_request: null,
+    });
+    if (!triggerValidation.valid) {
+      return res.status(400).json({ error: 'Validation failed', details: triggerValidation.errors });
+    }
+    let attestationTxHash = null;
+    try {
+      const atResult = await submitFallbackAttestation(config, {
+        walletId: walletIdNorm,
+        recipientIndex,
+        decision: 'release',
+        evidenceHash,
+      });
+      attestationTxHash = atResult.txHash;
+    } catch (atErr) {
+      return res.status(502).json({
+        error: 'Fallback attestation submit failed',
+        detail: atErr.message,
+      });
+    }
+    const record = {
+      ...triggerValidation.data,
+      trigger_id: triggerId,
+      trigger_type: 'oracle',
+      emergency_recovery: true,
+      reason_code: 'authorized_request',
+      matter_id: null,
+      evidence_hash: evidenceHash,
+      initiation_signature: null,
+      initiated_by: 'admin-emergency-release',
+      initiated_at: now,
+      notes: 'Manual emergency release (fallback attestation)',
+      status: 'cooldown',
+      decision: 'release',
+      decision_reason: 'Emergency recovery',
+      decision_reason_code: 'authorized_request',
+      decision_evidence_hash: evidenceHash,
+      decision_signature: null,
+      cooldown_ms: cooldownMs,
+      decided_at: now,
+      effective_at: effectiveAt,
+      decided_by: 'admin',
+    };
+    await db.triggers.create(triggerId, record);
+    try {
+      const bindings = await db.bindings.findByWallet(walletIdNorm);
+      const binding = bindings.find((b) => b.status === 'active');
+      const emails = [];
+      if (binding && binding.authority_id) {
+        const authority = await db.authorities.findById(binding.authority_id);
+        if (authority && authority.email) emails.push(authority.email);
+      }
+      if (process.env.COOLDOWN_NOTIFY_EMAIL) emails.push(process.env.COOLDOWN_NOTIFY_EMAIL);
+      if (emails.length > 0) {
+        await sendCooldownNotification(emails, {
+          triggerId,
+          walletId: walletIdNorm,
+          recipientIndex,
+          effectiveAt,
+        });
+      }
+    } catch (emailErr) {
+      console.warn('[admin/emergency-release] Cooldown notification failed:', emailErr.message);
+    }
+    return res.status(201).json({
+      trigger_id: triggerId,
+      status: 'cooldown',
+      emergency_recovery: true,
+      attestation_tx: attestationTxHash,
+      effective_at: effectiveAt,
+      cooldown_hours: cooldownDefaultHours,
+    });
+  } catch (err) {
+    console.error('[admin/trigger/emergency-release] Error:', err);
+    return res.status(500).json({ error: 'Internal server error', detail: err.message });
   }
 });
 

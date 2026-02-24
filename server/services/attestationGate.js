@@ -17,12 +17,15 @@ const ATTESTATION_MAX_AGE_MS =
 /**
  * Evaluate whether a release is allowed by current on-chain attestation.
  *
- * @param {{ walletId: string, recipientIndex: number }} input
+ * @param {{ walletId: string, recipientIndex: number, allowFallback?: boolean }} input
+ *   - allowFallback: when true, fallback (source=1) attestation is accepted (manual emergency recovery only).
+ *     When false or omitted, only oracle (source=0) is accepted for normal flow.
  * @returns {Promise<{ valid: boolean, code: string|null, detail: string|null, attestation: any }>}
  */
 async function evaluateReleaseAttestationGate(input) {
   const walletId = String(input && input.walletId ? input.walletId : '').trim();
   const recipientIndex = Number(input && input.recipientIndex);
+  const allowFallback = !!(input && input.allowFallback);
   if (!walletId || !Number.isInteger(recipientIndex) || recipientIndex < 0) {
     return {
       valid: false,
@@ -73,15 +76,15 @@ async function evaluateReleaseAttestationGate(input) {
       attestation: null,
     };
   }
-  // Accept both 'oracle' (Chainlink CRE, source=0) and 'fallback' (relayer/simulate, source=1).
-  // In production, restrict to 'oracle' only; for hackathon demo we also accept 'fallback'
-  // since simulate-chainlink uses submitFallbackAttestation.
-  const acceptedSources = ['oracle', 'fallback'];
+  // Normal flow: only oracle (Chainlink CRE). Fallback is accepted only for manual emergency recovery (allowFallback=true).
+  const acceptedSources = allowFallback ? ['oracle', 'fallback'] : ['oracle'];
   if (!acceptedSources.includes(attestation.source)) {
     return {
       valid: false,
       code: 'ATTESTATION_SOURCE_INVALID',
-      detail: `Attestation source "${attestation.source}" is not accepted`,
+      detail: allowFallback
+        ? `Attestation source "${attestation.source}" is not accepted`
+        : 'Only oracle attestation is accepted for release. Fallback is reserved for manual emergency recovery.',
       attestation,
     };
   }

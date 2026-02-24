@@ -220,6 +220,45 @@ async function sendDecisionConfirmation(authorityEmail, triggerId, decision) {
 }
 
 /**
+ * Notify recipients that a release trigger has entered cooldown (release will take effect after effective_at).
+ * Sends to each email in the array; used for authority and/or wallet owner notification.
+ *
+ * @param {string[]} toEmails - List of email addresses to notify (e.g. authority, admin)
+ * @param {object} opts - { triggerId, walletId, recipientIndex, effectiveAt }
+ * @returns {Promise<void>}
+ */
+async function sendCooldownNotification(toEmails, opts) {
+  const { triggerId, walletId, recipientIndex, effectiveAt } = opts || {};
+  if (!Array.isArray(toEmails) || toEmails.length === 0) return;
+  const effectiveDate = effectiveAt ? new Date(effectiveAt).toISOString() : '';
+
+  const provider = getProvider();
+  const subject = '[Yault] Release Trigger — Cooldown Started';
+  const body = [
+    'A release trigger has entered the cooldown period.',
+    '',
+    `Trigger ID:       ${triggerId || '—'}`,
+    `Wallet ID:        ${walletId || '—'}`,
+    `Recipient Index:  ${recipientIndex != null ? recipientIndex : '—'}`,
+    `Release effective at: ${effectiveDate || '—'}`,
+    '',
+    'During cooldown the decision can be cancelled. After the effective time, release will be finalized.',
+    '',
+    'This is an automated notification from the Yault Platform.',
+  ].join('\n');
+
+  for (const to of toEmails) {
+    if (to && typeof to === 'string' && to.trim()) {
+      try {
+        await provider.send(to.trim(), subject, body);
+      } catch (err) {
+        console.warn('[email] sendCooldownNotification failed for', to, err.message);
+      }
+    }
+  }
+}
+
+/**
  * Send a trial request notification to the platform admin.
  *
  * @param {object} params
@@ -291,6 +330,7 @@ module.exports = {
   sendTriggerNotification,
   sendCredentialReminder,
   sendDecisionConfirmation,
+  sendCooldownNotification,
   sendTrialRequest,
   sendInviteEmail,
   /** Exposed for testing */

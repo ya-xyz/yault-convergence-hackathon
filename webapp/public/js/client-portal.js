@@ -53,7 +53,7 @@ const state = {
   protectionStep: 'overview', // 'overview' | 'create-plan' | 'search' | 'configure' | 'distribute'
   planStep: 'triggers',   // 'triggers' | 'recipients' | 'trigger-config' | 'review' | 'credentials'
   planType: null,         // 'wallet' | 'yield_pool' — Wallet Plan supports only one recipient; Yield Pool requires assets in the pool
-  planTriggerTypes: { oracle: false, legal_authority: false, inactivity: false, oracle_with_legal_fallback: false },
+  planTriggerTypes: { oracle: false, legal_authority: false, inactivity: false },
   vaultBalanceForPlan: null, // { value, shares } when step = recipients & planType = yield_pool
   planRecipients: [],     // [{ label, email?, address?, percentage }] — from Related Accounts
   planTriggerConfig: {
@@ -145,7 +145,8 @@ const state = {
   pathClaimPathTotalAmount: '',
   pathClaimRemaining: null,
   pathClaimAmountFromBlob: null,  // parsed from blob (80-char hex), no amount input on page
-  pathClaimControllerKey: '',     // path controller private key (hex) for signing claim; from Unseal in production
+  pathClaimAdminFactorHex: null,  // from parse-blob when amount-bound; used for composite_with_amount signing
+  pathClaimControllerKey: '',     // path controller private key (hex) for signing claim; optional if amount-bound flow used
   pathClaimLoading: false,
   pathClaimError: null,
   claimMeItems: [],              // GET /api/claim/me → items (released for this recipient)
@@ -780,8 +781,8 @@ function renderProtectionOverview() {
     ` : (() => {
       const t = state.savedPlan.triggerTypes;
       let triggerText = '';
-      if (t.oracle) triggerText = 'Oracle Trigger (Chainlink Oracle)' + (t.oracle_with_legal_fallback ? '; Legal Authority as fallback' : '');
-      else if (t.legal_authority) triggerText = 'Legal Authority Trigger';
+      if (t.oracle) triggerText = 'Chain attestation';
+      else if (t.legal_authority) triggerText = 'Legal authority';
       else if (t.inactivity) triggerText = 'Inactivity: ' + (state.savedPlan.triggerConfig.inactivityMonths === 6 ? '6 months' : state.savedPlan.triggerConfig.inactivityMonths === 12 ? '1 year' : state.savedPlan.triggerConfig.inactivityMonths === 24 ? '2 years' : state.savedPlan.triggerConfig.inactivityMonths === 36 ? '3 years' : state.savedPlan.triggerConfig.inactivityMonths === 60 ? '5 years' : state.savedPlan.triggerConfig.inactivityMonths + ' months');
       else triggerText = '—';
       const planChain = state.savedPlan.chain_key ? (state.savedPlan.chain_key.charAt(0).toUpperCase() + state.savedPlan.chain_key.slice(1)) : chainLabel;
@@ -1028,26 +1029,27 @@ function renderPlanStepTriggers() {
         <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:8px 0;">
           <input type="radio" name="planTriggerMain" value="oracle" id="planTriggerOracle" ${mainChoice === 'oracle' ? 'checked' : ''} style="margin-top:3px;" />
           <span>
-            <strong>Oracle Trigger</strong> — Chain/oracle attestation (e.g. court record). <span style="font-size:12px;color:var(--text-muted);">Provider: Chainlink Oracle.</span>
-            <div style="margin-top:8px;margin-left:24px;">
-              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
-                <input type="checkbox" id="planTriggerOracleLegalFallback" ${t.oracle_with_legal_fallback ? 'checked' : ''} />
-                <span>Legal Authority Trigger as fallback</span>
-              </label>
-            </div>
+            <strong>Chain attestation</strong><br/>
+            <span style="font-size:12px;color:var(--text-muted);">Release is triggered when an official record (e.g. court or registry) is confirmed on chain.</span>
           </span>
         </label>
       </div>
       <div class="form-group">
-        <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 0;">
-          <input type="radio" name="planTriggerMain" value="legal_authority" id="planTriggerLegal" ${mainChoice === 'legal_authority' ? 'checked' : ''} style="margin-top:0;" />
-          <span><strong>Legal Authority Trigger</strong> — Law firm or notary verifies and initiates release</span>
+        <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:8px 0;">
+          <input type="radio" name="planTriggerMain" value="legal_authority" id="planTriggerLegal" ${mainChoice === 'legal_authority' ? 'checked' : ''} style="margin-top:3px;" />
+          <span>
+            <strong>Legal authority</strong><br/>
+            <span style="font-size:12px;color:var(--text-muted);">A designated law firm or notary verifies the event and initiates release.</span>
+          </span>
         </label>
       </div>
       <div class="form-group">
-        <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 0;">
-          <input type="radio" name="planTriggerMain" value="inactivity" id="planTriggerInactivity" ${mainChoice === 'inactivity' ? 'checked' : ''} style="margin-top:0;" />
-          <span><strong>Inactivity Detection Trigger</strong> — No activity for a period, then release can be initiated</span>
+        <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:8px 0;">
+          <input type="radio" name="planTriggerMain" value="inactivity" id="planTriggerInactivity" ${mainChoice === 'inactivity' ? 'checked' : ''} style="margin-top:3px;" />
+          <span>
+            <strong>Inactivity detection</strong><br/>
+            <span style="font-size:12px;color:var(--text-muted);">If there is no activity for a set period, release can be initiated.</span>
+          </span>
         </label>
       </div>
     </div>
@@ -1146,12 +1148,12 @@ function renderPlanStepTriggerConfig() {
   if (t.oracle) {
     html += `
       <div class="card">
-        <h3>Oracle Trigger</h3>
-        <p style="font-size:12px;color:var(--text-muted);">Provider: <strong>Chainlink Oracle</strong>. Attestation (e.g. CRE, death registry) is configured at platform level.</p>
+        <h3>Chain attestation</h3>
+        <p style="font-size:12px;color:var(--text-muted);">Official records (e.g. court or registry) are verified at platform level. No further configuration needed.</p>
       </div>
     `;
   }
-  const needAuthorities = t.legal_authority || (t.oracle && t.oracle_with_legal_fallback);
+  const needAuthorities = t.legal_authority;
   const singleAuthorityOnly = needAuthorities;
   if (needAuthorities) {
     if (singleAuthorityOnly && selected.length > 1) {
@@ -1221,7 +1223,7 @@ function renderPlanStepTriggerConfig() {
   if (!t.oracle && !t.legal_authority && !t.inactivity) {
     html += `<div class="alert alert-warning">Select at least one trigger type in Step 1.</div>`;
   } else {
-    const needAuthForNext = t.legal_authority || (t.oracle && t.oracle_with_legal_fallback);
+    const needAuthForNext = t.legal_authority;
     const selectedCount = (state.planTriggerConfig.legalAuthority.selectedFirms || []).length;
     html += needAuthForNext && selectedCount < 1
       ? `<p style="font-size:13px;color:var(--warning);margin-top:12px;">${t('firmRequiredWarning')}</p><button class="btn btn-primary" id="btnPlanStepNext" style="margin-top:12px;" disabled>Next: Review Plan</button>`
@@ -1237,11 +1239,11 @@ function renderPlanStepReview() {
   const totalPct = recipients.reduce((s, r) => s + (Number(r.percentage) || 0), 0);
   const planTypeLabel = state.planType === 'yield_pool' ? 'Yielding Vault Plan' : 'Wallet Plan';
   let triggerSummary = '';
-  if (t.oracle) triggerSummary = 'Oracle Trigger (Chainlink Oracle)' + (t.oracle_with_legal_fallback ? '; Legal Authority as fallback' : '');
-  else if (t.legal_authority) triggerSummary = 'Legal Authority';
+  if (t.oracle) triggerSummary = 'Chain attestation';
+  else if (t.legal_authority) triggerSummary = 'Legal authority';
   else if (t.inactivity) triggerSummary = 'Inactivity: ' + (INACTIVITY_OPTIONS.find(o => o.value === state.planTriggerConfig.inactivityMonths)?.label || state.planTriggerConfig.inactivityMonths + ' months');
   else triggerSummary = 'None';
-  const needAuthoritiesForReview = t.legal_authority || (t.oracle && t.oracle_with_legal_fallback);
+  const needAuthoritiesForReview = t.legal_authority;
   const firmsOk = !needAuthoritiesForReview || (leg.selectedFirms || []).length >= 1;
 
   return `
@@ -1253,6 +1255,7 @@ function renderPlanStepReview() {
       <p>${esc(planTypeLabel)}</p>
       <h3 style="margin-top:14px;">Trigger type</h3>
       <p>${triggerSummary}</p>
+      <p style="font-size:12px;color:var(--text-muted);margin-top:6px;">After the trigger condition is met, a cooldown period (e.g. about 7 days) applies before release takes effect. This gives time to correct any mistakes.</p>
       <h3 style="margin-top:14px;">Recipients</h3>
       ${recipients.map(r => `<div>${esc(r.label || r.name || '')} — ${r.percentage}%</div>`).join('')}
       <p style="font-size:12px;margin-top:6px;">Total: ${totalPct}%</p>
@@ -2201,8 +2204,9 @@ function renderClaimStep2() {
         ${state.pathClaimRemaining != null ? `<p style="margin-bottom:8px;"><strong>Remaining on chain:</strong> <code>${esc(String(state.pathClaimRemaining))}</code></p>` : ''}
         <div class="form-group" style="margin-top:12px;">
           <label class="form-label">Path controller key (hex)</label>
-          <input type="password" class="form-input" id="inputPathClaimControllerKey" placeholder="0x..."
+          <input type="password" class="form-input" id="inputPathClaimControllerKey" placeholder="0x... or leave empty for amount-bound signing"
             value="${esc(state.pathClaimControllerKey || '')}" />
+          <p class="form-hint" style="font-size:11px;color:var(--text-muted);margin-top:4px;">Leave empty if you completed Step 1 (mnemonic + passphrase): amount-bound key is derived from blob and the connected wallet pays gas.</p>
         </div>
         <button type="button" class="btn btn-primary" id="btnPathClaimClaim" ${state.pathClaimLoading ? 'disabled' : ''}>
           ${state.pathClaimLoading ? 'Sending claim...' : 'Claim to my wallet'}
@@ -2740,7 +2744,7 @@ function attachAppEvents() {
       state.planStep = 'triggers';
       state.planType = null;
       state.vaultBalanceForPlan = null;
-      state.planTriggerTypes = { oracle: false, legal_authority: false, inactivity: false, oracle_with_legal_fallback: false };
+      state.planTriggerTypes = { oracle: false, legal_authority: false, inactivity: false };
       state.planRecipients = [];
       state.planTriggerConfig = {
         oracle: {},
@@ -3006,7 +3010,6 @@ function attachAppEvents() {
           oracle: main === 'oracle',
           legal_authority: main === 'legal_authority',
           inactivity: main === 'inactivity',
-          oracle_with_legal_fallback: !!document.getElementById('planTriggerOracleLegalFallback')?.checked,
         };
         state.planStep = 'recipients';
         state.vaultBalanceForPlan = null;
@@ -3168,7 +3171,7 @@ function attachAppEvents() {
       const selected = state.planTriggerConfig.legalAuthority.selectedFirms || [];
       const alreadySelected = selected.some(s => s.id === firm.id);
       if (alreadySelected) return;
-      const needAuthorities = state.planTriggerTypes.legal_authority || (state.planTriggerTypes.oracle && state.planTriggerTypes.oracle_with_legal_fallback);
+      const needAuthorities = state.planTriggerTypes.legal_authority;
       const newFirm = {
         id: firm.id || firm.authority_id,
         name: firm.name || 'Unknown',
@@ -3219,7 +3222,7 @@ function attachAppEvents() {
         showToast('Recipient percentages must total 100%', 'error');
         return;
       }
-      const needAuth = state.planTriggerTypes.legal_authority || (state.planTriggerTypes.oracle && state.planTriggerTypes.oracle_with_legal_fallback);
+      const needAuth = state.planTriggerTypes.legal_authority;
       if (needAuth && selected.length < 1) {
         showToast('At least 1 authority is required', 'error');
         return;
@@ -5011,11 +5014,13 @@ function attachAppEvents() {
         const parseData = await parseRes.json();
         if (!parseRes.ok) {
           state.pathClaimAmountFromBlob = null;
+          state.pathClaimAdminFactorHex = null;
           state.pathClaimError = parseData.error || 'Parse blob failed';
           render();
           return;
         }
         state.pathClaimAmountFromBlob = parseData.amount;
+        state.pathClaimAdminFactorHex = parseData.admin_factor_hex || null;
         const ethers = window.ethers;
         const walletIdHashHex = ethers.keccak256(ethers.toUtf8Bytes(state.walletId));
         const remRes = await fetch(`${API_BASE}/path-claim/remaining?walletIdHash=${encodeURIComponent(walletIdHashHex)}&pathIndex=${encodeURIComponent(state.pathIndex)}`);
@@ -5029,7 +5034,7 @@ function attachAppEvents() {
       }
     });
   }
-  // Claim to my wallet (amount from blob; sign with path controller key)
+  // Claim to my wallet (amount from blob). Sign with path controller key (paste) OR amount-bound: mnemonic+passphrase+blob → composite_with_amount → acegf sign.
   const btnPathClaimClaim = document.getElementById('btnPathClaimClaim');
   if (btnPathClaimClaim) {
     btnPathClaimClaim.addEventListener('click', async () => {
@@ -5045,8 +5050,9 @@ function attachAppEvents() {
         render();
         return;
       }
-      if (!state.pathClaimControllerKey) {
-        state.pathClaimError = 'Path controller key (hex) required to sign claim.';
+      const useAmountBound = !state.pathClaimControllerKey && state.mnemonic && state.passphrase && state.pathClaimAdminFactorHex && state.pathClaimAmountFromBlob;
+      if (!state.pathClaimControllerKey && !useAmountBound) {
+        state.pathClaimError = 'Enter path controller key (hex), or complete Step 1 (mnemonic + passphrase) and get amount from blob for amount-bound signing.';
         render();
         return;
       }
@@ -5058,7 +5064,30 @@ function attachAppEvents() {
         const walletIdHashHex = ethers.keccak256(ethers.toUtf8Bytes(state.walletId));
         const deadline = Math.floor(Date.now() / 1000) + 3600;
         const params = await YaultPathClaim.getClaimParams(API_BASE, walletIdHashHex, state.pathIndex, String(amountWei), wallet.address, String(deadline));
-        const sig = YaultPathClaim.signDigest(params.digest, state.pathClaimControllerKey);
+        let sig;
+        if (useAmountBound) {
+          await window.YaultWasm.init();
+          const custody = window.YaultWasm.custody;
+          const acegf = window.YaultWasm.acegf;
+          if (!custody || typeof custody.custody_build_composite_credential_with_amount !== 'function' || !acegf || typeof acegf.evm_sign_typed_data !== 'function') {
+            throw new Error('WASM custody + acegf required for amount-bound signing. Refresh and try again.');
+          }
+          const amountNum = BigInt(amountWei);
+          const compositeHex = custody.custody_build_composite_credential_with_amount(state.passphrase, state.pathClaimAdminFactorHex, amountNum);
+          if (!compositeHex || compositeHex.startsWith('error:')) throw new Error(compositeHex || 'Failed to build composite with amount');
+          const digestHex = params.digest.startsWith('0x') ? params.digest : '0x' + params.digest;
+          const rawSig = acegf.evm_sign_typed_data(state.mnemonic, compositeHex, digestHex);
+          if (!rawSig || rawSig.startsWith('error:')) throw new Error(rawSig || 'acegf sign failed');
+          const hex = rawSig.replace(/^0x/i, '');
+          if (hex.length !== 130) throw new Error('Unexpected signature length from acegf');
+          sig = {
+            r: '0x' + hex.slice(0, 64),
+            s: '0x' + hex.slice(64, 128),
+            v: parseInt(hex.slice(128, 130), 16),
+          };
+        } else {
+          sig = YaultPathClaim.signDigest(params.digest, state.pathClaimControllerKey);
+        }
         const tx = YaultPathClaim.buildClaimTx(
           state.pathClaimConfig,
           walletIdHashHex,
@@ -5073,13 +5102,14 @@ function attachAppEvents() {
         const provider = window.yallet;
         if (!provider) throw new Error('No wallet provider');
         const ethersProvider = new ethers.BrowserProvider(provider);
-        const pathControllerWallet = new ethers.Wallet(state.pathClaimControllerKey, ethersProvider);
-        const txResp = await pathControllerWallet.sendTransaction({ to: tx.to, data: tx.data, value: 0n });
+        const signer = useAmountBound ? await ethersProvider.getSigner() : new ethers.Wallet(state.pathClaimControllerKey, ethersProvider);
+        const txResp = await signer.sendTransaction({ to: tx.to, data: tx.data, value: 0n });
         await txResp.wait();
         state.pathClaimError = null;
         showToast && showToast('Claim sent', 'success');
         state.pathClaimRemaining = null;
         state.pathClaimAmountFromBlob = null;
+        state.pathClaimAdminFactorHex = null;
       } catch (e) {
         state.pathClaimError = e.message || 'Claim failed';
       } finally {

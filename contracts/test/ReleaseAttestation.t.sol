@@ -224,4 +224,42 @@ contract ReleaseAttestationTest is Test {
         ReleaseAttestation.Attestation memory a = attestation.getAttestation(WALLET_HASH, 4);
         assertEq(a.decision, decR, "should now be RELEASE");
     }
+
+    // -----------------------------------------------------------------------
+    //  Fix #6: Fallback cannot overwrite an existing oracle attestation
+    // -----------------------------------------------------------------------
+
+    function test_FallbackCannotOverwriteOracleAttestation() public {
+        attestation.setOracleSubmitter(oracleSubmitter);
+        attestation.setFallbackSubmitter(fallbackSubmitter, true);
+
+        uint8 srcO = attestation.SOURCE_ORACLE();
+        uint8 srcF = attestation.SOURCE_FALLBACK();
+        uint8 decH = attestation.DECISION_HOLD();
+        uint8 decR = attestation.DECISION_RELEASE();
+
+        // Oracle submits HOLD for (WALLET_HASH, 5)
+        vm.prank(oracleSubmitter);
+        attestation.submitAttestation(srcO, WALLET_HASH, 5, decH, REASON_CODE, EVIDENCE_HASH);
+
+        assertEq(attestation.getAttestation(WALLET_HASH, 5).source, srcO);
+        assertEq(attestation.getAttestation(WALLET_HASH, 5).decision, decH);
+
+        // Fallback tries to overwrite with RELEASE — must revert
+        vm.prank(fallbackSubmitter);
+        vm.expectRevert(ReleaseAttestation.OracleAttestationAlreadyExists.selector);
+        attestation.submitAttestation(srcF, WALLET_HASH, 5, decR, bytes32(0), EVIDENCE_HASH);
+    }
+
+    function test_OnlyOwnerCanSetOracleSubmitter() public {
+        vm.prank(stranger);
+        vm.expectRevert();
+        attestation.setOracleSubmitter(stranger);
+    }
+
+    function test_OnlyOwnerCanSetFallbackSubmitter() public {
+        vm.prank(stranger);
+        vm.expectRevert();
+        attestation.setFallbackSubmitter(fallbackSubmitter, true);
+    }
 }

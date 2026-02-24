@@ -301,11 +301,11 @@ class ReleaseDecision {
   ];
 
   /** Default cooldown period before a release decision takes effect (ms).
-   *  Override via DEFAULT_COOLDOWN_HOURS env var (e.g. 0.5 = 30 min). */
+   *  Prefer config.cooldown.defaultHours when available (see getDefaultCooldownMs()). */
   static DEFAULT_COOLDOWN_MS = (
     process.env.DEFAULT_COOLDOWN_HOURS !== undefined
       ? parseFloat(process.env.DEFAULT_COOLDOWN_HOURS) * 60 * 60 * 1000
-      : 24 * 60 * 60 * 1000 // 24 hours
+      : 168 * 60 * 60 * 1000 // 168 hours = 1 week (fallback when config not used)
   );
 
   /**
@@ -344,21 +344,32 @@ class ReleaseDecision {
       }
     }
 
-    // cooldown_hours is optional (defaults to 24); 0 means no cooldown
+    let maxCooldownHours = 168;
+    try {
+      const config = require('../config');
+      if (config.cooldown && config.cooldown.maxHours != null) maxCooldownHours = config.cooldown.maxHours;
+    } catch (_) {}
     if (data.cooldown_hours !== undefined) {
       if (typeof data.cooldown_hours !== 'number' || data.cooldown_hours < 0) {
         errors.push('cooldown_hours must be a non-negative number');
-      } else if (data.cooldown_hours > 168) {
-        errors.push('cooldown_hours must not exceed 168 (7 days)');
+      } else if (data.cooldown_hours > maxCooldownHours) {
+        errors.push(`cooldown_hours must not exceed ${maxCooldownHours}`);
       }
     }
 
     if (errors.length > 0) return { valid: false, errors };
 
     const now = Date.now();
+    let defaultCooldownMs = ReleaseDecision.DEFAULT_COOLDOWN_MS;
+    try {
+      const config = require('../config');
+      if (config.cooldown && config.cooldown.defaultHours != null) {
+        defaultCooldownMs = config.cooldown.defaultHours * 60 * 60 * 1000;
+      }
+    } catch (_) {}
     const cooldownMs = data.cooldown_hours !== undefined
       ? data.cooldown_hours * 60 * 60 * 1000
-      : ReleaseDecision.DEFAULT_COOLDOWN_MS;
+      : defaultCooldownMs;
 
     return {
       valid: true,

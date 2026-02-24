@@ -5,7 +5,7 @@
  * Authority submits a release/hold/reject decision for a trigger event.
  * The decision is signed with the authority's Ed25519 key for auditability.
  *
- * Release decisions enter a cooldown period (default 24h) before taking effect.
+ * Release decisions enter a cooldown period (default from config, e.g. 1 week) before taking effect.
  * During the cooldown, the decision can be cancelled via POST /:id/cancel.
  * After cooldown expires, the decision is finalized and an immutable audit
  * record is uploaded to Arweave.
@@ -30,6 +30,8 @@ const db = require('../../db');
 const config = require('../../config');
 const { evaluateReleaseAttestationGate } = require('../../services/attestationGate');
 const { deliverRwaPackageForRecipient } = require('../../services/deliverRwaRelease');
+const { isReleasePaused, isHighValueWallet, hasLegalConfirmation } = require('../../services/triggerPolicy');
+const { sendCooldownNotification } = require('../../services/email');
 
 const router = Router();
 
@@ -186,18 +188,45 @@ async function persistDecisionAudit(triggerId, triggerSnapshot, auditPayload, er
 
 /**
  * Finalize a trigger whose cooldown period has expired.
- * Called lazily (on read) or can be run periodically.
+ * Respects global pause, attestation gate (oracle only; fallback only when emergency_recovery), and dual attestation for high-value wallets.
  *
  * @param {string} triggerId
  * @param {object} trigger
- * @returns {Promise<object|null>} Updated trigger, or null if not yet effective
+ * @returns {Promise<object|null>} Updated trigger, or same trigger if not finalized
  */
 async function maybeFinalizeDecision(triggerId, trigger) {
   if (trigger.status !== 'cooldown') return trigger;
 
   const now = Date.now();
-  if (now < trigger.effective_at) {
-    // Still in cooldown
+  if (now < trigger.effective_at) return trigger;
+
+  if (isReleasePaused()) return trigger;
+
+  const isOracleTrigger = trigger.trigger_type === 'oracle';
+  if (isOracleTrigger) {
+    const gate = await evaluateReleaseAttestationGate({
+      walletId: trigger.wallet_id,
+      recipientIndex: trigger.recipient_index,
+      allowFallback: !!trigger.emergency_recovery,
+    });
+    if (!gate.valid) {
+      if (gate.code === 'ATTESTATION_RPC_ERROR') {
+        trigger.attestation_gate_checked_at = now;
+        await db.triggers.update(triggerId, trigger);
+        return trigger;
+      }
+      trigger.status = 'attestation_blocked';
+      trigger.blocked_at = now;
+      trigger.blocked_reason_code = gate.code;
+      trigger.blocked_reason_detail = gate.detail;
+      trigger.attestation_gate_checked_at = now;
+      await db.triggers.update(triggerId, trigger);
+      return trigger;
+    }
+  }
+
+  // Dual attestation: high-value wallets need legal confirmation. legal_event triggers are already "legally" attested by the authority's decision.
+  if (isHighValueWallet(trigger.wallet_id) && trigger.trigger_type !== 'legal_event' && !hasLegalConfirmation(trigger)) {
     return trigger;
   }
 
@@ -385,6 +414,24 @@ router.post('/:id/decision', authorityAuthMiddleware, async (req, res) => {
 
     await db.triggers.update(id, updatedTrigger);
 
+    if (newStatus === 'cooldown') {
+      try {
+        const authority = await db.authorities.findById(trigger.authority_id);
+        const emails = authority && authority.email ? [authority.email] : [];
+        if (process.env.COOLDOWN_NOTIFY_EMAIL) {
+          emails.push(process.env.COOLDOWN_NOTIFY_EMAIL);
+        }
+        await sendCooldownNotification(emails, {
+          triggerId: id,
+          walletId: trigger.wallet_id,
+          recipientIndex: trigger.recipient_index,
+          effectiveAt: decisionData.effective_at,
+        });
+      } catch (emailErr) {
+        console.warn('[trigger/decision] Cooldown notification failed:', emailErr.message);
+      }
+    }
+
     // If release (immediate or after cooldown), deliver RWA NFT
     if (newStatus === 'released' && trigger.recipient_index != null) {
       try {
@@ -566,6 +613,45 @@ router.post('/:id/cancel', authorityAuthMiddleware, async (req, res) => {
     });
   } catch (err) {
     console.error('[trigger/cancel] Error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /:id/legal-confirm — Legal confirmation for dual attestation (high-value wallets)
+// ---------------------------------------------------------------------------
+
+/**
+ * @route POST /:id/legal-confirm
+ * @description Record legal confirmation for a trigger in cooldown. Required for high-value wallets before release can finalize.
+ *              Only the trigger's assigned authority can submit.
+ */
+router.post('/:id/legal-confirm', authorityAuthMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const trigger = await db.triggers.findById(id);
+    if (!trigger) {
+      return res.status(404).json({ error: 'Not found', detail: `Trigger ${id} not found` });
+    }
+    if (req.auth.authority_id !== trigger.authority_id) {
+      return res.status(403).json({ error: 'Forbidden', detail: 'You are not the assigned authority for this trigger' });
+    }
+    if (trigger.status !== 'cooldown') {
+      return res.status(400).json({
+        error: 'Invalid state',
+        detail: `Trigger is in "${trigger.status}". Legal confirmation only applies to triggers in cooldown.`,
+      });
+    }
+    const now = Date.now();
+    const updated = { ...trigger, legal_confirmation_received_at: now };
+    await db.triggers.update(id, updated);
+    return res.json({
+      trigger_id: id,
+      legal_confirmation_received_at: now,
+      message: 'Legal confirmation recorded. Release will finalize after cooldown (if high-value wallet).',
+    });
+  } catch (err) {
+    console.error('[trigger/legal-confirm] Error:', err);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });

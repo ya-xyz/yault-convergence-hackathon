@@ -26,6 +26,7 @@ const state = {
   usersSearch: '',
   authorities: [],
   triggers: [],
+  triggerPolicy: null,  // { releasePaused, highValueWalletIds } from GET /admin/trigger/policy
   kycList: [],
   revenue: null,
   vaultConfig: null,      // { vaultAddress, chainId, rpcUrl } for Vault tab
@@ -147,6 +148,7 @@ function renderDashboard() {
       <div class="stat-card"><div class="stat-value">${s.active_bindings || 0}</div><div class="stat-label">Bindings</div></div>
       <div class="stat-card"><div class="stat-value" style="color:var(--warning);">${s.pending_triggers || 0}</div><div class="stat-label">Pending Triggers</div></div>
       <div class="stat-card"><div class="stat-value" style="color:var(--primary);">${s.released_triggers || 0}</div><div class="stat-label">Released</div></div>
+      <div class="stat-card"><div class="stat-value" style="color:var(--text-muted);">${s.aborted_triggers || 0}</div><div class="stat-label">Paused</div></div>
     </div>
     <div class="stat-grid">
       <div class="stat-card"><div class="stat-value" style="color:var(--warning);">${k.pending || 0}</div><div class="stat-label">KYC Pending</div></div>
@@ -314,24 +316,84 @@ function renderAuthorityDetailModal() {
 // ─── Triggers ───
 
 function renderTriggers() {
+  const policy = state.triggerPolicy || {};
+  const releasePaused = !!policy.releasePaused;
+  const badge = (t) => {
+    if (t.status === 'released') return 'success';
+    if (t.status === 'pending') return 'warning';
+    if (t.status === 'cooldown') return 'info';
+    if (t.status === 'aborted') return 'muted';
+    if (t.status === 'attestation_blocked') return 'danger';
+    return 'muted';
+  };
+  const remainingText = (t) => {
+    if (t.status === 'cooldown' && t.effective_at) {
+      const ms = Math.max(0, (t.effective_at || 0) - Date.now());
+      const d = Math.floor(ms / (24 * 60 * 60 * 1000));
+      const h = Math.floor((ms % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
+      return d > 0 ? d + 'd' : h + 'h';
+    }
+    if (t.status === 'aborted' && t.remaining_cooldown_ms != null) {
+      const d = Math.floor(t.remaining_cooldown_ms / (24 * 60 * 60 * 1000));
+      return 'Resume: ' + d + 'd left';
+    }
+    return '—';
+  };
+  const actions = (t) => {
+    if (t.status === 'cooldown') {
+      return `<button class="btn btn-sm btn-danger" data-action="trigger-abort" data-trigger-id="${esc(t.trigger_id)}" title="Pause release (remaining time is preserved)">Abort</button>
+        <button class="btn btn-sm btn-secondary" data-action="trigger-legal-confirm" data-trigger-id="${esc(t.trigger_id)}">Legal confirm</button>`;
+    }
+    if (t.status === 'aborted') {
+      return `<button class="btn btn-sm btn-success" data-action="trigger-resume" data-trigger-id="${esc(t.trigger_id)}">Resume</button>`;
+    }
+    return '—';
+  };
   return `
     <h2>Triggers</h2>
+    ${releasePaused ? `
+    <div class="alert alert-warning" style="margin-bottom:16px;">
+      <strong>Release paused.</strong> Cooldown expirations will not finalize releases until the pause is lifted (server configuration).
+    </div>
+    ` : ''}
     <div class="card">
       <table>
-        <thead><tr><th>Wallet</th><th>Authority</th><th>Status</th><th>Decision</th><th>Date</th></tr></thead>
+        <thead><tr><th>Wallet</th><th>Path</th><th>Authority</th><th>Status</th><th>Remaining</th><th>Decision</th><th>Date</th><th>Actions</th></tr></thead>
         <tbody>
-          ${state.triggers.length === 0 ? '<tr><td colspan="5" style="color:var(--text-muted);text-align:center;">No triggers</td></tr>' : ''}
+          ${state.triggers.length === 0 ? '<tr><td colspan="8" style="color:var(--text-muted);text-align:center;">No triggers</td></tr>' : ''}
           ${state.triggers.map(t => `
             <tr>
               <td class="mono">${esc(shortAddr(t.wallet_id))}</td>
+              <td>#${t.recipient_index ?? '—'}</td>
               <td class="mono">${esc(shortAddr(t.authority_id))}</td>
-              <td><span class="badge badge-${t.status === 'released' ? 'success' : t.status === 'pending' ? 'warning' : t.status === 'cooldown' ? 'info' : 'muted'}">${esc(t.status)}</span></td>
+              <td><span class="badge badge-${badge(t)}">${esc(t.status)}</span></td>
+              <td style="font-size:12px;color:var(--text-muted);">${remainingText(t)}</td>
               <td>${esc(t.decision || '—')}</td>
               <td style="font-size:12px;color:var(--text-muted);">${t.triggered_at ? new Date(t.triggered_at).toLocaleDateString() : '—'}</td>
+              <td style="white-space:nowrap;">${actions(t)}</td>
             </tr>
           `).join('')}
         </tbody>
       </table>
+    </div>
+    <div class="card" style="margin-top:20px;">
+      <h3>Emergency release</h3>
+      <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px;">Only for manual emergency recovery. Creates a release trigger with a cooldown period.</p>
+      <div style="display:grid;grid-template-columns:1fr 1fr 2fr;gap:12px;align-items:end;max-width:800px;">
+        <div class="form-group" style="margin-bottom:0;">
+          <label class="form-label">Wallet ID</label>
+          <input class="form-input" type="text" id="emergencyWalletId" placeholder="0x..." />
+        </div>
+        <div class="form-group" style="margin-bottom:0;">
+          <label class="form-label">Path index</label>
+          <input class="form-input" type="number" id="emergencyRecipientIndex" min="0" placeholder="0" />
+        </div>
+        <div class="form-group" style="margin-bottom:0;">
+          <label class="form-label">Evidence hash (64 hex)</label>
+          <input class="form-input" type="text" id="emergencyEvidenceHash" placeholder="SHA-256 hex..." maxlength="66" />
+        </div>
+      </div>
+      <button class="btn btn-primary" style="margin-top:12px;" data-action="trigger-emergency-release">Submit emergency release</button>
     </div>
   `;
 }
@@ -643,6 +705,11 @@ async function loadPage() {
         break;
       case 'triggers':
         state.triggers = await api('/admin/triggers');
+        try {
+          state.triggerPolicy = await api('/admin/trigger/policy');
+        } catch (_) {
+          state.triggerPolicy = null;
+        }
         break;
       case 'kyc':
         state.kycList = await api('/admin/kyc');
@@ -908,6 +975,75 @@ function attachEvents() {
       try {
         await apiPost(`/admin/kyc/${el.dataset.kycAddr}/review`, { decision: 'rejected' });
         showToast('KYC rejected', 'success');
+        loadPage();
+      } catch (err) { showToast('Failed: ' + err.message, 'error'); }
+    });
+  });
+
+  // Trigger: abort (pause cooldown; remaining time preserved for resume)
+  app.querySelectorAll('[data-action="trigger-abort"]').forEach(el => {
+    el.addEventListener('click', async () => {
+      const id = el.dataset.triggerId;
+      if (!id) return;
+      const reason = window.prompt('Reason for abort (optional):') || '';
+      try {
+        await apiPost(`/admin/trigger/${encodeURIComponent(id)}/abort`, { reason: reason.trim() });
+        showToast('Trigger aborted. Remaining time is preserved for resume.', 'success');
+        loadPage();
+      } catch (err) { showToast('Failed: ' + err.message, 'error'); }
+    });
+  });
+
+  // Trigger: resume (restore cooldown with remaining time)
+  app.querySelectorAll('[data-action="trigger-resume"]').forEach(el => {
+    el.addEventListener('click', async () => {
+      const id = el.dataset.triggerId;
+      if (!id) return;
+      try {
+        await apiPost(`/admin/trigger/${encodeURIComponent(id)}/resume`, {});
+        showToast('Trigger resumed. Cooldown restarted with remaining time.', 'success');
+        loadPage();
+      } catch (err) { showToast('Failed: ' + err.message, 'error'); }
+    });
+  });
+
+  // Trigger: legal confirmation (for high-value / dual attestation)
+  app.querySelectorAll('[data-action="trigger-legal-confirm"]').forEach(el => {
+    el.addEventListener('click', async () => {
+      const id = el.dataset.triggerId;
+      if (!id) return;
+      try {
+        await apiPost(`/admin/trigger/${encodeURIComponent(id)}/legal-confirm`, {});
+        showToast('Legal confirmation recorded.', 'success');
+        loadPage();
+      } catch (err) { showToast('Failed: ' + err.message, 'error'); }
+    });
+  });
+
+  // Trigger: emergency release
+  app.querySelectorAll('[data-action="trigger-emergency-release"]').forEach(el => {
+    el.addEventListener('click', async () => {
+      const walletId = (document.getElementById('emergencyWalletId') || {}).value?.trim();
+      const recipientIndex = parseInt((document.getElementById('emergencyRecipientIndex') || {}).value, 10);
+      let evidenceHash = (document.getElementById('emergencyEvidenceHash') || {}).value?.trim().replace(/^0x/i, '') || '';
+      if (!walletId || !Number.isInteger(recipientIndex) || recipientIndex < 0) {
+        showToast('Wallet ID and path index (non-negative) are required', 'error');
+        return;
+      }
+      if (!evidenceHash || evidenceHash.length !== 64 || !/^[0-9a-fA-F]+$/.test(evidenceHash)) {
+        showToast('Evidence hash must be 64 hex characters', 'error');
+        return;
+      }
+      try {
+        await apiPost('/admin/trigger/emergency-release', {
+          wallet_id: walletId,
+          recipient_index: recipientIndex,
+          evidence_hash: evidenceHash,
+        });
+        showToast('Emergency release submitted. Trigger is in cooldown.', 'success');
+        document.getElementById('emergencyWalletId').value = '';
+        document.getElementById('emergencyRecipientIndex').value = '';
+        document.getElementById('emergencyEvidenceHash').value = '';
         loadPage();
       } catch (err) { showToast('Failed: ' + err.message, 'error'); }
     });

@@ -20,7 +20,7 @@
 const { Router } = require('express');
 const { authorityAuthMiddleware } = require('../../middleware/auth');
 const db = require('../../db');
-const { evaluateReleaseAttestationGate } = require('../../services/attestationGate');
+const { isReleasePaused } = require('../../services/triggerPolicy');
 
 const router = Router();
 
@@ -36,51 +36,22 @@ let _cooldownTimer = null;
 
 async function finalizeCooldowns() {
   try {
+    if (isReleasePaused()) return;
     const now = Date.now();
     const allTriggers = await db.triggers.findAll();
+    const decisionRouter = require('../trigger/decision');
+    const maybeFinalize = decisionRouter._maybeFinalizeDecision;
+    if (typeof maybeFinalize !== 'function') return;
     for (const trigger of allTriggers) {
-      if (
-        trigger.status === 'cooldown' &&
-        trigger.effective_at &&
-        now >= trigger.effective_at
-      ) {
-        // Oracle gate only for triggers created from oracle (trigger_type === 'oracle').
-        // legal_event / activity_drand / legacy: time-based cooldown finalizes without chain attestation.
-        const isOracleTrigger = trigger.trigger_type === 'oracle';
-        if (isOracleTrigger) {
-          const gate = await evaluateReleaseAttestationGate({
-            walletId: trigger.wallet_id,
-            recipientIndex: trigger.recipient_index,
-          });
-          if (!gate.valid) {
-            if (gate.code === 'ATTESTATION_RPC_ERROR') {
-              trigger.attestation_gate_checked_at = now;
-              await db.triggers.update(trigger.trigger_id, trigger);
-              console.warn(
-                `[cooldown-finalizer] Trigger ${trigger.trigger_id} gate soft-failed: ${gate.code} (${gate.detail})`
-              );
-              continue;
-            }
-            trigger.status = 'attestation_blocked';
-            trigger.blocked_at = now;
-            trigger.blocked_reason_code = gate.code;
-            trigger.blocked_reason_detail = gate.detail;
-            trigger.attestation_gate_checked_at = now;
-            await db.triggers.update(trigger.trigger_id, trigger);
-            console.warn(
-              `[cooldown-finalizer] Trigger ${trigger.trigger_id} blocked by attestation gate: ${gate.code} (${gate.detail})`
-            );
-            continue;
+      if (trigger.status === 'cooldown' && trigger.effective_at && now >= trigger.effective_at) {
+        try {
+          const updated = await maybeFinalize(trigger.trigger_id, trigger);
+          if (updated && updated.status === 'released') {
+            console.log(`[cooldown-finalizer] Trigger ${trigger.trigger_id} finalized → released`);
           }
+        } catch (err) {
+          console.error('[cooldown-finalizer] Trigger', trigger.trigger_id, err.message);
         }
-
-        trigger.status = 'released';
-        trigger.finalized_at = now;
-        trigger.attestation_gate_checked_at = now;
-        trigger.blocked_reason_code = null;
-        trigger.blocked_reason_detail = null;
-        await db.triggers.update(trigger.trigger_id, trigger);
-        console.log(`[cooldown-finalizer] Trigger ${trigger.trigger_id} finalized → released`);
       }
     }
   } catch (err) {
@@ -178,6 +149,12 @@ router.get('/', authorityAuthMiddleware, async (req, res) => {
         entry.blocked_at = t.blocked_at || null;
         entry.blocked_reason_code = t.blocked_reason_code || null;
         entry.blocked_reason_detail = t.blocked_reason_detail || null;
+      }
+      if (t.status === 'aborted') {
+        entry.aborted_at = t.aborted_at || null;
+        entry.aborted_by = t.aborted_by || null;
+        entry.aborted_reason = t.aborted_reason || null;
+        entry.remaining_cooldown_ms = typeof t.remaining_cooldown_ms === 'number' ? t.remaining_cooldown_ms : null;
       }
 
       // Include audit reference if finalized
