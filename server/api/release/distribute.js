@@ -107,18 +107,16 @@ router.post('/', async (req, res) => {
     // #8 FIX: Use findByWallet instead of findAll() + filter for better performance
     const walletBindings = await db.bindings.findByWallet(wallet_id);
 
-    // Replace existing active binding for the same (wallet_id, authority_id) — allows re-distribution
-    // without requiring explicit termination (useful for testing and plan updates).
+    // Idempotency guard: reject duplicate active binding for same (wallet_id, authority_id).
     const existingSameAuthority = walletBindings.find(
       (b) => b.authority_id === authority_id && b.status === 'active'
     );
     if (existingSameAuthority) {
-      await db.bindings.update(existingSameAuthority.binding_id, {
-        ...existingSameAuthority,
-        status: 'replaced',
-        terminated_at: Date.now(),
+      return res.status(409).json({
+        error: 'Binding already exists',
+        detail: 'An active binding already exists between this wallet and authority',
+        binding_id: existingSameAuthority.binding_id,
       });
-      console.log(`[release/distribute] Replaced existing binding ${existingSameAuthority.binding_id} for wallet=${wallet_id} authority=${authority_id}`);
     }
 
     for (const old of walletBindings) {
