@@ -1537,23 +1537,21 @@ function renderWalletBalancesSection() {
     <div class="card">
       <h2>On-Chain Balances</h2>
       <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">Context: <strong>${esc(chainToken)}</strong></p>
-      <div class="balance-row" style="display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;">
-        <div class="balance-card balance-card-lg" style="flex:0 0 auto;">
-          <div class="balance-value" style="font-size:22px;">${esc(balance)}</div>
-          <div class="balance-label" style="font-size:13px;">${esc(state.globalTokenKey)}</div>
-          <div class="balance-address" style="font-size:13px;color:var(--text-muted);font-family:monospace;margin-top:8px;word-break:break-all;" title="${esc(addr)}">${esc(addrShort(addr))}</div>
-        </div>
-        <div class="balance-shortcuts" style="display:flex;align-items:flex-end;gap:8px;flex:0 0 auto;">
-          <button type="button" class="btn btn-primary" data-wallet-section="send">
-            Transfer Funds
-          </button>
-          <button type="button" class="btn btn-primary" data-wallet-section="vault">
-            Deposit to Vault
-          </button>
-          <button type="button" class="btn btn-primary" data-wallet-section="deniable">
-            Manage Deniables
-          </button>
-        </div>
+      <div class="balance-card balance-card-lg" style="display:inline-block;">
+        <div class="balance-value" style="font-size:22px;">${esc(balance)}</div>
+        <div class="balance-label" style="font-size:13px;">${esc(state.globalTokenKey)}</div>
+        <div class="balance-address" style="font-size:13px;color:var(--text-muted);font-family:monospace;margin-top:8px;word-break:break-all;" title="${esc(addr)}">${esc(addrShort(addr))}</div>
+      </div>
+      <div class="balance-shortcuts" style="display:flex;gap:8px;margin-top:16px;">
+        <button type="button" class="btn btn-primary" data-wallet-section="send">
+          Transfer Funds
+        </button>
+        <button type="button" class="btn btn-primary" data-wallet-section="vault">
+          Deposit to Vault
+        </button>
+        <button type="button" class="btn btn-primary" data-wallet-section="deniable">
+          Manage Deniables
+        </button>
       </div>
     </div>
   `;

@@ -529,28 +529,41 @@ function renderCampaignEditModal() {
   const c = state.campaignDetail || {};
   const isNew = !c.campaign_id;
   const title = isNew ? 'New Campaign' : 'Edit Campaign';
+  const fld = (label, id, type, value, extra = '') =>
+    `<div style="display:flex;flex-direction:column;gap:5px;">
+       <label style="font-size:12px;color:var(--text-muted);font-weight:600;text-transform:uppercase;letter-spacing:0.5px;">${label}</label>
+       <input id="${id}" type="${type}" class="input" value="${value}" ${extra} />
+     </div>`;
   return `
     <div class="modal-overlay" data-action="close-campaign-modal">
       <div class="modal-content" onclick="event.stopPropagation()">
-        <h3>${esc(title)}</h3>
-        <div class="form-group" style="margin-bottom:10px;"><label>Name</label><input id="cmpName" class="input" value="${esc(c.name || '')}" /></div>
-        <div class="form-group" style="margin-bottom:10px;"><label><input type="checkbox" id="cmpEnabled" ${c.enabled ? 'checked' : ''} /> Enabled</label></div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;">
-          <div class="form-group"><label>Rebate (bps)</label><input id="cmpRebateBps" type="number" class="input" value="${c.rebate_bps || 0}" min="0" max="10000" /></div>
-          <div class="form-group"><label>Max / User (bps)</label><input id="cmpMaxPerUser" type="number" class="input" value="${c.max_per_user_bps || 500}" min="0" max="10000" /></div>
-          <div class="form-group"><label>Referral Yield Boost (bps)</label><input id="cmpYieldBoost" type="number" class="input" value="${c.referral_yield_boost_bps || 0}" min="0" max="10000" /></div>
-          <div class="form-group"><label>Invitee Fee Waiver (days)</label><input id="cmpFeeWaiver" type="number" class="input" value="${c.invitee_fee_waiver_days || 0}" min="0" /></div>
-          <div class="form-group"><label>Start Date</label><input id="cmpStartDate" type="date" class="input" value="${c.start_date ? c.start_date.substring(0, 10) : ''}" /></div>
-          <div class="form-group"><label>End Date</label><input id="cmpEndDate" type="date" class="input" value="${c.end_date ? c.end_date.substring(0, 10) : ''}" /></div>
+        <h3 style="margin:0 0 20px;font-size:18px;">${esc(title)}</h3>
+
+        ${fld('Campaign Name', 'cmpName', 'text', esc(c.name || ''), 'placeholder="e.g. Early Bird Rebate"')}
+
+        <label style="display:inline-flex;align-items:center;gap:8px;margin:16px 0;font-size:13px;cursor:pointer;padding:8px 12px;background:var(--surface-2,#1a2236);border:1px solid var(--border);border-radius:var(--radius);">
+          <input type="checkbox" id="cmpEnabled" ${c.enabled ? 'checked' : ''} style="width:16px;height:16px;accent-color:var(--primary);" /> Enabled
+        </label>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px 20px;margin-top:4px;">
+          ${fld('Rebate (bps)',              'cmpRebateBps',  'number', c.rebate_bps || 0,              'min="0" max="10000"')}
+          ${fld('Max / User (bps)',          'cmpMaxPerUser', 'number', c.max_per_user_bps || 500,      'min="0" max="10000"')}
+          ${fld('Referral Yield Boost (bps)','cmpYieldBoost', 'number', c.referral_yield_boost_bps || 0,'min="0" max="10000"')}
+          ${fld('Invitee Fee Waiver (days)', 'cmpFeeWaiver',  'number', c.invitee_fee_waiver_days || 0, 'min="0"')}
+          ${fld('Start Date',               'cmpStartDate',  'date',   c.start_date ? c.start_date.substring(0, 10) : '')}
+          ${fld('End Date',                 'cmpEndDate',    'date',   c.end_date ? c.end_date.substring(0, 10) : '')}
         </div>
-        <div class="form-group" style="margin-bottom:14px;"><label>Status</label>
+
+        <div style="display:flex;flex-direction:column;gap:5px;margin-top:16px;">
+          <label style="font-size:12px;color:var(--text-muted);font-weight:600;text-transform:uppercase;letter-spacing:0.5px;">Status</label>
           <select id="cmpStatus" class="input">
             ${['draft', 'active', 'paused', 'ended'].map(s => `<option value="${s}" ${(c.status || 'draft') === s ? 'selected' : ''}>${s}</option>`).join('')}
           </select>
         </div>
-        <div style="display:flex;gap:8px;justify-content:flex-end;">
-          <button class="btn btn-sm" data-action="close-campaign-modal">Cancel</button>
-          <button class="btn btn-primary btn-sm" id="btnSaveCampaign">${isNew ? 'Create' : 'Save'}</button>
+
+        <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:24px;padding-top:16px;border-top:1px solid var(--border);">
+          <button class="btn" data-action="close-campaign-modal" style="padding:8px 20px;">Cancel</button>
+          <button class="btn btn-primary" id="btnSaveCampaign" style="padding:8px 24px;">${isNew ? 'Create' : 'Save'}</button>
         </div>
       </div>
     </div>
