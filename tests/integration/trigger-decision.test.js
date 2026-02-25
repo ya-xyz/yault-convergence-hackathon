@@ -19,7 +19,7 @@ const TEST_DB_PATH = path.join(__dirname, '..', '..', 'data', 'test-td-' + Date.
 process.env.DATABASE_PATH = TEST_DB_PATH;
 process.env.NODE_ENV = 'test';
 process.env.ADMIN_TOKEN = 'test-admin-token-1234567890';
-process.env.DEFAULT_COOLDOWN_HOURS = '0.001'; // 3.6 seconds for fast testing
+process.env.COOLDOWN_DEFAULT_HOURS = '0.001'; // 3.6 seconds for fast testing
 
 const nacl = require('tweetnacl');
 
