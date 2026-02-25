@@ -29,7 +29,8 @@ const { authorityAuthMiddleware } = require('../../middleware/auth');
 const db = require('../../db');
 const config = require('../../config');
 const { evaluateReleaseAttestationGate } = require('../../services/attestationGate');
-const { deliverRwaPackageForRecipient } = require('../../services/deliverRwaRelease');
+const { deliverRwaPackageForRecipient, recordDeliveryFailure } = require('../../services/deliverRwaRelease');
+const { submitFallbackAttestation } = require('../../services/attestationSubmitter');
 const { isReleasePaused, isHighValueWallet, hasLegalConfirmation } = require('../../services/triggerPolicy');
 const { sendCooldownNotification } = require('../../services/email');
 
@@ -37,6 +38,33 @@ const router = Router();
 
 // #5 FIX: Cancel cooldown period — prevents cancel+resubmit bypass
 const CANCEL_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour after cancellation
+
+/**
+ * Submit on-chain RELEASE attestation for all recipient indices on the binding.
+ * So VaultShareEscrow blocks owner reclaim for every recipient and all can claim.
+ * Best-effort per recipient; skips if ReleaseAttestation not configured.
+ */
+async function submitReleaseAttestationForAllRecipients(walletId, recipientIndices, evidenceHash, reasonCode) {
+  if (!config?.oracle?.releaseAttestationAddress || !config?.oracle?.releaseAttestationRelayerPrivateKey) return;
+  if (!evidenceHash || typeof evidenceHash !== 'string') return;
+  const evidenceHex = evidenceHash.replace(/^0x/i, '');
+  if (evidenceHex.length !== 64 || !/^[0-9a-fA-F]+$/.test(evidenceHex)) return;
+  const reason = (reasonCode && typeof reasonCode === 'string' && reasonCode.length >= 64) ? reasonCode : '0x' + '0'.repeat(64);
+  for (const idx of recipientIndices) {
+    try {
+      await submitFallbackAttestation(config, {
+        walletId,
+        recipientIndex: Number(idx),
+        decision: 'release',
+        reasonCode: reason,
+        evidenceHash: '0x' + evidenceHex,
+      });
+      console.log('[trigger/decision] On-chain RELEASE attestation submitted for recipient %s', idx);
+    } catch (err) {
+      console.warn('[trigger/decision] On-chain attestation failed for recipient %s: %s', idx, err?.message);
+    }
+  }
+}
 
 // H-05 FIX: Retry helper for Arweave audit uploads
 async function retryArweaveUpload(fn, maxRetries = 3) {
@@ -239,10 +267,9 @@ async function maybeFinalizeDecision(triggerId, trigger) {
 
   await db.triggers.update(triggerId, finalizedTrigger);
 
-  // When finalized as 'release', deliver stored RWA credential NFT (if binding has RWA packages).
+  // When finalized as 'release', deliver stored RWA credential NFT to all recipients on the binding.
   if (trigger.decision === 'release' && trigger.recipient_index != null) {
     try {
-      // Normalize: try both with and without 0x prefix (trigger stores without, binding may store with)
       const wid = trigger.wallet_id;
       const widAlt = wid.startsWith('0x') ? wid.slice(2) : `0x${wid}`;
       const bindings = [...(await db.bindings.findByWallet(wid)), ...(await db.bindings.findByWallet(widAlt))];
@@ -254,12 +281,44 @@ async function maybeFinalizeDecision(triggerId, trigger) {
           b.recipient_indices.some((idx) => Number(idx) === Number(trigger.recipient_index)) &&
           (b.manifest_arweave_tx_id || (Array.isArray(b.encrypted_packages) && b.encrypted_packages.some(p => p.rwa_upload_body)))
       );
-      if (activeBinding) {
-        const delivery = await deliverRwaPackageForRecipient(activeBinding, trigger.recipient_index);
-        if (delivery.delivered) {
-          console.log('[trigger/decision] RWA NFT delivered on finalization: wallet=%s recipient=%s txId=%s', trigger.wallet_id, trigger.recipient_index, delivery.txId);
-        } else if (delivery.error) {
-          console.warn('[trigger/decision] RWA delivery failed on finalization: wallet=%s recipient=%s: %s', trigger.wallet_id, trigger.recipient_index, delivery.error);
+      if (activeBinding && Array.isArray(activeBinding.recipient_indices)) {
+        const deliveredIndices = [];
+        for (const idx of activeBinding.recipient_indices) {
+          const recipientIndex = Number(idx);
+          try {
+            const delivery = await deliverRwaPackageForRecipient(activeBinding, recipientIndex);
+            if (delivery.delivered) {
+              deliveredIndices.push(recipientIndex);
+              console.log('[trigger/decision] RWA NFT delivered on finalization: wallet=%s recipient=%s txId=%s', trigger.wallet_id, recipientIndex, delivery.txId);
+            } else if (delivery.error) {
+              console.warn('[trigger/decision] RWA delivery failed on finalization: wallet=%s recipient=%s: %s', trigger.wallet_id, recipientIndex, delivery.error);
+            }
+          } catch (perRecipientErr) {
+            const errMsg = perRecipientErr?.message || String(perRecipientErr);
+            console.warn('[trigger/decision] RWA delivery threw for recipient %s: %s', recipientIndex, errMsg);
+            await recordDeliveryFailure(activeBinding.wallet_id, activeBinding.authority_id, recipientIndex, errMsg);
+            try {
+              await db.auditLog.create(`rwa_throw_${triggerId}_${recipientIndex}_${Date.now()}`, {
+                type: 'rwa_delivery_threw',
+                trigger_id: triggerId,
+                wallet_id: activeBinding.wallet_id,
+                authority_id: activeBinding.authority_id,
+                recipient_index: recipientIndex,
+                error_message: errMsg,
+                created_at: Date.now(),
+              });
+            } catch (_) { /* audit best-effort */ }
+          }
+        }
+        // Only write on-chain RELEASE attestation for recipients we successfully delivered NFT to.
+        // Recipients we didn't deliver to have no attestation → owner can still reclaim their shares.
+        if (deliveredIndices.length > 0) {
+          await submitReleaseAttestationForAllRecipients(
+            activeBinding.wallet_id,
+            deliveredIndices,
+            trigger.decision_evidence_hash,
+            trigger.decision_reason_code
+          );
         }
       }
     } catch (deliveryErr) {
@@ -432,10 +491,9 @@ router.post('/:id/decision', authorityAuthMiddleware, async (req, res) => {
       }
     }
 
-    // If release (immediate or after cooldown), deliver RWA NFT
+    // If release (immediate or after cooldown), deliver RWA NFT to all recipients on the binding
     if (newStatus === 'released' && trigger.recipient_index != null) {
       try {
-        // Normalize: try both with and without 0x prefix
         const wid = trigger.wallet_id;
         const widAlt = wid.startsWith('0x') ? wid.slice(2) : `0x${wid}`;
         const bindings = [...(await db.bindings.findByWallet(wid)), ...(await db.bindings.findByWallet(widAlt))];
@@ -447,12 +505,43 @@ router.post('/:id/decision', authorityAuthMiddleware, async (req, res) => {
             b.recipient_indices.some((idx) => Number(idx) === Number(trigger.recipient_index)) &&
             (b.manifest_arweave_tx_id || (Array.isArray(b.encrypted_packages) && b.encrypted_packages.some(p => p.rwa_upload_body)))
         );
-        if (activeBinding) {
-          const delivery = await deliverRwaPackageForRecipient(activeBinding, trigger.recipient_index);
-          if (delivery.delivered) {
-            console.log('[trigger/decision] RWA NFT delivered (immediate release): wallet=%s recipient=%s txId=%s', trigger.wallet_id, trigger.recipient_index, delivery.txId);
-          } else if (delivery.error) {
-            console.warn('[trigger/decision] RWA delivery failed (immediate release): wallet=%s recipient=%s: %s', trigger.wallet_id, trigger.recipient_index, delivery.error);
+        if (activeBinding && Array.isArray(activeBinding.recipient_indices)) {
+          const deliveredIndices = [];
+          for (const idx of activeBinding.recipient_indices) {
+            const recipientIndex = Number(idx);
+            try {
+              const delivery = await deliverRwaPackageForRecipient(activeBinding, recipientIndex);
+              if (delivery.delivered) {
+                deliveredIndices.push(recipientIndex);
+                console.log('[trigger/decision] RWA NFT delivered (immediate release): wallet=%s recipient=%s txId=%s', trigger.wallet_id, recipientIndex, delivery.txId);
+              } else if (delivery.error) {
+                console.warn('[trigger/decision] RWA delivery failed (immediate release): wallet=%s recipient=%s: %s', trigger.wallet_id, recipientIndex, delivery.error);
+              }
+            } catch (perRecipientErr) {
+              const errMsg = perRecipientErr?.message || String(perRecipientErr);
+              console.warn('[trigger/decision] RWA delivery threw for recipient %s: %s', recipientIndex, errMsg);
+              await recordDeliveryFailure(activeBinding.wallet_id, activeBinding.authority_id, recipientIndex, errMsg);
+              try {
+                await db.auditLog.create(`rwa_throw_${id}_${recipientIndex}_${Date.now()}`, {
+                  type: 'rwa_delivery_threw',
+                  trigger_id: id,
+                  wallet_id: activeBinding.wallet_id,
+                  authority_id: activeBinding.authority_id,
+                  recipient_index: recipientIndex,
+                  error_message: errMsg,
+                  created_at: Date.now(),
+                });
+              } catch (_) { /* audit best-effort */ }
+            }
+          }
+          // Only write on-chain RELEASE attestation for recipients we successfully delivered NFT to.
+          if (deliveredIndices.length > 0) {
+            await submitReleaseAttestationForAllRecipients(
+              activeBinding.wallet_id,
+              deliveredIndices,
+              decisionData.evidence_hash,
+              decisionData.reason_code
+            );
           }
         }
       } catch (deliveryErr) {

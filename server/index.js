@@ -72,7 +72,7 @@ const crypto = require('crypto');
 const express = require('express');
 const path = require('path');
 const rateLimit = require('express-rate-limit');
-const { generateChallenge, verifySignature, createClientSessionToken, authMiddleware, dualAuthMiddleware } = require('./middleware/auth');
+const { generateChallenge, verifySignature, createClientSessionToken, authMiddleware, dualAuthMiddleware, authorityAuthMiddleware } = require('./middleware/auth');
 
 // ---------------------------------------------------------------------------
 // API routers
@@ -111,6 +111,7 @@ const walletPlan = require('./api/wallet-plan');
 const releaseConfigure = require('./api/release/configure');
 const releaseDistribute = require('./api/release/distribute');
 const releaseDeliverFromRegistry = require('./api/release/deliver-from-registry');
+const releaseRedeliverCandidates = require('./api/release/redeliver-candidates');
 const releaseOracleAuthority = require('./api/release/oracle-authority');
 const releaseStatus = require('./api/release/status');
 const releaseFactors = require('./api/release/release-factors');
@@ -436,7 +437,8 @@ app.use('/api/trial/request', trialRequest);
 app.use('/api/release/configure', dualAuthMiddleware, releaseConfigure);
 app.use('/api/release/prepare-distribute', dualAuthMiddleware, releasePrepareDistribute);
 app.use('/api/release/distribute', dualAuthMiddleware, releaseDistribute);
-app.use('/api/release/deliver-from-registry', dualAuthMiddleware, releaseDeliverFromRegistry);
+app.use('/api/release/deliver-from-registry', authorityAuthMiddleware, releaseDeliverFromRegistry);
+app.use('/api/release/redeliver-candidates', authorityAuthMiddleware, releaseRedeliverCandidates);
 app.use('/api/release/oracle-authority', dualAuthMiddleware, releaseOracleAuthority);
 app.use('/api/release/status', dualAuthMiddleware, releaseStatus);
 app.use('/api/release/release-factors', dualAuthMiddleware, releaseFactors);

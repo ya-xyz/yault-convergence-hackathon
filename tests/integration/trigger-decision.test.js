@@ -387,20 +387,20 @@ describe('Trigger Decision API', () => {
     const triggerId = 'trig-expired-01';
     await createTestTrigger(triggerId, { authority_id: authorityId });
 
-    // Submit release with DEFAULT_COOLDOWN_HOURS=0.001 (3.6s)
+    // Submit release with cooldown_hours=0.001 (3.6s) so cooldown expires quickly
     const authHeader1 = await authenticateAuthority(authorityKp.publicKey, authorityKp.secretKey);
     const decisionRes = await request
       .post(`/api/trigger/${triggerId}/decision`)
       .set('Authorization', authHeader1)
-      .send(buildDecisionBody('release'))
+      .send(buildDecisionBody('release', { cooldown_hours: 0.001 }))
       .expect(200);
 
     expect(decisionRes.body.status).toBe('cooldown');
 
-    // Wait for cooldown to expire (DEFAULT_COOLDOWN_HOURS=0.001 = 3.6s, wait 4.5s)
+    // Wait for cooldown to expire (0.001h = 3.6s, wait 4.5s)
     await new Promise(resolve => setTimeout(resolve, 4500));
 
-    // Try to cancel — should fail because cooldown expired
+    // Try to cancel — should fail because cooldown expired (or already finalized by scheduler)
     const authHeader2 = await authenticateAuthority(authorityKp.publicKey, authorityKp.secretKey);
     const cancelRes = await request
       .post(`/api/trigger/${triggerId}/cancel`)
@@ -408,6 +408,11 @@ describe('Trigger Decision API', () => {
       .send({ reason: 'Too late', signature: 'd'.repeat(128) })
       .expect(400);
 
-    expect(cancelRes.body.error).toBe('Cooldown expired');
+    expect(['Cooldown expired', 'Invalid state']).toContain(cancelRes.body.error);
+    if (cancelRes.body.error === 'Cooldown expired') {
+      expect(cancelRes.body.detail).toContain('already expired');
+    } else {
+      expect(cancelRes.body.detail).toMatch(/finalized|cooldown expired/i);
+    }
   }, 15000); // Extended timeout for the wait
 });
