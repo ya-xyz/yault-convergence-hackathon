@@ -20,6 +20,23 @@ const { Router } = require('express');
 
 const router = Router();
 
+const ORACLE_INTERNAL_API_KEY = process.env.ORACLE_INTERNAL_API_KEY || '';
+
+// Guard: require oracle API key when set; block in production if unset.
+function oracleKeyGuard(req, res, next) {
+  if (ORACLE_INTERNAL_API_KEY && ORACLE_INTERNAL_API_KEY.length > 0) {
+    const provided = req.headers['x-oracle-internal-key'] || '';
+    const expectedBuf = Buffer.from(ORACLE_INTERNAL_API_KEY, 'utf8');
+    const providedBuf = Buffer.from(provided, 'utf8');
+    if (expectedBuf.length !== providedBuf.length || !crypto.timingSafeEqual(expectedBuf, providedBuf)) {
+      return res.status(401).json({ error: 'Unauthorized', detail: 'Invalid or missing X-Oracle-Internal-Key' });
+    }
+  } else if (process.env.NODE_ENV === 'production') {
+    return res.status(503).json({ error: 'Compliance screening disabled', detail: 'Set ORACLE_INTERNAL_API_KEY' });
+  }
+  next();
+}
+
 // Sanctioned/blocked addresses for demo (OFAC-style blocklist).
 // In production this would be fetched from a real sanctions oracle.
 const BLOCKED_ADDRESSES = new Set([
@@ -34,7 +51,7 @@ function computeCheckId(walletId, recipientIndex) {
   return crypto.createHash('sha256').update(payload).digest('hex').slice(0, 16);
 }
 
-router.get('/screen', (req, res) => {
+router.get('/screen', oracleKeyGuard, (req, res) => {
   const { wallet_id, recipient_index } = req.query;
 
   if (!wallet_id) {

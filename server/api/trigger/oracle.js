@@ -55,7 +55,7 @@ function parseRecipientIndexStrict(raw) {
  * Query: wallet_id (required), recipient_index (required)
  * Returns: { attestation: { source, decision, ... } | null, oracle_enabled }
  */
-router.get('/attestation', async (req, res) => {
+router.get('/attestation', dualAuthMiddleware, async (req, res) => {
   try {
     const { wallet_id, recipient_index } = req.query;
     const oracleEnabled =
@@ -143,25 +143,22 @@ router.get('/attestation-check', authorityAuthMiddleware, async (req, res) => {
  */
 router.post('/from-oracle', async (req, res) => {
   try {
-    // In production, ORACLE_INTERNAL_API_KEY is required (SECURITY: prevent open from-oracle abuse).
-    const isProduction = process.env.NODE_ENV === 'production';
-    if (isProduction && (!ORACLE_INTERNAL_API_KEY || ORACLE_INTERNAL_API_KEY.length === 0)) {
+    // SECURITY: ORACLE_INTERNAL_API_KEY is always required (all environments).
+    if (!ORACLE_INTERNAL_API_KEY || ORACLE_INTERNAL_API_KEY.length === 0) {
       return res.status(503).json({
         error: 'Service unavailable',
-        detail: 'from-oracle is disabled: set ORACLE_INTERNAL_API_KEY in production (cron/CRE only).',
+        detail: 'from-oracle is disabled: set ORACLE_INTERNAL_API_KEY (cron/CRE only).',
       });
     }
-    // When key is set, require valid X-Oracle-Internal-Key (constant-time compare).
-    if (ORACLE_INTERNAL_API_KEY && ORACLE_INTERNAL_API_KEY.length > 0) {
-      const key = req.headers['x-oracle-internal-key'];
-      const keyBuf = Buffer.from(key || '', 'utf8');
-      const expectedBuf = Buffer.from(ORACLE_INTERNAL_API_KEY, 'utf8');
-      if (keyBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(keyBuf, expectedBuf)) {
-        return res.status(403).json({
-          error: 'Forbidden',
-          detail: 'from-oracle requires valid X-Oracle-Internal-Key (set ORACLE_INTERNAL_API_KEY for cron/CRE).',
-        });
-      }
+    // Require valid X-Oracle-Internal-Key (constant-time compare).
+    const key = req.headers['x-oracle-internal-key'];
+    const keyBuf = Buffer.from(key || '', 'utf8');
+    const expectedBuf = Buffer.from(ORACLE_INTERNAL_API_KEY, 'utf8');
+    if (keyBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(keyBuf, expectedBuf)) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        detail: 'from-oracle requires valid X-Oracle-Internal-Key.',
+      });
     }
 
     const oracleEnabled =
@@ -495,7 +492,21 @@ const PENDING_ORACLE_REQUESTS = [];
  * Body: { wallet_id, recipient_index, decision }
  * Simulates a platform action that queues a task for the oracle workflow.
  */
-oraclePendingRouter.post('/request-attestation', (req, res) => {
+function oracleKeyGuard(req, res, next) {
+  if (ORACLE_INTERNAL_API_KEY && ORACLE_INTERNAL_API_KEY.length > 0) {
+    const provided = req.headers['x-oracle-internal-key'] || '';
+    const expectedBuf = Buffer.from(ORACLE_INTERNAL_API_KEY, 'utf8');
+    const providedBuf = Buffer.from(provided, 'utf8');
+    if (expectedBuf.length !== providedBuf.length || !crypto.timingSafeEqual(expectedBuf, providedBuf)) {
+      return res.status(401).json({ error: 'Unauthorized', detail: 'Invalid or missing X-Oracle-Internal-Key' });
+    }
+  } else if (process.env.NODE_ENV === 'production') {
+    return res.status(503).json({ error: 'Oracle queue disabled', detail: 'Set ORACLE_INTERNAL_API_KEY in production' });
+  }
+  next();
+}
+
+oraclePendingRouter.post('/request-attestation', oracleKeyGuard, (req, res) => {
   const { wallet_id, recipient_index, decision } = req.body;
 
   if (!wallet_id || recipient_index === undefined || !decision) {
@@ -526,7 +537,7 @@ oraclePendingRouter.post('/request-attestation', (req, res) => {
  * GET /api/oracle/pending
  * Returns pending requests for the Chainlink oracle (CRE) workflow.
  */
-oraclePendingRouter.get('/pending', (_req, res) => {
+oraclePendingRouter.get('/pending', oracleKeyGuard, (_req, res) => {
   const oracleEnabled =
     config.oracle?.enabled && config.oracle?.releaseAttestationAddress;
   if (!oracleEnabled) {
