@@ -2971,6 +2971,19 @@ function attachAppEvents() {
           hint.textContent = 'Oracle event has been triggered. Please wait ' + mins + ' minutes before claiming.';
         }
         reportActivity('simulate_chainlink', null, null, { detail: (data.triggers || []).length + ' triggers created' });
+        const firstTx = (data.triggers || []).find(function (t) { return t.attestation_tx; });
+        if (firstTx && firstTx.attestation_tx) {
+          const chainId = 11155111;
+          const explorerUrl = getExplorerTxUrl(chainId, firstTx.attestation_tx);
+          const explorerName = getExplorerName(chainId);
+          const existing = document.querySelector('.toast');
+          if (existing) existing.remove();
+          const toast = document.createElement('div');
+          toast.className = 'toast toast-success';
+          toast.innerHTML = 'Attestation on chain (' + explorerName + '). <a href="' + explorerUrl + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:600;">View on block explorer</a>';
+          document.body.appendChild(toast);
+          setTimeout(function () { return toast.remove(); }, 10000);
+        }
       } catch (err) {
         btnSimChainOverview.textContent = 'Simulate Chainlink Event';
         btnSimChainOverview.disabled = false;
@@ -3734,6 +3747,18 @@ function attachAppEvents() {
                         reportActivity('escrow_deposit', lastEscrowTx, escrowResult.totalShares, {
                           detail: escrowIndices.length + ' recipients',
                         });
+                        if (lastEscrowTx) {
+                          var escrowChainId = Number(escrowCfg.chainId) || 11155111;
+                          var escrowExplorerUrl = getExplorerTxUrl(escrowChainId, lastEscrowTx);
+                          var escrowExplorerName = getExplorerName(escrowChainId);
+                          var existingToast = document.querySelector('.toast');
+                          if (existingToast) existingToast.remove();
+                          var escrowToast = document.createElement('div');
+                          escrowToast.className = 'toast toast-success';
+                          escrowToast.innerHTML = 'Escrow on chain (' + escrowExplorerName + '). <a href="' + escrowExplorerUrl + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:600;">View on block explorer</a>';
+                          document.body.appendChild(escrowToast);
+                          setTimeout(function () { return escrowToast.remove(); }, 10000);
+                        }
                       } else {
                         // CRITICAL: Halt flow if escrow deposit fails.
                         // The invariant "escrow deposit ≺ credential delivery" MUST hold:
@@ -3950,6 +3975,19 @@ function attachAppEvents() {
           hint.textContent = 'Oracle event has been triggered. Please wait ' + mins + ' minutes before claiming.';
         }
         reportActivity('simulate_chainlink', null, null, { detail: (data.triggers || []).length + ' triggers created' });
+        const firstTx = (data.triggers || []).find(function (t) { return t.attestation_tx; });
+        if (firstTx && firstTx.attestation_tx) {
+          const chainId = 11155111;
+          const explorerUrl = getExplorerTxUrl(chainId, firstTx.attestation_tx);
+          const explorerName = getExplorerName(chainId);
+          const existing = document.querySelector('.toast');
+          if (existing) existing.remove();
+          const toast = document.createElement('div');
+          toast.className = 'toast toast-success';
+          toast.innerHTML = 'Attestation on chain (' + explorerName + '). <a href="' + explorerUrl + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:600;">View on block explorer</a>';
+          document.body.appendChild(toast);
+          setTimeout(function () { return toast.remove(); }, 10000);
+        }
       } catch (err) {
         btnSimulateChainlink.textContent = 'Simulate Chainlink Event';
         btnSimulateChainlink.disabled = false;
@@ -4904,6 +4942,19 @@ function attachAppEvents() {
           reportActivity('escrow_reclaim', result.txHashes[result.txHashes.length - 1] || null, null, {
             detail: result.reclaimedCount + ' recipients reclaimed',
           });
+          var lastReclaimTx = result.txHashes[result.txHashes.length - 1] || null;
+          if (lastReclaimTx) {
+            var reclaimChainId = Number(escrowCfg.chainId) || 11155111;
+            var reclaimExplorerUrl = getExplorerTxUrl(reclaimChainId, lastReclaimTx);
+            var reclaimExplorerName = getExplorerName(reclaimChainId);
+            var existingReclaimToast = document.querySelector('.toast');
+            if (existingReclaimToast) existingReclaimToast.remove();
+            var reclaimToast = document.createElement('div');
+            reclaimToast.className = 'toast toast-success';
+            reclaimToast.innerHTML = 'Reclaim tx on chain (' + reclaimExplorerName + '). <a href="' + reclaimExplorerUrl + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:600;">View on block explorer</a>';
+            document.body.appendChild(reclaimToast);
+            setTimeout(function () { return reclaimToast.remove(); }, 10000);
+          }
         } else if (result.success && result.reclaimedCount === 0) {
           if (doneText) doneText.textContent = 'All signatures complete. You can close and refresh. No shares available to reclaim.';
           if (doneText) doneText.style.color = '';
@@ -5500,6 +5551,16 @@ function attachAppEvents() {
             message: 'Claim transaction submitted! Tx: ' + (txHash || '').slice(0, 18) + '...',
           };
           reportActivity('claim', txHash, displayAmt, { asset: symbol });
+          var claimChainId = 11155111;
+          var claimExplorerUrl = getExplorerTxUrl(claimChainId, txHash);
+          var claimExplorerName = getExplorerName(claimChainId);
+          var existingClaimToast = document.querySelector('.toast');
+          if (existingClaimToast) existingClaimToast.remove();
+          var claimToast = document.createElement('div');
+          claimToast.className = 'toast toast-success';
+          claimToast.innerHTML = 'Claim tx on chain (' + claimExplorerName + '). <a href="' + claimExplorerUrl + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:600;">View on block explorer</a>';
+          document.body.appendChild(claimToast);
+          setTimeout(function () { return claimToast.remove(); }, 10000);
         } else {
           const fromAddr = state.redeemWalletJson ? (state.redeemWalletJson.evm_address || '') : '';
           // Fallback: no escrow balance, show prepared result

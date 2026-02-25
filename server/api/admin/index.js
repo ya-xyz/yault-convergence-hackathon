@@ -798,8 +798,9 @@ router.post('/trigger/emergency-release', async (req, res) => {
     const { TriggerEvent } = require('../../models/schemas');
     const { submitFallbackAttestation } = require('../../services/attestationSubmitter');
     const { sendCooldownNotification } = require('../../services/email');
+    const cooldownDefaultMinutes = config.cooldown && config.cooldown.defaultMinutes != null ? config.cooldown.defaultMinutes : null;
     const cooldownDefaultHours = (config.cooldown && config.cooldown.defaultHours) != null ? config.cooldown.defaultHours : 168;
-    const cooldownMs = cooldownDefaultHours * 60 * 60 * 1000;
+    const cooldownMs = cooldownDefaultMinutes != null ? cooldownDefaultMinutes * 60 * 1000 : cooldownDefaultHours * 60 * 60 * 1000;
     const ORACLE_AUTHORITY_ID =
       config.oracle?.oracleAuthorityId ||
       crypto.createHash('sha256').update('yault-chainlink-oracle', 'utf8').digest('hex');

@@ -23,7 +23,7 @@ const TEST_DB_PATH = path.join(
 );
 process.env.DATABASE_PATH = TEST_DB_PATH;
 process.env.NODE_ENV = 'test';
-process.env.DEFAULT_COOLDOWN_HOURS = '0';
+process.env.COOLDOWN_DEFAULT_HOURS = '0';
 
 // Ensure Arweave / RWA delivery paths are inert
 delete process.env.ARWEAVE_WALLET_JWK;

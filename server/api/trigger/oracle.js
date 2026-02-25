@@ -19,7 +19,7 @@ const config = require('../../config');
 const db =require('../../db');
 const { getAttestation } = require('../../services/attestationClient');
 const { evaluateReleaseAttestationGate } = require('../../services/attestationGate');
-const { submitFallbackAttestation } = require('../../services/attestationSubmitter');
+const { submitFallbackAttestation, submitOracleAttestation } = require('../../services/attestationSubmitter');
 const { dualAuthMiddleware, authorityAuthMiddleware } = require('../../middleware/auth');
 const { TriggerEvent, ReleaseDecision } = require('../../models/schemas');
 const { sendCooldownNotification } = require('../../services/email');
@@ -28,6 +28,8 @@ const { sendCooldownNotification } = require('../../services/email');
 const router = Router();
 
 function getDefaultCooldownMs() {
+  const mins = config.cooldown && config.cooldown.defaultMinutes != null ? config.cooldown.defaultMinutes : null;
+  if (mins != null) return mins * 60 * 1000;
   const h = config.cooldown && config.cooldown.defaultHours != null ? config.cooldown.defaultHours : 168;
   return h * 60 * 60 * 1000;
 }
@@ -378,7 +380,7 @@ router.post('/simulate-chainlink', dualAuthMiddleware, async (req, res) => {
 
         let attestationTxHash = null;
         try {
-          const atResult = await submitFallbackAttestation(config, {
+          const atResult = await submitOracleAttestation(config, {
             walletId,
             recipientIndex,
             decision: 'release',
