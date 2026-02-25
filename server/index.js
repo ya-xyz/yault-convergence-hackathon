@@ -115,6 +115,7 @@ const releaseRedeliverCandidates = require('./api/release/redeliver-candidates')
 const releaseOracleAuthority = require('./api/release/oracle-authority');
 const releaseStatus = require('./api/release/status');
 const releaseFactors = require('./api/release/release-factors');
+const releaseReplacePathPayload = require('./api/release/replace-path-payload');
 const claimLookup = require('./api/claim/lookup');
 const pathClaimRouter = require('./api/path-claim');
 
@@ -442,6 +443,7 @@ app.use('/api/release/redeliver-candidates', authorityAuthMiddleware, releaseRed
 app.use('/api/release/oracle-authority', dualAuthMiddleware, releaseOracleAuthority);
 app.use('/api/release/status', dualAuthMiddleware, releaseStatus);
 app.use('/api/release/release-factors', dualAuthMiddleware, releaseFactors);
+app.use('/api/release/replace-path-payload', dualAuthMiddleware, releaseReplacePathPayload);
 
 // Claim lookup (recipient retrieves released factors — requires auth)
 app.use('/api/claim', dualAuthMiddleware, claimLookup);
