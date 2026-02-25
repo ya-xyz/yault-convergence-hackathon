@@ -95,18 +95,20 @@ router.get('/balance/:address', dualAuthMiddleware, async (req, res) => {
   }
   const bitcoinAddress = req.query.btc_address && String(req.query.btc_address).trim() ? String(req.query.btc_address).trim() : null;
   const solanaAddress = req.query.sol_address && String(req.query.sol_address).trim() ? String(req.query.sol_address).trim() : null;
-  let walletData = { eth: '0.00', sol: '0.00', btc: '0.00', usdcEthereum: '0.00', usdcSolana: '0.00', wethEthereum: '0.00' };
+  let walletData = { eth: '0.00', sol: '0.00', btc: '0.00', usdcEthereum: '0.00', usdcSolana: '0.00', wethEthereum: '0.00', wbtcEthereum: '0.00' };
   try {
     const balances = await getMultiChainBalances(
       { evmAddress, bitcoinAddress, solanaAddress },
       { useTestnet, includeTokens: true, chains: ['ethereum'], maxEvmChains: 1 }
     );
-    const ethRow = balances.evm && balances.evm.find((r) => r.chain === 'ethereum' && r.symbol !== 'USDC' && r.symbol !== 'WETH');
+    const ethRow = balances.evm && balances.evm.find((r) => r.chain === 'ethereum' && r.symbol !== 'USDC' && r.symbol !== 'WETH' && r.symbol !== 'WBTC');
     walletData.eth = ethRow && typeof ethRow.balance === 'string' ? ethRow.balance : '0.00';
     const usdcEth = balances.evm && balances.evm.find((r) => r.chain === 'ethereum' && r.symbol === 'USDC');
     walletData.usdcEthereum = usdcEth && typeof usdcEth.balance === 'string' ? usdcEth.balance : '0.00';
     const wethEth = balances.evm && balances.evm.find((r) => r.chain === 'ethereum' && r.symbol === 'WETH');
     walletData.wethEthereum = wethEth && typeof wethEth.balance === 'string' ? wethEth.balance : '0.00';
+    const wbtcEth = balances.evm && balances.evm.find((r) => r.chain === 'ethereum' && r.symbol === 'WBTC');
+    walletData.wbtcEthereum = wbtcEth && typeof wbtcEth.balance === 'string' ? wbtcEth.balance : '0.00';
     if (process.env.NODE_ENV === 'development' && usdcEth) {
       console.log('[vault/balance] USDC result:', usdcEth.balance, usdcEth.error ? 'error=' + usdcEth.error : '');
     }

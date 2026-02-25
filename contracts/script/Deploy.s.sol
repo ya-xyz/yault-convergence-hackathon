@@ -15,18 +15,25 @@ import {YaultVaultFactory} from "../src/YaultVaultFactory.sol";
  * @dev Deploys:
  *      1. `YaultVaultFactory` — owned by the deployer.
  *      2. One default `YaultVault` using WETH as the underlying asset.
+ *      3. Optionally a WBTC vault when WBTC_ADDRESS is set.
+ *      4. Optionally a USDC vault when USDC_ADDRESS is set.
  *
  *      Environment variables (set in `.env` or pass via `--env`):
  *
  *        DEPLOYER_PRIVATE_KEY    — Private key used for broadcasting.
  *        PLATFORM_FEE_RECIPIENT  — Address receiving the 25 % platform fee.
  *        WETH_ADDRESS            — Address of the WETH token on the target chain.
+ *        WBTC_ADDRESS            — (Optional) Address of WBTC; if set, deploys a vault for WBTC.
+ *        USDC_ADDRESS            — (Optional) Address of USDC; if set, deploys a vault for USDC.
  *
  *      Usage:
  *        forge script script/Deploy.s.sol:Deploy \
  *          --rpc-url $RPC_URL \
  *          --broadcast \
  *          --verify
+ *
+ *      To deploy with WBTC + USDC vaults (e.g. Ethereum mainnet):
+ *        WBTC_ADDRESS=0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599 USDC_ADDRESS=0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 forge script script/Deploy.s.sol:Deploy --rpc-url $RPC_URL --broadcast
  */
 contract Deploy is Script {
     function run() external {
@@ -36,6 +43,8 @@ contract Deploy is Script {
         uint256 deployerKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
         address platformFeeRecipient = vm.envAddress("PLATFORM_FEE_RECIPIENT");
         address wethAddress = vm.envAddress("WETH_ADDRESS");
+        address wbtcAddress = vm.envOr("WBTC_ADDRESS", address(0));
+        address usdcAddress = vm.envOr("USDC_ADDRESS", address(0));
 
         address deployer = vm.addr(deployerKey);
 
@@ -43,6 +52,8 @@ contract Deploy is Script {
         console2.log("Deployer:              ", deployer);
         console2.log("Platform fee recipient:", platformFeeRecipient);
         console2.log("WETH address:          ", wethAddress);
+        if (wbtcAddress != address(0)) console2.log("WBTC address:          ", wbtcAddress);
+        if (usdcAddress != address(0)) console2.log("USDC address:          ", usdcAddress);
 
         // ---------------------------------------------------------------
         //  Begin broadcast
@@ -69,6 +80,26 @@ contract Deploy is Script {
         );
         console2.log("WETH Vault deployed at:", vaultAddress);
 
+        // 4. Optionally deploy WBTC vault (yield: set Aave strategy later via SetStrategy script).
+        if (wbtcAddress != address(0)) {
+            address wbtcVaultAddress = factory.createVault(
+                IERC20(wbtcAddress),
+                "Yault WBTC Vault",
+                "yWBTC"
+            );
+            console2.log("WBTC Vault deployed at:", wbtcVaultAddress);
+        }
+
+        // 5. Optionally deploy USDC vault (yield: set Aave strategy later via SetStrategy script).
+        if (usdcAddress != address(0)) {
+            address usdcVaultAddress = factory.createVault(
+                IERC20(usdcAddress),
+                "Yault USDC Vault",
+                "yUSDC"
+            );
+            console2.log("USDC Vault deployed at:", usdcVaultAddress);
+        }
+
         vm.stopBroadcast();
 
         // ---------------------------------------------------------------
@@ -79,6 +110,8 @@ contract Deploy is Script {
         console2.log("Creator:    ", address(creator));
         console2.log("Factory:    ", address(factory));
         console2.log("WETH Vault: ", vaultAddress);
+        if (wbtcAddress != address(0)) console2.log("WBTC Vault: (see above)");
+        if (usdcAddress != address(0)) console2.log("USDC Vault: (see above)");
         console2.log("Total vaults:", factory.getVaultCount());
     }
 }

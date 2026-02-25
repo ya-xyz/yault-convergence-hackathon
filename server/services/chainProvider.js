@@ -331,6 +331,24 @@ async function getMultiChainBalances(addresses, options = {}) {
             })
         );
       }
+      const wbtcAddr = useTestnet ? (chain.testnet?.wbtc || chain.wbtc) : chain.wbtc;
+      if (includeTokens && wbtcAddr) {
+        promises.push(
+          getEvmTokenBalance(chain.key, addresses.evmAddress, wbtcAddr, 8, rpcTimeoutMs, useTestnet)
+            .then((bal) => results.evm.push({ ...bal, symbol: 'WBTC' }))
+            .catch((err) => {
+              console.warn(`[chainProvider] ${chain.name} WBTC balance failed:`, err.message);
+              results.evm.push({
+                chain: chain.key,
+                chainName: chain.name,
+                address: addresses.evmAddress,
+                balance: '0',
+                symbol: 'WBTC',
+                error: err.message,
+              });
+            })
+        );
+      }
     }
   }
 

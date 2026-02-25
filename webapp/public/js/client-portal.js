@@ -82,6 +82,7 @@ const state = {
   walletBalances: { eth: '0.00', sol: '0.00', btc: '0.00' },
   walletBalancesUsdc: { ethereum: '0.00', solana: '0.00' }, // filled by GET /vault/balance
   walletBalancesWeth: { ethereum: '0.00' }, // filled by GET /vault/balance
+  walletBalancesWbtc: { ethereum: '0.00' }, // filled by GET /vault/balance
   vaultBalances: { shares: '0.00', value: '0.00', yield: '0.00' },
   escrowBalances: { shares: '0', value: '0', recipient_indices: [] },
   vaultUnderlyingSymbol: 'USDC',  // from GET /vault/balance (VAULT_UNDERLYING_SYMBOL), e.g. 'WETH'
@@ -173,7 +174,7 @@ const state = {
 
 // Tokens per chain for global context dropdown (cascading: Token options depend on Chain)
 var TOKENS_BY_CHAIN = {
-  ethereum: [{ value: 'ETH', label: 'ETH' }, { value: 'WETH', label: 'WETH' }, { value: 'USDC', label: 'USDC' }],
+  ethereum: [{ value: 'ETH', label: 'ETH' }, { value: 'WETH', label: 'WETH' }, { value: 'WBTC', label: 'WBTC' }, { value: 'USDC', label: 'USDC' }],
   solana: [{ value: 'SOL', label: 'SOL' }, { value: 'USDC', label: 'USDC' }],
   bitcoin: [{ value: 'BTC', label: 'BTC' }],
 };
@@ -213,6 +214,8 @@ const REDEEM_DEFAULT_TOKENS = {
   bitcoin: [{ symbol: 'BTC', name: 'Bitcoin', contract: '' }],
   ethereum: [
     { symbol: 'ETH', name: 'Ethereum', contract: '' },
+    { symbol: 'WETH', name: 'Wrapped Ether', contract: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2' },
+    { symbol: 'WBTC', name: 'Wrapped Bitcoin', contract: '0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599' },
     { symbol: 'USDT', name: 'Tether USD', contract: '0xdAC17F958D2ee523a2206206994597C13D831ec7' },
     { symbol: 'USDC', name: 'USD Coin', contract: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48' },
     { symbol: 'DAI', name: 'Dai', contract: '0x6B175474E89094C44Da98b954EedeAC495271d0F' },
@@ -1520,6 +1523,7 @@ function getGlobalContextBalance() {
   if (tok === 'BTC') return b?.btc ?? '0.00';
   if (tok === 'USDC') return (state.walletBalancesUsdc && state.walletBalancesUsdc[state.globalChainKey]) ?? '0.00';
   if (tok === 'WETH') return (state.walletBalancesWeth && state.walletBalancesWeth[state.globalChainKey]) ?? '0.00';
+  if (tok === 'WBTC') return (state.walletBalancesWbtc && state.walletBalancesWbtc[state.globalChainKey]) ?? '0.00';
   return '0.00';
 }
 
@@ -1901,7 +1905,7 @@ function renderWallet() {
 
 // ─── Accounts Page (Related Accounts, Invite, Transfer) ───
 
-const TOKEN_OPTIONS = ['ETH', 'SOL', 'BTC', 'USDC'];
+const TOKEN_OPTIONS = ['ETH', 'SOL', 'BTC', 'WETH', 'WBTC', 'USDC'];
 const ACCOUNTS_SECTIONS = [
   { key: 'accounts', label: 'Accounts' },
   { key: 'invite', label: 'Invite' },
@@ -5377,6 +5381,9 @@ async function refreshWalletBalances() {
       };
       state.walletBalancesWeth = {
         ethereum: data.wallet?.wethEthereum ?? '0.00',
+      };
+      state.walletBalancesWbtc = {
+        ethereum: data.wallet?.wbtcEthereum ?? '0.00',
       };
       state.vaultBalances = {
         shares: data.vault?.shares || '0.00',

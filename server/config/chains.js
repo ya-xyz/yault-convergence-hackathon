@@ -47,6 +47,7 @@ const CHAINS = {
     explorerApiKey: process.env.EXPLORER_KEY_ETHEREUM || '',
     usdc: process.env.USDC_ETHEREUM || '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
     weth: process.env.WETH_ETHEREUM || '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+    wbtc: process.env.WBTC_ETHEREUM || '0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599',
     vault: process.env.VAULT_ETHEREUM || null,
     testnet: {
       name: 'Sepolia',
@@ -58,6 +59,7 @@ const CHAINS = {
       // USDC: same as extension core/utils.ts TESTNET_TOKENS.sepolia.USDC (Circle Sepolia)
       usdc: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238',
       weth: process.env.WETH_SEPOLIA || '0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9',
+      wbtc: process.env.WBTC_SEPOLIA || null,
     },
     enabled: true,
   },
