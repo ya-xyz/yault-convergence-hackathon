@@ -3,6 +3,10 @@
 //! Blob format: AdminFactor (32 bytes) || amount_u64 (8 bytes big-endian).
 //! Used so that claim flow can derive amount from the released blob without user input;
 //! composite credential binds UserCred || AdminFactor || amount for Unseal.
+//!
+//! Rounding: in practice balances can be 9.999... after fees; the contract treats the signed
+//! amount as a maximum and transfers min(amount, remaining), so the key derived for the nominal
+//! blob amount can sign once and the last claim still succeeds.
 
 use super::admin_factor::ADMIN_FACTOR_SIZE;
 use thiserror::Error;

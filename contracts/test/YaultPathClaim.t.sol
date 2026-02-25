@@ -158,7 +158,8 @@ contract YaultPathClaimTest is Test {
         assertEq(pool.remainingForPath(WALLET_HASH, PATH_INDEX), 0);
     }
 
-    function test_ClaimRevertsWhenExceedsRemaining() public {
+    /// Partial claim then second claim with signed amount > remaining → capped to remaining.
+    function test_ClaimCapsAfterPartialClaim() public {
         vm.startPrank(walletOwnerAddr);
         token.approve(address(pool), type(uint256).max);
         pool.registerWallet(WALLET_HASH);
@@ -168,11 +169,39 @@ contract YaultPathClaimTest is Test {
 
         _submitReleaseAttestation();
 
-        uint256 tooMuch = PATH_TOTAL_AMOUNT + 1;
+        // First claim: 60% of total
+        uint256 first = 600e6;
+        uint256 deadline1 = block.timestamp + 3600;
+        (uint8 v1, bytes32 r1, bytes32 s1) = _signClaim(first, recipient, deadline1);
+        pool.claim(WALLET_HASH, PATH_INDEX, first, recipient, deadline1, v1, r1, s1);
+        assertEq(token.balanceOf(recipient), first);
+        assertEq(pool.remainingForPath(WALLET_HASH, PATH_INDEX), PATH_TOTAL_AMOUNT - first);
+
+        // Second claim: sign for full totalAmount, should cap to remaining 40%
+        uint256 deadline2 = block.timestamp + 3600;
+        (uint8 v2, bytes32 r2, bytes32 s2) = _signClaim(PATH_TOTAL_AMOUNT, recipient, deadline2);
+        pool.claim(WALLET_HASH, PATH_INDEX, PATH_TOTAL_AMOUNT, recipient, deadline2, v2, r2, s2);
+        assertEq(token.balanceOf(recipient), PATH_TOTAL_AMOUNT, "recipient gets full total across both claims");
+        assertEq(pool.remainingForPath(WALLET_HASH, PATH_INDEX), 0);
+    }
+
+    /// After "claim up to" change: signed amount can exceed remaining; we transfer min(amount, remaining).
+    function test_ClaimCapsToRemainingWhenSignedAmountExceeds() public {
+        vm.startPrank(walletOwnerAddr);
+        token.approve(address(pool), type(uint256).max);
+        pool.registerWallet(WALLET_HASH);
+        pool.deposit(WALLET_HASH, PATH_TOTAL_AMOUNT);
+        pool.registerPath(WALLET_HASH, PATH_INDEX, pathController, PATH_TOTAL_AMOUNT);
+        vm.stopPrank();
+
+        _submitReleaseAttestation();
+
+        uint256 signedAmount = PATH_TOTAL_AMOUNT + 1; // more than remaining
         uint256 deadline = block.timestamp + 3600;
-        (uint8 v, bytes32 r, bytes32 s) = _signClaim(tooMuch, recipient, deadline);
-        vm.expectRevert(YaultPathClaim.ClaimExceedsRemaining.selector);
-        pool.claim(WALLET_HASH, PATH_INDEX, tooMuch, recipient, deadline, v, r, s);
+        (uint8 v, bytes32 r, bytes32 s) = _signClaim(signedAmount, recipient, deadline);
+        pool.claim(WALLET_HASH, PATH_INDEX, signedAmount, recipient, deadline, v, r, s);
+        assertEq(token.balanceOf(recipient), PATH_TOTAL_AMOUNT, "transfers only remaining");
+        assertEq(pool.remainingForPath(WALLET_HASH, PATH_INDEX), 0);
     }
 
     function _submitReleaseAttestation() internal {

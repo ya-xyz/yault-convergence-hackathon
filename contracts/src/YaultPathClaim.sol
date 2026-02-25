@@ -201,7 +201,8 @@ contract YaultPathClaim is Ownable, ReentrancyGuard {
     /**
      * @notice Claim tokens to `to`. Signature must be from pathController (path-derived EVM key).
      *         Only allowed when ReleaseAttestation has decision RELEASE for (walletIdHash, pathIndex).
-     *         amount can be partial; remaining = totalAmount - claimedAmount is enforced.
+     *         amount is the signed maximum; we transfer min(amount, remaining) so Amount-Bound KDF
+     *         is safe with rounding (e.g. nominal 10, remaining 9.999... → transfer 9.999...).
      */
     function claim(
         bytes32 walletIdHash,
@@ -225,7 +226,8 @@ contract YaultPathClaim is Ownable, ReentrancyGuard {
         if (p.pathController == address(0)) revert PathNotRegistered();
 
         uint256 remaining = p.totalAmount - p.claimedAmount;
-        if (amount > remaining) revert ClaimExceedsRemaining();
+        uint256 actualTransfer = amount > remaining ? remaining : amount;
+        if (actualTransfer == 0) revert ClaimExceedsRemaining();
 
         uint256 nonce = claimNonce[walletIdHash][pathIndex];
         bytes32 digest = getClaimHash(walletIdHash, pathIndex, amount, to, nonce, deadline);
@@ -233,10 +235,10 @@ contract YaultPathClaim is Ownable, ReentrancyGuard {
         if (signer != p.pathController) revert InvalidSignature();
 
         claimNonce[walletIdHash][pathIndex] = nonce + 1;
-        p.claimedAmount += amount;
+        p.claimedAmount += actualTransfer;
 
-        asset.safeTransfer(to, amount);
-        emit Claimed(walletIdHash, pathIndex, to, amount);
+        asset.safeTransfer(to, actualTransfer);
+        emit Claimed(walletIdHash, pathIndex, to, actualTransfer);
     }
 
     /**

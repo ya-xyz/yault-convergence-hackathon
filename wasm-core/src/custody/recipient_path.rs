@@ -210,6 +210,8 @@ const AMOUNT_COMPOSITE_LEN: usize = 8;
 ///
 /// composite = UserCred_bytes || AdminFactor_bytes || amount_u64_be
 /// Used when amount is bound in the blob; Seal/Unseal must use the same composite.
+/// Use the nominal/blob amount here; the claim contract transfers min(signed_amount, remaining)
+/// so rounding (e.g. 9.999... remaining) does not require a different key.
 pub fn build_composite_credential_with_amount(
     user_cred: &[u8],
     admin_factor: &[u8],
