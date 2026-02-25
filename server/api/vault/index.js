@@ -119,7 +119,8 @@ router.get('/balance/:address', dualAuthMiddleware, async (req, res) => {
     console.warn('[vault/balance] Wallet balance query failed (non-fatal):', err.message);
   }
 
-  // Query escrow balance (vault shares locked in VaultShareEscrow for this wallet)
+  // Query escrow balance: remaining (unclaimed) shares locked per recipient.
+  // Use sum of remainingForRecipient(), not totalDeposited(), so the display decreases when a recipient claims.
   let escrowData = { shares: '0', value: '0', recipient_indices: [] };
   const escrowAddr = (config.escrow?.address || '').trim();
   if (escrowAddr && hasVaultContract()) {
@@ -128,55 +129,57 @@ router.get('/balance/:address', dualAuthMiddleware, async (req, res) => {
       const wHash = escrowContract.walletIdHash(evmAddress);
       const ctx = escrowContract.getEscrowReadOnly(config);
       if (ctx) {
-        const deposited = await ctx.escrow.totalDeposited(wHash);
-        if (deposited > 0n) {
-          const decimals = config?.contracts?.underlyingDecimals ?? 18;
-          const rpc = config?.escrow?.rpcUrl || config?.contracts?.evmRpcUrl || '';
-          const provider = new ethers.JsonRpcProvider(rpc);
-          const vaultAddr = config.contracts.vaultAddress;
-          const vault = new ethers.Contract(vaultAddr, ['function convertToAssets(uint256) view returns (uint256)'], provider);
-          const assets = await vault.convertToAssets(deposited);
-          escrowData = {
-            shares: ethers.formatUnits(deposited, decimals),
-            value: ethers.formatUnits(assets, decimals),
-            recipient_indices: [],
-          };
-          // Look up recipient indices: try active binding first, then scan on-chain as fallback
-          try {
-            let found = false;
-            // 1. Try DB binding lookup (both lowercase and checksummed wallet_id)
-            let walletBindings = await db.bindings.findByWallet(evmAddress);
-            if (walletBindings.length === 0) {
-              try {
-                const checksummed = ethers.getAddress(evmAddress);
-                if (checksummed !== evmAddress) {
-                  walletBindings = await db.bindings.findByWallet(checksummed);
-                }
-              } catch (_) {}
-            }
-            const activeBinding = walletBindings.find((b) => b.status === 'active');
-            if (activeBinding && Array.isArray(activeBinding.recipient_indices)) {
-              escrowData.recipient_indices = activeBinding.recipient_indices.map(Number);
-              found = true;
-            }
-            // 2. Fallback: scan on-chain for indices with non-zero allocatedShares (probe 1..10)
-            if (!found) {
-              const indices = [];
-              const probes = await Promise.all(
-                Array.from({ length: 10 }, (_, i) => i + 1).map(async (idx) => {
-                  try {
-                    const alloc = await ctx.escrow.allocatedShares(wHash, idx);
-                    return { idx, alloc };
-                  } catch (_) { return { idx, alloc: 0n }; }
-                })
-              );
-              for (const p of probes) {
-                if (p.alloc > 0n) indices.push(p.idx);
+        let recipientIndices = [];
+        try {
+          let walletBindings = await db.bindings.findByWallet(evmAddress);
+          if (walletBindings.length === 0) {
+            try {
+              const checksummed = ethers.getAddress(evmAddress);
+              if (checksummed !== evmAddress) {
+                walletBindings = await db.bindings.findByWallet(checksummed);
               }
-              escrowData.recipient_indices = indices;
-            }
-          } catch (bindErr) {
-            console.warn('[vault/balance] Binding/scan lookup failed (non-fatal):', bindErr.message);
+            } catch (_) {}
+          }
+          const activeBinding = walletBindings.find((b) => b.status === 'active');
+          if (activeBinding && Array.isArray(activeBinding.recipient_indices)) {
+            recipientIndices = activeBinding.recipient_indices.map(Number);
+          } else {
+            const probes = await Promise.all(
+              Array.from({ length: 10 }, (_, i) => i + 1).map(async (idx) => {
+                try {
+                  const alloc = await ctx.escrow.allocatedShares(wHash, idx);
+                  return { idx, alloc };
+                } catch (_) { return { idx, alloc: 0n }; }
+              })
+            );
+            recipientIndices = probes.filter((p) => p.alloc > 0n).map((p) => p.idx);
+          }
+        } catch (bindErr) {
+          console.warn('[vault/balance] Binding/scan lookup failed (non-fatal):', bindErr.message);
+        }
+        if (recipientIndices.length > 0) {
+          const remainingList = await Promise.all(
+            recipientIndices.map(async (idx) => {
+              try {
+                return await ctx.escrow.remainingForRecipient(wHash, idx);
+              } catch (_) { return 0n; }
+            })
+          );
+          const totalRemaining = remainingList.reduce((a, b) => a + b, 0n);
+          if (totalRemaining > 0n) {
+            const decimals = config?.contracts?.underlyingDecimals ?? 18;
+            const rpc = config?.escrow?.rpcUrl || config?.contracts?.evmRpcUrl || '';
+            const provider = new ethers.JsonRpcProvider(rpc);
+            const vaultAddr = config.contracts.vaultAddress;
+            const vault = new ethers.Contract(vaultAddr, ['function convertToAssets(uint256) view returns (uint256)'], provider);
+            const assets = await vault.convertToAssets(totalRemaining);
+            escrowData = {
+              shares: ethers.formatUnits(totalRemaining, decimals),
+              value: ethers.formatUnits(assets, decimals),
+              recipient_indices: recipientIndices,
+            };
+          } else {
+            escrowData = { shares: '0', value: '0', recipient_indices: recipientIndices };
           }
         }
       }

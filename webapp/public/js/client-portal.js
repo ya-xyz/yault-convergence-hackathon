@@ -4633,6 +4633,47 @@ function attachAppEvents() {
       state.vaultReclaimLoading = true;
       state.error = null;
       render();
+
+      // Popup: show "need multiple signatures, do not refresh" and wait until all signing is done
+      var reclaimModal = document.getElementById('reclaimEscrowModal');
+      if (!reclaimModal) {
+        reclaimModal = document.createElement('div');
+        reclaimModal.id = 'reclaimEscrowModal';
+        reclaimModal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:1000;';
+        reclaimModal.innerHTML = [
+          '<div class="card" style="max-width:420px;margin:16px;min-width:320px;" onclick="event.stopPropagation()">',
+          '  <h3 style="margin:0 0 12px;">Reclaim from Escrow</h3>',
+          '  <p id="reclaimModalMessage" style="margin:0 0 12px;font-size:14px;color:var(--text-muted);">需要多次签名，请勿刷新页面。</p>',
+          '  <p id="reclaimModalProgress" style="margin:0 0 16px;font-size:13px;color:var(--text-muted);"></p>',
+          '  <div id="reclaimModalDone" style="display:none;">',
+          '    <p id="reclaimModalDoneText" style="margin:0 0 16px;font-size:14px;"></p>',
+          '    <button type="button" class="btn btn-primary" id="btnReclaimModalClose">关闭并刷新</button>',
+          '  </div>',
+          '</div>',
+        ].join('');
+        document.body.appendChild(reclaimModal);
+      }
+      var msgEl = document.getElementById('reclaimModalMessage');
+      var progEl = document.getElementById('reclaimModalProgress');
+      var doneWrap = document.getElementById('reclaimModalDone');
+      var doneText = document.getElementById('reclaimModalDoneText');
+      if (msgEl) msgEl.textContent = '需要多次签名，请勿刷新页面。';
+      if (progEl) { progEl.style.display = 'block'; progEl.textContent = '正在准备…'; }
+      if (doneWrap) doneWrap.style.display = 'none';
+      reclaimModal.style.display = 'flex';
+
+      function closeReclaimModal() {
+        var m = document.getElementById('reclaimEscrowModal');
+        if (m) m.style.display = 'none';
+        state.vaultReclaimLoading = false;
+        refreshWalletBalances().then(function () { render(); });
+      }
+      var closeBtn = document.getElementById('btnReclaimModalClose');
+      if (closeBtn && !closeBtn._bound) {
+        closeBtn._bound = true;
+        closeBtn.addEventListener('click', function () { closeReclaimModal(); });
+      }
+
       try {
         const authHeaders = await getAuthHeadersAsync().catch(() => ({}));
         const escrowCfg = await window.YaultEscrow.getConfig(API_BASE, { headers: authHeaders });
@@ -4645,26 +4686,39 @@ function attachAppEvents() {
         const result = await window.YaultEscrow.reclaimAllFromEscrow(
           provider, escrowCfg, ownerAddr, indices,
           function (step, total, detail) {
-            var btn = document.getElementById('btnReclaimEscrow');
-            if (btn) btn.textContent = '(' + step + '/' + total + ') ' + detail;
+            var p = document.getElementById('reclaimModalProgress');
+            if (p) { p.style.display = 'block'; p.textContent = '第 ' + step + '/' + total + ' 次签名：' + (detail || ''); }
           }
         );
+        if (progEl) progEl.style.display = 'none';
+        if (doneWrap) doneWrap.style.display = 'block';
         if (result.success && result.reclaimedCount > 0) {
-          showToast('Reclaimed shares from ' + result.reclaimedCount + ' recipient(s). Refreshing...', 'success');
+          if (doneText) doneText.textContent = '全部签名已经完成，可以关闭并去刷新了。已成功收回 ' + result.reclaimedCount + ' 笔份额。';
+          if (doneText) doneText.style.color = 'var(--success)';
+          showToast('Reclaimed shares from ' + result.reclaimedCount + ' recipient(s).', 'success');
           reportActivity('escrow_reclaim', result.txHashes[result.txHashes.length - 1] || null, null, {
             detail: result.reclaimedCount + ' recipients reclaimed',
           });
         } else if (result.success && result.reclaimedCount === 0) {
-          showToast('No remaining shares to reclaim.', 'info');
+          if (doneText) doneText.textContent = '全部签名已经完成，可以关闭并去刷新了。当前没有可收回的份额。';
+          if (doneText) doneText.style.color = '';
         } else {
-          throw new Error(result.error || 'Reclaim failed');
+          var errMsg = result.error || '';
+          var hint = '若该计划已触发 release（attestation 已上链），份额已锁定给 recipient，只能由 recipient 本人 claim，无法由 owner reclaim。';
+          if (doneText) {
+            doneText.innerHTML = 'Reclaim 未成功：' + (errMsg ? '<br/><span style="font-size:12px;">' + esc(errMsg) + '</span>' : '') + '<br/><br/><span style="font-size:13px;color:var(--text-muted);">' + esc(hint) + '</span>';
+            doneText.style.color = 'var(--danger)';
+          }
         }
-        await refreshWalletBalances();
+        return;
       } catch (err) {
+        if (progEl) progEl.style.display = 'none';
+        if (doneWrap) doneWrap.style.display = 'block';
+        if (doneText) { doneText.textContent = '出错：' + (err.message || err); doneText.style.color = 'var(--danger)'; }
         state.error = 'Reclaim failed: ' + err.message;
+        return;
       } finally {
         state.vaultReclaimLoading = false;
-        render();
       }
     });
   }

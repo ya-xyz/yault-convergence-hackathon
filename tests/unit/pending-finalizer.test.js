@@ -5,6 +5,9 @@ jest.mock('../../server/db', () => ({
     findAll: jest.fn(),
     update: jest.fn(),
   },
+  auditLog: {
+    create: jest.fn().mockResolvedValue(undefined),
+  },
 }));
 
 jest.mock('../../server/services/attestationGate', () => ({
@@ -76,6 +79,7 @@ describe('trigger pending cooldown finalizer', () => {
       trigger_id: 't-3',
       status: 'cooldown',
       trigger_type: 'legal_event',
+      decision: 'release',
       wallet_id: 'w3',
       recipient_index: 0,
       effective_at: now - 1000,
