@@ -416,6 +416,40 @@ class WalletConnector {
     container.querySelectorAll('[data-action="wallet-disconnect"]').forEach((btn) => {
       btn.addEventListener('click', () => this.disconnect());
     });
+
+    // If Yallet wasn't detected at render time, poll briefly (extension may inject after page load)
+    if (!WalletConnector.detectYallet()) {
+      this._startYalletDetectionPoll(container);
+    }
+  }
+
+  /**
+   * Poll for window.yallet for a few seconds after load; if it appears, remove "Yallet not detected" and update button.
+   * @param {HTMLElement} container
+   */
+  _startYalletDetectionPoll(container) {
+    const maxWaitMs = 2500;
+    const intervalMs = 200;
+    let elapsed = 0;
+    const t = setInterval(() => {
+      if (!container.isConnected) {
+        clearInterval(t);
+        return;
+      }
+      elapsed += intervalMs;
+      if (elapsed > maxWaitMs) {
+        clearInterval(t);
+        return;
+      }
+      if (!window.yallet) return;
+      clearInterval(t);
+      const alertEl = container.querySelector('.wallet-login .alert.alert-info');
+      if (alertEl && alertEl.textContent.indexOf('Yallet not detected') !== -1) {
+        alertEl.remove();
+      }
+      const small = container.querySelector('.wallet-login .wallet-btn[data-wallet="yallet"] .wallet-label small');
+      if (small) small.textContent = 'Ready to connect';
+    }, intervalMs);
   }
 }
 
