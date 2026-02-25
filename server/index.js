@@ -58,6 +58,8 @@
  *   GET    /api/invite/validate?token=  - Validate invite token (public)
  *   POST   /api/invite/accept          - Accept invite, become sub-account (auth)
  *
+ *   GET    /api/compliance/screen      - Compliance screening (CRE external data source)
+ *
  *   GET    /health                      - Health check
  */
 
@@ -375,6 +377,10 @@ app.use('/api/authority', authorityProfile);  // handles GET /:id
 app.use('/api/binding', bindingCreate);    // handles POST /
 app.use('/api/binding', bindingDelete);    // handles DELETE /:id
 app.use('/api/binding', bindingList);      // handles GET /
+
+// Compliance: CRE workflow calls GET /api/compliance/screen as external data source (KYC/AML screening)
+const complianceScreen = require('./api/compliance/screen');
+app.use('/api/compliance', complianceScreen);
 
 // Oracle: CRE workflow polls GET /api/oracle/pending; platform uses GET /api/trigger/attestation, POST /api/trigger/from-oracle
 const triggerOracle = require('./api/trigger/oracle');
