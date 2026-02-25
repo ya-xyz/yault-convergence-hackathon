@@ -29,13 +29,13 @@ export function evm_get_address(mnemonic: string, passphrase: string): string;
  */
 export function solana_sign_transaction_with_context(mnemonic: string, passphrase: string, context: string, serialized_tx_base64: string): string;
 /**
- * 获取 Associated Token Account 地址
+ * Get Associated Token Account address
  *
- * 参数:
- * - wallet: 钱包地址 (base58)
- * - mint: Token mint 地址 (base58)
+ * Params:
+ * - wallet: wallet address (base58)
+ * - mint: Token mint address (base58)
  *
- * 返回: ATA 地址 (base58)
+ * Returns: ATA address (base58)
  */
 export function solana_get_ata_address(wallet: string, mint: string): string;
 /**
@@ -248,14 +248,14 @@ export function evm_sign_eip1559_transaction_with_context(mnemonic: string, pass
  */
 export function acegf_change_passphrase_add_admin_wasm(existing_mnemonic: string, existing_passphrase: string, new_passphrase: string, admin_factor: string): string | undefined;
 /**
- * 签名外部序列化的交易 (Legacy Transaction)
+ * Sign externally serialized transaction (Legacy Transaction)
  *
- * 参数:
- * - mnemonic: ACE-GF 助记词
- * - passphrase: 密码
- * - serialized_tx_base64: base64 编码的序列化交易
+ * Params:
+ * - mnemonic: ACE-GF mnemonic
+ * - passphrase: passphrase
+ * - serialized_tx_base64: base64-encoded serialized transaction
  *
- * 返回: base64 编码的签名交易，或者 "error:..." 错误信息
+ * Returns: base64-encoded signed transaction, or "error:..." on failure
  */
 export function solana_sign_transaction(mnemonic: string, passphrase: string, serialized_tx_base64: string): string;
 /**
@@ -287,20 +287,19 @@ export function vadar_seal_sa2(mnemonic: string, password: string, normalized_em
  */
 export function acegf_compute_dh_key_with_prf_wasm(mnemonic: string, prf_key: Uint8Array, peer_pub_b64: string): string;
 /**
- * SPL Token 转账签名 (带创建目标 ATA)
+ * SPL Token transfer signing (with create target ATA)
  *
- * 当接收方的 ATA 不存在时使用此函数
- * 交易包含两个指令：createAssociatedTokenAccount + Transfer
+ * Use when recipient ATA does not exist. Transaction includes createAssociatedTokenAccount + Transfer.
  *
- * 参数:
- * - mnemonic: 助记词
- * - passphrase: 密码
- * - mint: SPL Token mint 地址 (base58)
- * - to_wallet: 接收方钱包地址 (base58，不是 ATA，函数内部会自动计算 ATA)
- * - amount: 转账数量 (raw amount，已经乘以 10^decimals)
- * - recent_blockhash: 最新区块哈希
+ * Params:
+ * - mnemonic: mnemonic
+ * - passphrase: passphrase
+ * - mint: SPL Token mint address (base58)
+ * - to_wallet: recipient wallet address (base58, not ATA; ATA is computed inside)
+ * - amount: raw amount (already multiplied by 10^decimals)
+ * - recent_blockhash: recent block hash
  *
- * 返回: base64 编码的签名交易
+ * Returns: base64-encoded signed transaction
  */
 export function solana_sign_spl_transfer_with_create_ata(mnemonic: string, passphrase: string, mint: string, to_wallet: string, amount: bigint, recent_blockhash: string): string;
 export function view_wallet_unified_with_secondary_wasm(mnemonic: string, passphrase: string, secondary_passphrase?: string | null): any;
@@ -418,17 +417,17 @@ export function evm_sign_eip1559_transaction_with_context_prf(mnemonic: string, 
  */
 export function evm_encode_erc20_approve(spender: string, amount: string): string;
 /**
- * SPL Token 转账签名
+ * SPL Token transfer signing
  *
- * 参数:
- * - mnemonic: 助记词
- * - passphrase: 密码
- * - mint: SPL Token mint 地址 (base58)
- * - to_wallet: 接收方钱包地址 (base58，不是 ATA，函数内部会自动计算 ATA)
- * - amount: 转账数量 (raw amount，已经乘以 10^decimals)
- * - recent_blockhash: 最新区块哈希
+ * Params:
+ * - mnemonic: mnemonic
+ * - passphrase: passphrase
+ * - mint: SPL Token mint address (base58)
+ * - to_wallet: recipient wallet address (base58, not ATA; ATA is computed inside)
+ * - amount: raw amount (already multiplied by 10^decimals)
+ * - recent_blockhash: recent block hash
  *
- * 返回: base64 编码的签名交易
+ * Returns: base64-encoded signed transaction
  */
 export function solana_sign_spl_transfer(mnemonic: string, passphrase: string, mint: string, to_wallet: string, amount: bigint, recent_blockhash: string): string;
 /**
