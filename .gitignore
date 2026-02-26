@@ -31,7 +31,8 @@ Thumbs.db
 # Local development
 .env
 .env.local
-
+.grok
+broadcast/
 # Generated env (from env/*.json via scripts/generate-env.mjs)
 env/.env.*
 env/frontend.js

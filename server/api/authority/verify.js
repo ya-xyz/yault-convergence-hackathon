@@ -18,6 +18,8 @@ const crypto = require('crypto');
 const db = require('../../db');
 const { verifySignature } = require('../../middleware/auth');
 
+const { requireMultisig } = require('../../middleware/multisig');
+
 const router = Router();
 
 /** Admin token from environment. No fallback — must be explicitly configured. */
@@ -80,23 +82,22 @@ async function checkAdminAuth(req) {
  * @route POST /:id/verify
  * @description Mark an authority as verified (admin only).
  */
-router.post('/:id/verify', async (req, res) => {
+router.post('/:id/verify', async (req, res, next) => {
+  // Admin auth gate (runs before multi-sig)
+  if (!ADMIN_TOKEN && ADMIN_WALLETS.length === 0) {
+    return res.status(503).json({ error: 'Admin verification not configured' });
+  }
+  const authCheck = await checkAdminAuth(req);
+  if (!authCheck.authorized) {
+    return res.status(authCheck.status).json({ error: 'Forbidden', detail: authCheck.error });
+  }
+  // Set req.adminAuth for multi-sig middleware compatibility
+  req.adminAuth = { address: authCheck.address || null, method: authCheck.method };
+  next();
+}, requireMultisig('authority-verify'), async (req, res) => {
   try {
-    if (!ADMIN_TOKEN && ADMIN_WALLETS.length === 0) {
-      return res.status(503).json({ error: 'Admin verification not configured' });
-    }
-
     const { id } = req.params;
     const { verification_proof } = req.body || {};
-
-    // Admin authorization check (token, session, or wallet signature)
-    const authCheck = await checkAdminAuth(req);
-    if (!authCheck.authorized) {
-      return res.status(authCheck.status).json({
-        error: 'Forbidden',
-        detail: authCheck.error,
-      });
-    }
 
     // Find the authority
     const authority = await db.authorities.findById(id);
