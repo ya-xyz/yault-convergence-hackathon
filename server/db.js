@@ -39,7 +39,7 @@ let _saveTimer = null;
 /** Whether there are unsaved changes */
 let _dirty = false;
 
-const TABLES = ['authorities', 'bindings', 'triggers', 'revenue', 'withdrawals', 'auditLog', 'vaultPositions', 'adminSessions', 'authoritySessions', 'insurancePolicies', 'subAccounts', 'allowances', 'trialApplications', 'recipientPaths', 'releasedFactors', 'kyc', 'accountInvites', 'walletPlans', 'walletAddresses', 'users', 'recipientMnemonicAdmin', 'authorityReleaseLinks', 'userCustomTokens', 'rwaReleaseRegistry', 'rwaDeliveryLog', 'campaigns', 'referrals', 'activities'];
+const TABLES = ['authorities', 'bindings', 'triggers', 'revenue', 'withdrawals', 'auditLog', 'vaultPositions', 'adminSessions', 'authoritySessions', 'insurancePolicies', 'subAccounts', 'allowances', 'trialApplications', 'recipientPaths', 'releasedFactors', 'kyc', 'accountInvites', 'walletPlans', 'walletAddresses', 'users', 'recipientMnemonicAdmin', 'authorityReleaseLinks', 'userCustomTokens', 'rwaReleaseRegistry', 'rwaDeliveryLog', 'campaigns', 'referrals', 'activities', 'adminApprovals'];
 
 /**
  * Initialise the database (async, called once).
@@ -439,6 +439,12 @@ referrals.findByInvitee = async function (walletId) {
 // id = uuid, data = { wallet, type, amount?, shares?, asset?, chain_id?, tx_hash?, status, detail?, created_at }
 const activities = createCollection('activities', { allowedJsonFields: ['wallet', 'type', 'status'] });
 
+// Admin multi-sig approvals: id = approval_id (hex), data = { action, params, required_approvals, current_approvals[], status, ... }
+const adminApprovals = createCollection('adminApprovals', { allowedJsonFields: ['status', 'action'] });
+adminApprovals.findPending = async function () {
+  return this.findByField('status', 'pending');
+};
+
 // ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
@@ -472,6 +478,7 @@ module.exports = {
   campaigns,
   referrals,
   activities,
+  adminApprovals,
 
   /** Ensure database is initialised (call before first use). */
   ensureReady,

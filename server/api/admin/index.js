@@ -26,6 +26,8 @@ const vaultContract = require('../../services/vaultContract');
 const { deliverByRegistry } = require('../../services/deliverRwaRelease');
 const { verifySignature, verifyClientSessionToken, dualAuthMiddleware } = require('../../middleware/auth');
 
+const { requireMultisig, listPendingApprovals, listApprovals, rejectApproval } = require('../../middleware/multisig');
+
 const router = Router();
 
 // ─── Admin Auth Middleware ───
@@ -452,7 +454,7 @@ router.get('/users/:address', async (req, res) => {
 // ─── PATCH /users/:address/role ───
 // Body: { role: 'client' | 'authority' }. Setting to authority ensures an authority record exists for this user.
 
-router.patch('/users/:address/role', async (req, res) => {
+router.patch('/users/:address/role', requireMultisig('user-role-change'), async (req, res) => {
   try {
     const { address } = req.params;
     const addr = normalizeAddress(address);
@@ -606,7 +608,7 @@ router.get('/release/redeliver-candidates', async (_req, res) => {
 
 // ─── POST /release/redeliver — Admin-triggered redelivery (any wallet/authority/recipient) ───
 
-router.post('/release/redeliver', async (req, res) => {
+router.post('/release/redeliver', requireMultisig('force-redeliver'), async (req, res) => {
   try {
     const { wallet_id, authority_id, recipient_index, force_redeliver } = req.body || {};
     if (!wallet_id || recipient_index == null) {
@@ -637,7 +639,7 @@ router.get('/trigger/policy', (_req, res) => {
 
 // ─── POST /trigger/:id/legal-confirm — Admin legal confirmation for dual attestation ───
 
-router.post('/trigger/:id/legal-confirm', async (req, res) => {
+router.post('/trigger/:id/legal-confirm', requireMultisig('trigger-legal-confirm'), async (req, res) => {
   try {
     const { id } = req.params;
     const trigger = await db.triggers.findById(id);
@@ -666,7 +668,7 @@ router.post('/trigger/:id/legal-confirm', async (req, res) => {
 
 // ─── POST /trigger/:id/abort — Emergency abort: pause cooldown (remaining time is preserved for resume) ───
 
-router.post('/trigger/:id/abort', async (req, res) => {
+router.post('/trigger/:id/abort', requireMultisig('trigger-abort'), async (req, res) => {
   try {
     const { id } = req.params;
     const reason = (req.body && req.body.reason) ? String(req.body.reason).trim().substring(0, 2000) : '';
@@ -721,7 +723,7 @@ router.post('/trigger/:id/abort', async (req, res) => {
 
 // ─── POST /trigger/:id/resume — Resume an aborted trigger; cooldown restarts with remaining time ───
 
-router.post('/trigger/:id/resume', async (req, res) => {
+router.post('/trigger/:id/resume', requireMultisig('trigger-resume'), async (req, res) => {
   try {
     const { id } = req.params;
     const trigger = await db.triggers.findById(id);
@@ -782,7 +784,7 @@ router.post('/trigger/:id/resume', async (req, res) => {
 
 // ─── POST /trigger/emergency-release — Manual emergency release via fallback attestation ───
 
-router.post('/trigger/emergency-release', async (req, res) => {
+router.post('/trigger/emergency-release', requireMultisig('emergency-release'), async (req, res) => {
   try {
     const { wallet_id, recipient_index, evidence_hash } = req.body || {};
     const walletId = (wallet_id || '').trim();
@@ -957,7 +959,7 @@ router.get('/kyc', async (_req, res) => {
 });
 
 // POST /kyc/:address/review — Approve or reject
-router.post('/kyc/:address/review', async (req, res) => {
+router.post('/kyc/:address/review', requireMultisig('kyc-review'), async (req, res) => {
   try {
     const { address } = req.params;
     const { decision, reason } = req.body || {};
@@ -1063,6 +1065,59 @@ router.get('/referrals', async (_req, res) => {
     return res.json(Array.isArray(all) ? all : []);
   } catch (err) {
     console.error('[admin/referrals] GET error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ─── Multi-sig Approval Management ───
+
+// GET /approvals — List pending approvals (or filter by ?status=approved|rejected|expired)
+router.get('/approvals', async (req, res) => {
+  try {
+    const status = req.query.status || undefined;
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
+    const approvals = await listApprovals({ status, limit });
+    return res.json({ approvals, total: approvals.length });
+  } catch (err) {
+    console.error('[admin/approvals] Error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /approvals/pending — Shortcut for pending approvals only
+router.get('/approvals/pending', async (_req, res) => {
+  try {
+    const approvals = await listPendingApprovals();
+    return res.json({ approvals, total: approvals.length });
+  } catch (err) {
+    console.error('[admin/approvals/pending] Error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /approvals/:id/reject — Reject a pending approval
+router.post('/approvals/:id/reject', async (req, res) => {
+  try {
+    const signerAddress = req.adminAuth?.address;
+    if (!signerAddress) {
+      return res.status(403).json({ error: 'Wallet auth required to reject approvals' });
+    }
+    const reason = (req.body?.reason || '').trim().substring(0, 2000);
+    const approval = await rejectApproval(req.params.id, signerAddress, reason);
+    return res.json({
+      approval_id: approval.approval_id,
+      status: 'rejected',
+      rejected_by: signerAddress,
+      message: 'Approval rejected.',
+    });
+  } catch (err) {
+    if (err.message === 'Approval not found') {
+      return res.status(404).json({ error: 'Approval not found' });
+    }
+    if (err.message.includes('not pending')) {
+      return res.status(400).json({ error: err.message });
+    }
+    console.error('[admin/approvals/reject] Error:', err);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
