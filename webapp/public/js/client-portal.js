@@ -85,6 +85,8 @@ const state = {
   walletBalancesWbtc: { ethereum: '0.00' }, // filled by GET /vault/balance
   vaultBalances: { shares: '0.00', value: '0.00', yield: '0.00' },
   escrowBalances: { shares: '0', value: '0', recipient_indices: [] },
+  planRemaining: null, // { shares, value } from auto-query on Asset Plan overview; null = loading or not queried
+  _planRemainingFetching: false,
   vaultUnderlyingSymbol: 'USDC',  // from GET /vault/balance (VAULT_UNDERLYING_SYMBOL), e.g. 'WETH'
   // Global UI context: all balances/addresses below derive from this (Chain + Token cascading dropdowns in header)
   globalChainKey: 'ethereum',  // 'ethereum' | 'solana' | 'bitcoin'
@@ -182,6 +184,13 @@ var TOKENS_BY_CHAIN = {
 // ─── Auth helper: use session token directly if available (no second signature needed), otherwise do challenge+sign ───
 async function getAuthHeadersAsync() {
   if (!wallet || !wallet.connected) return {};
+  // Restore session token from sessionStorage if lost (e.g. after internal re-render)
+  if (!wallet.sessionToken) {
+    try {
+      const stored = sessionStorage.getItem('yault_session_token');
+      if (stored) wallet.sessionToken = stored;
+    } catch (_) {}
+  }
   if (wallet.sessionToken) {
     return { 'X-Client-Session': wallet.sessionToken };
   }
@@ -419,10 +428,21 @@ async function loadReleases() {
   } catch { /* non-fatal */ }
 }
 
+async function fetchPlanRemaining() {
+  const evmAddr = (state.auth?.address && state.auth.address.startsWith('0x')) ? state.auth.address : ('0x' + (state.auth?.pubkey || ''));
+  if (!evmAddr || evmAddr === '0x') return;
+  const headers = await getAuthHeadersAsync().catch(() => ({}));
+  const resp = await apiFetch(`${API_BASE}/vault/balance/${encodeURIComponent(evmAddr)}`, { headers });
+  if (!resp.ok) return;
+  const data = await resp.json();
+  state.planRemaining = { shares: data.escrow?.shares ?? '0', value: data.escrow?.value ?? '0' };
+  if (data.vault?.underlying_symbol) state.vaultUnderlyingSymbol = data.vault.underlying_symbol;
+}
+
 async function loadBoundFirms() {
   try {
-    const addr = state.auth?.address || '';
-    if (!addr) return;
+    const addr = (state.auth?.address && state.auth.address.startsWith('0x')) ? state.auth.address : ('0x' + (state.auth?.pubkey || ''));
+    if (!addr || addr === '0x') return;
     const headers = await getAuthHeadersAsync().catch(() => ({}));
     const resp = await apiFetch(`${API_BASE}/release/status/${encodeURIComponent(addr)}`, { headers });
     if (resp.ok) {
@@ -766,8 +786,6 @@ function renderProtection() {
 }
 
 function renderProtectionOverview() {
-  const hasBound = state.boundFirms.length > 0;
-
   const chainLabel = (state.globalChainKey || 'ethereum').charAt(0).toUpperCase() + (state.globalChainKey || 'ethereum').slice(1);
   const tokenLabel = state.globalTokenKey || 'ETH';
 
@@ -790,46 +808,66 @@ function renderProtectionOverview() {
       else triggerText = '—';
       const planChain = state.savedPlan.chain_key ? (state.savedPlan.chain_key.charAt(0).toUpperCase() + state.savedPlan.chain_key.slice(1)) : chainLabel;
       const planToken = state.savedPlan.token_symbol || tokenLabel;
+      const hasRemaining = state.planRemaining && (parseFloat(state.planRemaining.shares || '0') > 0 || parseFloat(state.planRemaining.value || '0') > 0);
+      const isBalanceZero = state.planRemaining != null && parseFloat(state.planRemaining.shares || '0') <= 0 && parseFloat(state.planRemaining.value || '0') <= 0;
       return `
-      <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px;">
-        Manage the release plan for <strong>${esc(planChain)} — ${esc(planToken)}</strong>.
-      </p>
+      ${!isBalanceZero ? `
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:16px;">
+        <p style="font-size:13px;color:var(--text-muted);margin:0;">
+          Manage the release plan for <strong>${esc(planChain)} — ${esc(planToken)}</strong>.
+        </p>
+        ${hasRemaining ? `<span style="font-size:13px;font-weight:500;">Remaining: ${esc(formatVaultShares(state.planRemaining.shares))} shares, ${esc(formatVaultNum(state.planRemaining.value))} ${esc(state.vaultUnderlyingSymbol || '')}</span>` : ''}
+      </div>
       <button class="btn btn-primary" id="btnCreatePlan" style="margin-bottom:20px;">Modify Plan</button>
       <button class="btn btn-secondary btn-sm" id="btnSimulateChainlinkOverview" style="margin-left:12px;margin-bottom:20px;vertical-align:middle;">Simulate Chainlink Event</button>
       <span id="chainlinkOverviewHint" style="display:none;font-size:12px;color:var(--text-muted);margin-left:10px;vertical-align:middle;"></span>
+      ` : ''}
       <div class="card">
         <h3>Current Plan <span style="font-size:12px;color:var(--text-muted);font-weight:400;">[${esc(planChain)} — ${esc(planToken)}]</span></h3>
-        <p style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">${triggerText}</p>
+        ${isBalanceZero ? '<p style="font-size:14px;color:var(--warning);margin:0 0 10px 0;">This plan has been fully claimed.</p>' : ''}
         <h4 style="margin-top:12px;">Recipients</h4>
-        ${(state.savedPlan.recipients || []).map(r => `
-          <div style="padding:4px 0;">${esc(r.label || r.name || '')} — ${r.percentage}%</div>
-        `).join('')}
+        <table class="table" style="width:100%;margin-top:8px;">
+          <thead>
+            <tr>
+              <th style="text-align:left;padding:8px;border-bottom:1px solid var(--border);">Recipient</th>
+              <th style="text-align:right;padding:8px;border-bottom:1px solid var(--border);">Share</th>
+              ${!isBalanceZero ? '<th style="text-align:right;padding:8px;border-bottom:1px solid var(--border);">Action</th>' : ''}
+            </tr>
+          </thead>
+          <tbody>
+            ${(state.savedPlan.recipients || []).map((r, i) => `
+              <tr>
+                <td style="padding:8px;border-bottom:1px solid var(--border);">${esc(r.label || r.name || '')}</td>
+                <td style="padding:8px;border-bottom:1px solid var(--border);text-align:right;">${r.percentage}%</td>
+                ${!isBalanceZero ? `<td style="padding:8px;border-bottom:1px solid var(--border);text-align:right;">
+                  <button type="button" class="btn btn-secondary btn-sm" data-fix-enc-index="${i + 1}" title="Regenerate credentials for this recipient (fix wrong x25519 encryption)">Resend</button>
+                </td>` : ''}
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
         ${(state.savedPlan.triggerConfig.legalAuthority?.selectedFirms || []).length > 0 ? `
           <h4 style="margin-top:12px;">Authorities</h4>
           ${state.savedPlan.triggerConfig.legalAuthority.selectedFirms.map(f => `<div style="padding:4px 0;">${esc(f.name)}</div>`).join('')}
         ` : ''}
+        ${!isBalanceZero ? `
+        <h4 style="margin-top:16px;">Plan remaining shares and value</h4>
+        <p style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">Total shares and value in Escrow for this plan (claimable after trigger).</p>
+        <div id="planRemainingResult" style="margin-top:8px;">
+          ${state.planRemaining === null ? `
+            <span style="font-size:13px;color:var(--text-muted);">Loading...</span>
+          ` : (() => {
+            const sh = parseFloat(state.planRemaining.shares || '0');
+            const val = parseFloat(state.planRemaining.value || '0');
+            const zero = !Number.isFinite(sh) || sh <= 0 || !Number.isFinite(val) || val <= 0;
+            if (zero) return '<span style="font-size:13px;color:var(--text-muted);">—</span>';
+            return '<p style="font-size:14px;margin:0;"><strong>Remaining shares:</strong> ' + esc(formatVaultShares(state.planRemaining.shares)) + ' &nbsp; <strong>Value:</strong> ' + esc(formatVaultNum(state.planRemaining.value)) + ' ' + esc(state.vaultUnderlyingSymbol || '') + '</p>';
+          })()}
+        </div>
+        ` : ''}
       </div>
     `;
     })()}
-
-    ${hasBound ? `
-      <div class="card">
-        <h3>Existing Plans / Bound Authorities</h3>
-        <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">
-          These authorities hold the authorization factor. No single authority can access your assets alone.
-        </p>
-        ${state.boundFirms.map((f, i) => `
-          <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;${i < state.boundFirms.length - 1 ? 'border-bottom:1px solid var(--border);' : ''}">
-            <div>
-              <div style="font-weight:600;">${esc(f.name)}${f.verified ? ' <span style="color:var(--success);">&#10003;</span>' : ''}</div>
-              <div style="font-size:12px;color:var(--text-muted);">${esc(f.jurisdiction || '')}</div>
-            </div>
-            <span class="badge badge-active">Bound</span>
-          </div>
-        `).join('')}
-        <button type="button" class="btn btn-secondary btn-sm" id="btnRefreshBoundFirms" style="margin-top:12px;">Refresh</button>
-      </div>
-    ` : ''}
 
     ${state.distributionResult ? `
       <div class="card" style="margin-top:16px;">
@@ -1651,6 +1689,10 @@ function renderVaultTab() {
         <div class="balance-card">
           <div class="balance-value">${esc(formatVaultNum(state.escrowBalances.value))}</div>
           <div class="balance-label">Value (${esc(state.vaultUnderlyingSymbol || 'USDC')})</div>
+        </div>
+        <div class="balance-card">
+          <div class="balance-value" style="color:var(--success);">${esc(formatVaultNum(state.escrowBalances.yield || '0'))}</div>
+          <div class="balance-label">Yield</div>
         </div>
       </div>
       <button class="btn btn-secondary btn-sm" id="btnReclaimEscrow" ${state.vaultReclaimLoading ? 'disabled' : ''}
@@ -2635,6 +2677,9 @@ function render() {
     default: content = renderWallet();
   }
 
+  if (state.page !== 'protection') {
+    state.planRemaining = null;
+  }
   // Pages with left sidebar (same layout as Wallet)
   if (state.page === 'wallet' && state.auth) {
     const sectionContent =
@@ -2648,6 +2693,19 @@ function render() {
     const sectionContent = state.accountsSection === 'invite' ? renderAccountsInviteSection() : renderAccountsRelatedSection();
     app.innerHTML = renderPageWithSidebar(ACCOUNTS_SECTIONS, 'accounts-section', state.accountsSection, sectionContent);
   } else if (state.page === 'protection') {
+    if (state.protectionStep !== 'overview') {
+      state.planRemaining = null;
+    }
+    if (state.protectionStep === 'overview' && state.savedPlan && state.planRemaining === null && !state._planRemainingFetching) {
+      state._planRemainingFetching = true;
+      fetchPlanRemaining().then(() => {
+        state._planRemainingFetching = false;
+        render();
+      }).catch(() => {
+        state._planRemainingFetching = false;
+        render();
+      });
+    }
     app.innerHTML = renderPageWithSidebar([{ key: 'plan', label: 'Plan' }], 'protection-section', 'plan', renderProtection());
   } else if (state.page === 'claim') {
     const claimContent = state.claimSection === 'redeem' ? renderRedeem() : renderClaim();
@@ -2682,6 +2740,146 @@ function render() {
 }
 
 // ─── Event Handlers ───
+
+async function handleFixEncryptionClick(e) {
+  const fixBtn = e.target && e.target.closest && e.target.closest('[data-fix-enc-index]');
+  if (!fixBtn) return;
+  const recipientIndex = parseInt(fixBtn.getAttribute('data-fix-enc-index'), 10);
+  if (!Number.isFinite(recipientIndex) || recipientIndex < 1) return;
+  const walletId = (state.auth?.address && state.auth.address.startsWith('0x')) ? state.auth.address : ('0x' + (state.auth?.pubkey || ''));
+  if (!walletId || walletId === '0x') {
+    showToast('Wallet not connected', 'error');
+    return;
+  }
+  let authorityId = (state.boundFirms && state.boundFirms[0]) ? state.boundFirms[0].id : null;
+  if (!authorityId) {
+    try {
+      await loadBoundFirms();
+      authorityId = (state.boundFirms && state.boundFirms[0]) ? state.boundFirms[0].id : null;
+    } catch (_) {}
+    if (!authorityId) {
+      showToast('No release binding found for this wallet. Complete distribution first.', 'error');
+      return;
+    }
+  }
+  function normAddr(addr) {
+    if (!addr || !String(addr).trim()) return '';
+    return String(addr).replace(/^0x/i, '').toLowerCase();
+  }
+  fixBtn.disabled = true;
+  try {
+    const authHeaders = await getAuthHeadersAsync();
+    const configResp = await apiFetch(`${API_BASE}/release/configure?wallet_id=${encodeURIComponent(walletId)}`, { headers: authHeaders });
+    if (!configResp.ok) {
+      showToast('Release config not found for this wallet', 'error');
+      return;
+    }
+    const configData = await configResp.json();
+    if (!configData.configured) {
+      showToast('Release config not found for this wallet', 'error');
+      return;
+    }
+    const path = (configData.paths || []).find(p => p.index === recipientIndex);
+    if (!path) {
+      showToast('Recipient index ' + recipientIndex + ' not in path config', 'error');
+      return;
+    }
+    const recipientEvm = (path.recipient_evm_address && String(path.recipient_evm_address).trim()) ? path.recipient_evm_address.trim() : null;
+    if (!recipientEvm) {
+      showToast('Path has no recipient_evm_address', 'error');
+      return;
+    }
+    const addrResp = await apiFetch(`${API_BASE}/wallet-plan/recipient-addresses?wallets=${encodeURIComponent(recipientEvm)}`, { headers: authHeaders });
+    if (!addrResp.ok) {
+      showToast('Could not load recipient addresses', 'error');
+      return;
+    }
+    const addrData = await addrResp.json();
+    const addresses = addrData.addresses || {};
+    const evmKey = normAddr(recipientEvm);
+    const addrRec = addresses[evmKey] || {};
+    const solanaAddress = addrRec.solana_address || path.recipient_solana_address;
+    const xidentity = addrRec.xidentity;
+    if (!solanaAddress || !xidentity) {
+      showToast('Recipient has no solana_address or xidentity saved. They must save multi-chain addresses (Yallet) and have accepted your invite.', 'error');
+      return;
+    }
+    if (!window.YaultWasm) {
+      showToast('YaultWasm not loaded. Refresh the page and ensure you are on the Client portal with Yallet connected, then try again.', 'error');
+      return;
+    }
+    try {
+      await window.YaultWasm.init();
+    } catch (initErr) {
+      showToast('YaultWasm init failed: ' + (initErr.message || 'unknown') + ' Refresh the page and try again, or reconnect wallet.', 'error');
+      return;
+    }
+    if (!window.YaultWasm.custody) {
+      const hint = (window.YaultWasm.custodyError || '').trim() ? ' ' + window.YaultWasm.custodyError : '';
+      showToast('Custody WASM not available.' + hint + ' Refresh the page and reconnect Yallet, then try again.', 'error');
+      return;
+    }
+    const afResult = window.YaultWasm.custody.custody_generate_admin_factor();
+    if (afResult && afResult.error) {
+      showToast(afResult.message || 'AdminFactor failed', 'error');
+      return;
+    }
+    const adminFactorHex = (afResult && afResult.admin_factor_hex) ? afResult.admin_factor_hex : null;
+    if (!adminFactorHex) {
+      showToast('No admin_factor_hex', 'error');
+      return;
+    }
+    const newPassphrase = generateRandomPassphrase(12);
+    const provider = (wallet && wallet._yalletProvider) || window.yallet;
+    if (!provider || typeof provider.request !== 'function') {
+      showToast('Yallet not connected', 'error');
+      return;
+    }
+    showToast('Approve passkey to generate new credentials for this recipient only...', 'info');
+    const newMnemonic = await provider.request({
+      method: 'yallet_changePassphraseWithAdmin',
+      params: [newPassphrase, adminFactorHex],
+    });
+    const label = path.label || ('Recipient ' + recipientIndex);
+    if (!window.YaultRwaSdk || typeof window.YaultRwaSdk.prepareCredentialNftPayload !== 'function') {
+      showToast('RWA SDK prepareCredentialNftPayload not available', 'error');
+      return;
+    }
+    const prepared = await window.YaultRwaSdk.prepareCredentialNftPayload(solanaAddress, {
+      admin_factor: adminFactorHex,
+      mnemonic: newMnemonic,
+      passphrase: newPassphrase,
+      index: recipientIndex,
+      label: label,
+    }, { xidentity: xidentity });
+    const fingerprintBytes = new Uint8Array(adminFactorHex.match(/.{2}/g).map(b => parseInt(b, 16)));
+    const fingerprintBuf = await crypto.subtle.digest('SHA-256', fingerprintBytes);
+    const adminFactorFingerprint = Array.from(new Uint8Array(fingerprintBuf)).map(b => b.toString(16).padStart(2, '0')).join('');
+    const replaceResp = await fetch(`${API_BASE}/release/replace-path-payload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders },
+      body: JSON.stringify({
+        wallet_id: walletId,
+        authority_id: authorityId,
+        recipient_index: recipientIndex,
+        recipient_solana_address: prepared.recipientSolanaAddress || solanaAddress,
+        rwa_upload_body: prepared.body,
+        admin_factor_fingerprint: adminFactorFingerprint,
+      }),
+    });
+    if (!replaceResp.ok) {
+      const errBody = await replaceResp.json().catch(() => ({}));
+      showToast(errBody.error || replaceResp.statusText || 'Replace failed', 'error');
+      return;
+    }
+    showToast('Payload replaced. You can redeliver to this recipient from the authority/oracle side.', 'success');
+    render();
+  } catch (err) {
+    showToast(err.message || 'Resend failed', 'error');
+  } finally {
+    fixBtn.disabled = false;
+  }
+}
 
 function attachAppEvents() {
   const app = document.getElementById('app');
@@ -2788,6 +2986,19 @@ function attachAppEvents() {
           hint.textContent = 'Oracle event has been triggered. Please wait ' + mins + ' minutes before claiming.';
         }
         reportActivity('simulate_chainlink', null, null, { detail: (data.triggers || []).length + ' triggers created' });
+        const firstTx = (data.triggers || []).find(function (t) { return t.attestation_tx; });
+        if (firstTx && firstTx.attestation_tx) {
+          const chainId = 11155111;
+          const explorerUrl = getExplorerTxUrl(chainId, firstTx.attestation_tx);
+          const explorerName = getExplorerName(chainId);
+          const existing = document.querySelector('.toast');
+          if (existing) existing.remove();
+          const toast = document.createElement('div');
+          toast.className = 'toast toast-success';
+          toast.innerHTML = 'Attestation on chain (' + explorerName + '). <a href="' + explorerUrl + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:600;">View on block explorer</a>';
+          document.body.appendChild(toast);
+          setTimeout(function () { return toast.remove(); }, 10000);
+        }
       } catch (err) {
         btnSimChainOverview.textContent = 'Simulate Chainlink Event';
         btnSimChainOverview.disabled = false;
@@ -2941,6 +3152,12 @@ function attachAppEvents() {
     });
   });
 
+  // Resend: only bind once (attachAppEvents runs on every render; duplicate handlers would run for all recipients)
+  if (!app.dataset.fixEncClickBound) {
+    app.dataset.fixEncClickBound = '1';
+    app.addEventListener('click', handleFixEncryptionClick);
+  }
+
   const btnPlanLoadVaultBalance = document.getElementById('btnPlanLoadVaultBalance');
   if (btnPlanLoadVaultBalance) {
     btnPlanLoadVaultBalance.addEventListener('click', async () => {
@@ -3040,6 +3257,7 @@ function attachAppEvents() {
             return;
           }
           nextList = [{
+            id: acc.id || undefined,
             label: acc.label || acc.email || '',
             email: acc.email || undefined,
             address: acc.address || undefined,
@@ -3054,6 +3272,7 @@ function attachAppEvents() {
             const acc = planKey.startsWith('idx-') ? related[parseInt(planKey.slice(4), 10)] : related.find((a) => key(a) === planKey);
             if (!acc) return;
             nextList.push({
+              id: acc.id || undefined,
               label: acc.label || acc.email || '',
               email: acc.email || undefined,
               address: acc.address || undefined,
@@ -3543,6 +3762,18 @@ function attachAppEvents() {
                         reportActivity('escrow_deposit', lastEscrowTx, escrowResult.totalShares, {
                           detail: escrowIndices.length + ' recipients',
                         });
+                        if (lastEscrowTx) {
+                          var escrowChainId = Number(escrowCfg.chainId) || 11155111;
+                          var escrowExplorerUrl = getExplorerTxUrl(escrowChainId, lastEscrowTx);
+                          var escrowExplorerName = getExplorerName(escrowChainId);
+                          var existingToast = document.querySelector('.toast');
+                          if (existingToast) existingToast.remove();
+                          var escrowToast = document.createElement('div');
+                          escrowToast.className = 'toast toast-success';
+                          escrowToast.innerHTML = 'Escrow on chain (' + escrowExplorerName + '). <a href="' + escrowExplorerUrl + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:600;">View on block explorer</a>';
+                          document.body.appendChild(escrowToast);
+                          setTimeout(function () { return escrowToast.remove(); }, 10000);
+                        }
                       } else {
                         // CRITICAL: Halt flow if escrow deposit fails.
                         // The invariant "escrow deposit ≺ credential delivery" MUST hold:
@@ -3595,10 +3826,20 @@ function attachAppEvents() {
                     for (let i = 0; i < state.planAdminFactors.length; i++) {
                       const r = recipients[i];
                       const label = r.label || r.name || ('Recipient ' + (i + 1));
-                      const evmKey = (r.id && inviteIdToEvm[r.id]) ? inviteIdToEvm[r.id] : normAddr(r.address);
+                      const evmFromInvite = (r.id && inviteIdToEvm[r.id]) ? inviteIdToEvm[r.id] : null;
+                      const evmKey = evmFromInvite || normAddr(r.address);
+                      if (r.id && !evmFromInvite) {
+                        console.warn('[Plan] Recipient ' + (i + 1) + ' (' + label + '): no inviteIdToEvm for id; using plan address for encryption. Ensure recipient-addresses was called with invite_ids.');
+                      }
+                      if (evmFromInvite && r.address && normAddr(r.address) !== evmFromInvite) {
+                        console.warn('[Plan] Recipient ' + (i + 1) + ' (' + label + '): invite EVM differs from plan address; using invite EVM for encryption.');
+                      }
                       const addrRec = addresses[evmKey] || {};
                       const solanaAddress = addrRec.solana_address;
                       const xidentity = addrRec.xidentity;
+                      if (hasPrepare && (!solanaAddress || !xidentity)) {
+                        console.warn('[Plan] Recipient ' + (i + 1) + ' (' + label + '): missing solana_address or xidentity for evmKey ' + (evmKey ? evmKey.slice(0, 10) + '...' : '') + ' — encrypted payload will not be created; recipient must save multi-chain addresses (Yallet) and accept invite.');
+                      }
                       if (hasPrepare && solanaAddress && xidentity) {
                         try {
                           const prepared = await window.YaultRwaSdk.prepareCredentialNftPayload(solanaAddress, {
@@ -3749,6 +3990,19 @@ function attachAppEvents() {
           hint.textContent = 'Oracle event has been triggered. Please wait ' + mins + ' minutes before claiming.';
         }
         reportActivity('simulate_chainlink', null, null, { detail: (data.triggers || []).length + ' triggers created' });
+        const firstTx = (data.triggers || []).find(function (t) { return t.attestation_tx; });
+        if (firstTx && firstTx.attestation_tx) {
+          const chainId = 11155111;
+          const explorerUrl = getExplorerTxUrl(chainId, firstTx.attestation_tx);
+          const explorerName = getExplorerName(chainId);
+          const existing = document.querySelector('.toast');
+          if (existing) existing.remove();
+          const toast = document.createElement('div');
+          toast.className = 'toast toast-success';
+          toast.innerHTML = 'Attestation on chain (' + explorerName + '). <a href="' + explorerUrl + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:600;">View on block explorer</a>';
+          document.body.appendChild(toast);
+          setTimeout(function () { return toast.remove(); }, 10000);
+        }
       } catch (err) {
         btnSimulateChainlink.textContent = 'Simulate Chainlink Event';
         btnSimulateChainlink.disabled = false;
@@ -4608,7 +4862,9 @@ function attachAppEvents() {
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || 'Simulation failed');
         showToast(`Simulated ${data.amount} ${data.symbol || 'WETH'} yield injected. Refreshing...`, 'success');
-        await refreshWalletBalances();
+        // Wait for RPC node to reflect the new on-chain state before querying
+        await new Promise(function (r) { setTimeout(r, 2000); });
+        await refreshWalletBalances(2);
       } catch (err) {
         state.error = 'Simulate yield failed: ' + err.message;
       } finally {
@@ -4637,6 +4893,47 @@ function attachAppEvents() {
       state.vaultReclaimLoading = true;
       state.error = null;
       render();
+
+      // Popup: show "need multiple signatures, do not refresh" and wait until all signing is done
+      var reclaimModal = document.getElementById('reclaimEscrowModal');
+      if (!reclaimModal) {
+        reclaimModal = document.createElement('div');
+        reclaimModal.id = 'reclaimEscrowModal';
+        reclaimModal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:1000;';
+        reclaimModal.innerHTML = [
+          '<div class="card" style="max-width:420px;margin:16px;min-width:320px;" onclick="event.stopPropagation()">',
+          '  <h3 style="margin:0 0 12px;">Reclaim from Escrow</h3>',
+          '  <p id="reclaimModalMessage" style="margin:0 0 12px;font-size:14px;color:var(--text-muted);">Multiple signatures required. Please do not refresh the page.</p>',
+          '  <p id="reclaimModalProgress" style="margin:0 0 16px;font-size:13px;color:var(--text-muted);"></p>',
+          '  <div id="reclaimModalDone" style="display:none;">',
+          '    <p id="reclaimModalDoneText" style="margin:0 0 16px;font-size:14px;"></p>',
+          '    <button type="button" class="btn btn-primary" id="btnReclaimModalClose">Close and refresh</button>',
+          '  </div>',
+          '</div>',
+        ].join('');
+        document.body.appendChild(reclaimModal);
+      }
+      var msgEl = document.getElementById('reclaimModalMessage');
+      var progEl = document.getElementById('reclaimModalProgress');
+      var doneWrap = document.getElementById('reclaimModalDone');
+      var doneText = document.getElementById('reclaimModalDoneText');
+      if (msgEl) msgEl.textContent = 'Multiple signatures required. Please do not refresh the page.';
+      if (progEl) { progEl.style.display = 'block'; progEl.textContent = 'Preparing…'; }
+      if (doneWrap) doneWrap.style.display = 'none';
+      reclaimModal.style.display = 'flex';
+
+      function closeReclaimModal() {
+        var m = document.getElementById('reclaimEscrowModal');
+        if (m) m.style.display = 'none';
+        state.vaultReclaimLoading = false;
+        refreshWalletBalances().then(function () { render(); });
+      }
+      var closeBtn = document.getElementById('btnReclaimModalClose');
+      if (closeBtn && !closeBtn._bound) {
+        closeBtn._bound = true;
+        closeBtn.addEventListener('click', function () { closeReclaimModal(); });
+      }
+
       try {
         const authHeaders = await getAuthHeadersAsync().catch(() => ({}));
         const escrowCfg = await window.YaultEscrow.getConfig(API_BASE, { headers: authHeaders });
@@ -4649,26 +4946,52 @@ function attachAppEvents() {
         const result = await window.YaultEscrow.reclaimAllFromEscrow(
           provider, escrowCfg, ownerAddr, indices,
           function (step, total, detail) {
-            var btn = document.getElementById('btnReclaimEscrow');
-            if (btn) btn.textContent = '(' + step + '/' + total + ') ' + detail;
+            var p = document.getElementById('reclaimModalProgress');
+            if (p) { p.style.display = 'block'; p.textContent = 'Signing ' + step + '/' + total + ': ' + (detail || ''); }
           }
         );
+        if (progEl) progEl.style.display = 'none';
+        if (doneWrap) doneWrap.style.display = 'block';
         if (result.success && result.reclaimedCount > 0) {
-          showToast('Reclaimed shares from ' + result.reclaimedCount + ' recipient(s). Refreshing...', 'success');
+          if (doneText) doneText.textContent = 'All signatures complete. You can close and refresh. Successfully reclaimed ' + result.reclaimedCount + ' share(s).';
+          if (doneText) doneText.style.color = 'var(--success)';
+          showToast('Reclaimed shares from ' + result.reclaimedCount + ' recipient(s).', 'success');
           reportActivity('escrow_reclaim', result.txHashes[result.txHashes.length - 1] || null, null, {
             detail: result.reclaimedCount + ' recipients reclaimed',
           });
+          var lastReclaimTx = result.txHashes[result.txHashes.length - 1] || null;
+          if (lastReclaimTx) {
+            var reclaimChainId = Number(escrowCfg.chainId) || 11155111;
+            var reclaimExplorerUrl = getExplorerTxUrl(reclaimChainId, lastReclaimTx);
+            var reclaimExplorerName = getExplorerName(reclaimChainId);
+            var existingReclaimToast = document.querySelector('.toast');
+            if (existingReclaimToast) existingReclaimToast.remove();
+            var reclaimToast = document.createElement('div');
+            reclaimToast.className = 'toast toast-success';
+            reclaimToast.innerHTML = 'Reclaim tx on chain (' + reclaimExplorerName + '). <a href="' + reclaimExplorerUrl + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:600;">View on block explorer</a>';
+            document.body.appendChild(reclaimToast);
+            setTimeout(function () { return reclaimToast.remove(); }, 10000);
+          }
         } else if (result.success && result.reclaimedCount === 0) {
-          showToast('No remaining shares to reclaim.', 'info');
+          if (doneText) doneText.textContent = 'All signatures complete. You can close and refresh. No shares available to reclaim.';
+          if (doneText) doneText.style.color = '';
         } else {
-          throw new Error(result.error || 'Reclaim failed');
+          var errMsg = result.error || '';
+          var hint = 'If the plan has triggered release (attestation on chain), shares are locked for the recipient and can only be claimed by the recipient; owner cannot reclaim.';
+          if (doneText) {
+            doneText.innerHTML = 'Reclaim failed: ' + (errMsg ? '<br/><span style="font-size:12px;">' + esc(errMsg) + '</span>' : '') + '<br/><br/><span style="font-size:13px;color:var(--text-muted);">' + esc(hint) + '</span>';
+            doneText.style.color = 'var(--danger)';
+          }
         }
-        await refreshWalletBalances();
+        return;
       } catch (err) {
+        if (progEl) progEl.style.display = 'none';
+        if (doneWrap) doneWrap.style.display = 'block';
+        if (doneText) { doneText.textContent = 'Error: ' + (err.message || err); doneText.style.color = 'var(--danger)'; }
         state.error = 'Reclaim failed: ' + err.message;
+        return;
       } finally {
         state.vaultReclaimLoading = false;
-        render();
       }
     });
   }
@@ -5192,28 +5515,25 @@ function attachAppEvents() {
           const toHex = (n) => '0x' + BigInt(n).toString(16);
           const txData = claimTx.data || '0x';
 
-          // Sign with all 3 factors: mnemonic + passphrase + adminFactor → plan owner's signing key.
-          // The mnemonic was sealed with combine_passphrase(passphrase, adminFactor),
-          // so derive_keypair needs all 3 to correctly unseal and derive the EVM signing key.
+          // Sign with credentials (acegf): mnemonic + passphrase + adminFactor
           const signedRawTx = window.YaultWasm.acegf.evm_sign_eip1559_transaction_with_secondary(
             state.mnemonic,
             state.passphrase,
-            state.releaseKey,    // adminFactor as secondary_passphrase
+            state.releaseKey,
             chainIdBigInt,
             toHex(nonce),
             toHex(maxPriorityFeeBig),
             toHex(maxFeeBig),
             toHex(gasLimitBig),
-            cfg.escrowAddress,   // to: escrow contract
-            '0x0',               // value = 0
-            txData               // data: claim() calldata
+            cfg.escrowAddress,
+            '0x0',
+            txData
           );
 
           if (!signedRawTx || signedRawTx.startsWith('error:')) {
             throw new Error('acegf signing failed: ' + (signedRawTx || 'unknown error'));
           }
 
-          // Broadcast signed transaction via RPC
           const rawHex = signedRawTx.startsWith('0x') ? signedRawTx : '0x' + signedRawTx;
           let txResp;
           try {
@@ -5229,6 +5549,7 @@ function attachAppEvents() {
             }
             throw broadcastErr;
           }
+
           const txHash = txResp.hash;
 
           // Format display amount
@@ -5247,6 +5568,16 @@ function attachAppEvents() {
             message: 'Claim transaction submitted! Tx: ' + (txHash || '').slice(0, 18) + '...',
           };
           reportActivity('claim', txHash, displayAmt, { asset: symbol });
+          var claimChainId = 11155111;
+          var claimExplorerUrl = getExplorerTxUrl(claimChainId, txHash);
+          var claimExplorerName = getExplorerName(claimChainId);
+          var existingClaimToast = document.querySelector('.toast');
+          if (existingClaimToast) existingClaimToast.remove();
+          var claimToast = document.createElement('div');
+          claimToast.className = 'toast toast-success';
+          claimToast.innerHTML = 'Claim tx on chain (' + claimExplorerName + '). <a href="' + claimExplorerUrl + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:600;">View on block explorer</a>';
+          document.body.appendChild(claimToast);
+          setTimeout(function () { return claimToast.remove(); }, 10000);
         } else {
           const fromAddr = state.redeemWalletJson ? (state.redeemWalletJson.evm_address || '') : '';
           // Fallback: no escrow balance, show prepared result
@@ -5355,20 +5686,30 @@ function attachTrialFormEvents() {
 
 // ─── Wallet Balance Refresh ───
 
-async function refreshWalletBalances() {
+async function refreshWalletBalances(retries) {
+  var maxRetries = typeof retries === 'number' ? retries : 1;
   const addr = state.auth?.address || '';
   if (!addr) return;
 
-  try {
-    const headers = await getAuthHeadersAsync().catch(() => ({}));
-    const params = new URLSearchParams();
-    const a = state.walletAddresses;
-    if (a?.bitcoin_address) params.set('btc_address', a.bitcoin_address);
-    if (a?.solana_address) params.set('sol_address', a.solana_address);
-    const qs = params.toString();
-    const url = `${API_BASE}/vault/balance/${encodeURIComponent(addr)}${qs ? '?' + qs : ''}`;
-    const resp = await fetch(url, { headers });
-    if (resp.ok) {
+  for (var attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const headers = await getAuthHeadersAsync().catch(function (err) {
+        console.warn('[refreshWalletBalances] Auth headers failed:', err.message || err);
+        return {};
+      });
+      const params = new URLSearchParams();
+      const a = state.walletAddresses;
+      if (a?.bitcoin_address) params.set('btc_address', a.bitcoin_address);
+      if (a?.solana_address) params.set('sol_address', a.solana_address);
+      params.set('_t', Date.now()); // cache-bust: ensure fresh data from chain
+      const qs = params.toString();
+      const url = `${API_BASE}/vault/balance/${encodeURIComponent(addr)}${qs ? '?' + qs : ''}`;
+      const resp = await fetch(url, { headers, cache: 'no-store' });
+      if (!resp.ok) {
+        console.warn('[refreshWalletBalances] API returned', resp.status, 'attempt', attempt + 1);
+        if (attempt < maxRetries) { await new Promise(function (r) { setTimeout(r, 1500); }); continue; }
+        return;
+      }
       const data = await resp.json();
       state.walletBalances = {
         eth: data.wallet?.eth || '0.00',
@@ -5393,13 +5734,19 @@ async function refreshWalletBalances() {
       state.escrowBalances = {
         shares: data.escrow?.shares || '0',
         value: data.escrow?.value || '0',
+        yield: data.escrow?.yield || '0',
+        principal: data.escrow?.principal || '0',
         recipient_indices: data.escrow?.recipient_indices || [],
       };
       state.vaultUnderlyingSymbol = data.vault?.underlying_symbol || 'USDC';
       // Only re-render if on wallet page to avoid thrashing
       if (state.page === 'wallet') render();
+      return; // success
+    } catch (err) {
+      console.warn('[refreshWalletBalances] Error (attempt ' + (attempt + 1) + '):', err.message || err);
+      if (attempt < maxRetries) { await new Promise(function (r) { setTimeout(r, 1500); }); }
     }
-  } catch { /* non-fatal — will show zeros */ }
+  }
 }
 
 // ─── Utilities ───
@@ -5409,14 +5756,20 @@ function esc(str) {
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-/** Format vault number for display: round to 2 decimals, trim trailing zeros (e.g. 21.999999 → 22, 2.0000 → 2). */
+/** Format vault number for display: use enough decimals so small values are visible (e.g. 0.0012 → "0.0012", 21.999 → "22"). */
 function formatVaultNum(str) {
   if (str == null || str === '') return '0';
   const n = parseFloat(String(str));
   if (!Number.isFinite(n)) return String(str);
-  const rounded = Math.round(n * 100) / 100;
+  if (n === 0) return '0';
+  // For values >= 1, round to 2 decimals; for smaller values, show up to 6 significant decimals
+  const absN = Math.abs(n);
+  let decimals = 2;
+  if (absN > 0 && absN < 0.01) decimals = 6;
+  else if (absN < 1) decimals = 4;
+  const rounded = parseFloat(n.toFixed(decimals));
   if (rounded === Math.floor(rounded)) return String(Math.round(rounded));
-  return rounded.toFixed(2).replace(/\.?0+$/, '');
+  return rounded.toFixed(decimals).replace(/0+$/, '').replace(/\.$/, '');
 }
 
 /** Format vault shares for display: truncate (do not round) so displayed value never exceeds on-chain balance. */

@@ -2,5 +2,8 @@
   "chainSelectorName": "evm-ethereum-sepolia",
   "rpcUrl": "https://ethereum-sepolia-rpc.publicnode.com",
   "releaseAttestationAddress": "0x0000000000000000000000000000000000000000",
-  "platformApiBaseUrl": "https://api.yault.xyz"
+  "platformApiBaseUrl": "https://api.yault.xyz",
+  "drandUrl": "https://drand.cloudflare.com",
+  "vaultAddress": "0xCdF23BF390B1c4BEb811371466b04BB17759FB14",
+  "complianceApiUrl": "https://api.yault.xyz/api/compliance"
 }

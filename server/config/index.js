@@ -101,12 +101,19 @@ module.exports = {
   // Note: heartbeat/activity-detection config removed.
   // Triggers are now initiated by authorities via legal-event API.
   cooldown: {
-    // Allow explicit 0 (immediate); default 168 (1 week). NaN/empty → 168.
+    // If set, cooldown = this many minutes (e.g. 10 for demo). Otherwise use defaultHours.
+    defaultMinutes: (() => {
+      const raw = process.env.COOLDOWN_DEFAULT_MINUTES;
+      if (raw === undefined || raw === '') return null;
+      const n = parseInt(raw, 10);
+      return (Number.isInteger(n) && n >= 0) ? n : null;
+    })(),
+    // Allow explicit 0 (immediate); default 168 (1 week). Supports fractional hours (e.g. 10/60 for 10 min).
     defaultHours: (() => {
       const raw = process.env.COOLDOWN_DEFAULT_HOURS;
       if (raw === undefined || raw === '') return 168;
-      const n = parseInt(raw, 10);
-      return (Number.isInteger(n) && n >= 0) ? n : 168;
+      const n = parseFloat(raw);
+      return (typeof n === 'number' && !Number.isNaN(n) && n >= 0) ? n : 168;
     })(),
     maxHours: (() => {
       const raw = process.env.COOLDOWN_MAX_HOURS;

@@ -4,9 +4,15 @@ This folder documents how the **oracle** layer plugs into the existing server an
 
 ## Flow: Oracle first, entity fallback
 
-1. **Oracle path**
+1. **Oracle path** (with 3 external data source checks)
    - CRE workflow is triggered (cron or HTTP).
    - Workflow optionally fetches pending requests from `GET /api/oracle/pending`.
+   - **Before attesting**, workflow runs 3 external data source checks in parallel:
+     - **A) drand beacon** — fetches latest round from `https://drand.cloudflare.com` as verifiable timestamp proof
+     - **B) Vault balance** — queries `totalAssets()` on the ERC-4626 vault via `eth_call` to confirm non-zero holdings
+     - **C) Compliance screening** — calls `GET /api/compliance/screen` for KYC/AML/sanctions check
+   - If vault is empty or compliance fails → attestation is **aborted**.
+   - Otherwise, enriches `evidenceHash` with drand round + randomness + vault state + compliance checkId.
    - Workflow calls `ReleaseAttestation.submitAttestation(SOURCE_ORACLE, ...)` via CRE EVM Write.
    - Platform or a cron job calls `POST /api/trigger/from-oracle` with `{ wallet_id, recipient_index }`.
    - Server reads chain; if oracle attestation with `decision=release` exists, creates a trigger with `authority_id = oracle` and status `cooldown` (then finalized after cooldown).
@@ -15,6 +21,45 @@ This folder documents how the **oracle** layer plugs into the existing server an
    - When there is no oracle attestation (or CRE has not run yet), the entity authority (law firm / court) uses the existing API:
    - `POST /api/trigger/initiate` (with auth) and `POST /api/trigger/:id/decision`.
    - If the server has oracle enabled and finds an existing **oracle** release attestation for the same (wallet_id, recipient_index), it returns `409 Oracle already attested release` so the entity does not duplicate.
+
+## External data sources in CRE workflow
+
+```
+                   ┌─────────────────────┐
+                   │  CRE Workflow Entry  │
+                   │  (Cron or HTTP)      │
+                   └────────┬────────────┘
+                            │
+              ┌─────────────┼─────────────┐
+              ▼             ▼             ▼
+     ┌────────────┐ ┌────────────┐ ┌────────────┐
+     │ A) drand   │ │ B) Vault   │ │ C) Comply  │
+     │ beacon     │ │ eth_call   │ │ screen API │
+     │ (ext API)  │ │ (on-chain) │ │ (ext API)  │
+     └─────┬──────┘ └─────┬──────┘ └─────┬──────┘
+           │              │              │
+           └──────────────┼──────────────┘
+                          ▼
+              ┌───────────────────────┐
+              │ Gate: balance > 0 ?   │──No──▶ ABORT
+              │       cleared ?       │
+              └───────────┬───────────┘
+                          │ Yes
+                          ▼
+              ┌───────────────────────┐
+              │ Enrich evidenceHash   │
+              │ = keccak256(evidence  │
+              │   ‖ drand_round       │
+              │   ‖ drand_randomness  │
+              │   ‖ vault_totalAssets │
+              │   ‖ compliance_id)    │
+              └───────────┬───────────┘
+                          ▼
+              ┌───────────────────────┐
+              │ CRE EVM Write         │
+              │ submitAttestation()   │
+              └───────────────────────┘
+```
 
 ## Server config (env)
 
@@ -30,6 +75,7 @@ This folder documents how the **oracle** layer plugs into the existing server an
 | GET | /api/trigger/attestation?wallet_id=&recipient_index= | Read attestation from chain (oracle or fallback). |
 | POST | /api/trigger/from-oracle | Create trigger from chain oracle attestation (body: wallet_id, recipient_index). |
 | GET | /api/oracle/pending | Stub for CRE workflow; returns `{ requests: [] }`. Extend to feed pending queue. |
+| GET | /api/compliance/screen?wallet_id=&recipient_index= | Compliance screening (CRE external data source C). |
 
 ## Contract deployment
 

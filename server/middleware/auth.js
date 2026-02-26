@@ -454,7 +454,15 @@ function proxyAuthMiddleware(req, res, next) {
 // Client session token (login once, no re-sign for data-only APIs)
 // ---------------------------------------------------------------------------
 
-const SESSION_SECRET = process.env.CLIENT_SESSION_SECRET || 'yallet-client-session-dev';
+const SESSION_SECRET = (() => {
+  const env = process.env.CLIENT_SESSION_SECRET;
+  if (env && env.length >= 32) return env;
+  if (process.env.NODE_ENV === 'production') {
+    console.error('[SECURITY] CLIENT_SESSION_SECRET is missing or too short (min 32 chars). Generating random ephemeral secret — sessions will not survive restarts.');
+  }
+  // Auto-generate a strong ephemeral secret so we never fall back to a hardcoded value.
+  return crypto.randomBytes(32).toString('hex');
+})();
 const SESSION_TTL_SEC = 24 * 3600; // 24h
 
 function base64UrlEncode(buf) {
@@ -490,8 +498,8 @@ function verifyClientSessionToken(token) {
   const sigB64 = token.slice(dot + 1);
   try {
     const expectedSig = crypto.createHmac('sha256', SESSION_SECRET).update(b64).digest();
-    const expectedB64 = base64UrlEncode(expectedSig);
-    if (sigB64 !== expectedB64) return null;
+    const actualSig = base64UrlDecode(sigB64);
+    if (expectedSig.length !== actualSig.length || !crypto.timingSafeEqual(expectedSig, actualSig)) return null;
     const raw = base64UrlDecode(b64).toString('utf8');
     const payload = JSON.parse(raw);
     if (payload.e && payload.e < Math.floor(Date.now() / 1000)) return null; // expired

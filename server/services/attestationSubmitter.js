@@ -12,6 +12,7 @@ const SUBMIT_ABI = [
   'function submitAttestation(uint8 source, bytes32 walletIdHash, uint256 recipientIndex, uint8 decision, bytes32 reasonCode, bytes32 evidenceHash) external',
 ];
 
+const SOURCE_ORACLE = 0;
 const SOURCE_FALLBACK = 1;
 const DECISION_RELEASE = 0;
 const DECISION_HOLD = 1;
@@ -81,6 +82,48 @@ async function submitFallbackAttestation(config, params) {
   return { txHash: receipt.hash, blockNumber: receipt.blockNumber };
 }
 
+/**
+ * Submit an oracle-source attestation (used by simulate-chainlink to mimic Chainlink CRE).
+ * Same as submitFallbackAttestation but with source=0 (oracle).
+ */
+async function submitOracleAttestation(config, params) {
+  const { walletId, recipientIndex, decision, reasonCode, evidenceHash } = params;
+  const contractAddress = config?.oracle?.releaseAttestationAddress;
+  const rpcUrl = config?.oracle?.rpcUrl;
+  const relayerKey = config?.oracle?.releaseAttestationRelayerPrivateKey;
+
+  if (!contractAddress || !relayerKey || !relayerKey.trim()) {
+    throw new Error('ReleaseAttestation contract and RELEASE_ATTESTATION_RELAYER_PRIVATE_KEY must be set');
+  }
+  if (!walletId || recipientIndex == null) {
+    throw new Error('walletId and recipientIndex are required');
+  }
+  if (!evidenceHash || typeof evidenceHash !== 'string') {
+    throw new Error('evidenceHash (bytes32 hex) is required');
+  }
+
+  const provider = new ethers.JsonRpcProvider(rpcUrl || 'https://eth.llamarpc.com');
+  const wallet = new ethers.Wallet(relayerKey.trim(), provider);
+  const contract = new ethers.Contract(contractAddress, SUBMIT_ABI, wallet);
+
+  const hash = walletIdHash(walletId);
+  const decisionU8 = decisionToUint8(decision);
+  const reasonBytes = toBytes32(reasonCode || '0');
+  const evidenceBytes = toBytes32(evidenceHash);
+
+  const tx = await contract.submitAttestation(
+    SOURCE_ORACLE,
+    hash,
+    recipientIndex,
+    decisionU8,
+    reasonBytes,
+    evidenceBytes
+  );
+  const receipt = await tx.wait();
+  return { txHash: receipt.hash, blockNumber: receipt.blockNumber };
+}
+
 module.exports = {
   submitFallbackAttestation,
+  submitOracleAttestation,
 };

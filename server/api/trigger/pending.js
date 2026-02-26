@@ -18,7 +18,7 @@
 'use strict';
 
 const { Router } = require('express');
-const { authorityAuthMiddleware } = require('../../middleware/auth');
+const { dualAuthMiddleware, authorityAuthMiddleware } = require('../../middleware/auth');
 const db = require('../../db');
 const { isReleasePaused } = require('../../services/triggerPolicy');
 
@@ -71,10 +71,13 @@ startCooldownFinalizer();
 /**
  * @route GET /
  * @description List pending trigger events.
- *   - Authenticated authorities see their own triggers via authorityAuthMiddleware.
- *   - Client-portal users can query by wallet_id (requires auth).
+ *   - Client-portal: pass wallet_id, auth via X-Client-Session.
+ *   - Authority: no wallet_id, auth via X-Authority-Session or challenge.
  */
-router.get('/', authorityAuthMiddleware, async (req, res) => {
+router.get('/', (req, res, next) => {
+  if (req.headers['x-authority-session']) return authorityAuthMiddleware(req, res, next);
+  return dualAuthMiddleware(req, res, next);
+}, async (req, res) => {
   try {
     const statusFilter = req.query.status || 'pending';
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
