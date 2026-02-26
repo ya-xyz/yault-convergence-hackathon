@@ -183,6 +183,13 @@ var TOKENS_BY_CHAIN = {
 // ─── Auth helper: use session token directly if available (no second signature needed), otherwise do challenge+sign ───
 async function getAuthHeadersAsync() {
   if (!wallet || !wallet.connected) return {};
+  // Restore session token from sessionStorage if lost (e.g. after internal re-render)
+  if (!wallet.sessionToken) {
+    try {
+      const stored = sessionStorage.getItem('yault_session_token');
+      if (stored) wallet.sessionToken = stored;
+    } catch (_) {}
+  }
   if (wallet.sessionToken) {
     return { 'X-Client-Session': wallet.sessionToken };
   }
@@ -1678,6 +1685,10 @@ function renderVaultTab() {
         <div class="balance-card">
           <div class="balance-value">${esc(formatVaultNum(state.escrowBalances.value))}</div>
           <div class="balance-label">Value (${esc(state.vaultUnderlyingSymbol || 'USDC')})</div>
+        </div>
+        <div class="balance-card">
+          <div class="balance-value" style="color:var(--success);">${esc(formatVaultNum(state.escrowBalances.yield || '0'))}</div>
+          <div class="balance-label">Yield</div>
         </div>
       </div>
       <button class="btn btn-secondary btn-sm" id="btnReclaimEscrow" ${state.vaultReclaimLoading ? 'disabled' : ''}
@@ -4847,7 +4858,9 @@ function attachAppEvents() {
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || 'Simulation failed');
         showToast(`Simulated ${data.amount} ${data.symbol || 'WETH'} yield injected. Refreshing...`, 'success');
-        await refreshWalletBalances();
+        // Wait for RPC node to reflect the new on-chain state before querying
+        await new Promise(function (r) { setTimeout(r, 2000); });
+        await refreshWalletBalances(2);
       } catch (err) {
         state.error = 'Simulate yield failed: ' + err.message;
       } finally {
@@ -5669,20 +5682,30 @@ function attachTrialFormEvents() {
 
 // ─── Wallet Balance Refresh ───
 
-async function refreshWalletBalances() {
+async function refreshWalletBalances(retries) {
+  var maxRetries = typeof retries === 'number' ? retries : 1;
   const addr = state.auth?.address || '';
   if (!addr) return;
 
-  try {
-    const headers = await getAuthHeadersAsync().catch(() => ({}));
-    const params = new URLSearchParams();
-    const a = state.walletAddresses;
-    if (a?.bitcoin_address) params.set('btc_address', a.bitcoin_address);
-    if (a?.solana_address) params.set('sol_address', a.solana_address);
-    const qs = params.toString();
-    const url = `${API_BASE}/vault/balance/${encodeURIComponent(addr)}${qs ? '?' + qs : ''}`;
-    const resp = await fetch(url, { headers });
-    if (resp.ok) {
+  for (var attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const headers = await getAuthHeadersAsync().catch(function (err) {
+        console.warn('[refreshWalletBalances] Auth headers failed:', err.message || err);
+        return {};
+      });
+      const params = new URLSearchParams();
+      const a = state.walletAddresses;
+      if (a?.bitcoin_address) params.set('btc_address', a.bitcoin_address);
+      if (a?.solana_address) params.set('sol_address', a.solana_address);
+      params.set('_t', Date.now()); // cache-bust: ensure fresh data from chain
+      const qs = params.toString();
+      const url = `${API_BASE}/vault/balance/${encodeURIComponent(addr)}${qs ? '?' + qs : ''}`;
+      const resp = await fetch(url, { headers, cache: 'no-store' });
+      if (!resp.ok) {
+        console.warn('[refreshWalletBalances] API returned', resp.status, 'attempt', attempt + 1);
+        if (attempt < maxRetries) { await new Promise(function (r) { setTimeout(r, 1500); }); continue; }
+        return;
+      }
       const data = await resp.json();
       state.walletBalances = {
         eth: data.wallet?.eth || '0.00',
@@ -5704,13 +5727,19 @@ async function refreshWalletBalances() {
       state.escrowBalances = {
         shares: data.escrow?.shares || '0',
         value: data.escrow?.value || '0',
+        yield: data.escrow?.yield || '0',
+        principal: data.escrow?.principal || '0',
         recipient_indices: data.escrow?.recipient_indices || [],
       };
       state.vaultUnderlyingSymbol = data.vault?.underlying_symbol || 'USDC';
       // Only re-render if on wallet page to avoid thrashing
       if (state.page === 'wallet') render();
+      return; // success
+    } catch (err) {
+      console.warn('[refreshWalletBalances] Error (attempt ' + (attempt + 1) + '):', err.message || err);
+      if (attempt < maxRetries) { await new Promise(function (r) { setTimeout(r, 1500); }); }
     }
-  } catch { /* non-fatal — will show zeros */ }
+  }
 }
 
 // ─── Utilities ───
@@ -5720,14 +5749,20 @@ function esc(str) {
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-/** Format vault number for display: round to 2 decimals, trim trailing zeros (e.g. 21.999999 → 22, 2.0000 → 2). */
+/** Format vault number for display: use enough decimals so small values are visible (e.g. 0.0012 → "0.0012", 21.999 → "22"). */
 function formatVaultNum(str) {
   if (str == null || str === '') return '0';
   const n = parseFloat(String(str));
   if (!Number.isFinite(n)) return String(str);
-  const rounded = Math.round(n * 100) / 100;
+  if (n === 0) return '0';
+  // For values >= 1, round to 2 decimals; for smaller values, show up to 6 significant decimals
+  const absN = Math.abs(n);
+  let decimals = 2;
+  if (absN > 0 && absN < 0.01) decimals = 6;
+  else if (absN < 1) decimals = 4;
+  const rounded = parseFloat(n.toFixed(decimals));
   if (rounded === Math.floor(rounded)) return String(Math.round(rounded));
-  return rounded.toFixed(2).replace(/\.?0+$/, '');
+  return rounded.toFixed(decimals).replace(/0+$/, '').replace(/\.$/, '');
 }
 
 /** Format vault shares for display: truncate (do not round) so displayed value never exceeds on-chain balance. */

@@ -214,6 +214,10 @@ class WalletConnector {
     this._connected = true;
     this.authResult = result;
     this.sessionToken = result.session_token || null; // After login, data APIs use this token without requiring a second signature
+    // Persist session token so it survives page refresh within the same tab
+    if (this.sessionToken) {
+      try { sessionStorage.setItem('yault_session_token', this.sessionToken); } catch (_) {}
+    }
     // On first login, fetch all chain addresses supported by Yallet for backend storage
     let allAddresses = null;
     try {
@@ -230,6 +234,7 @@ class WalletConnector {
     this.allAddresses = null;
     this.authResult = null;
     this.sessionToken = null;
+    try { sessionStorage.removeItem('yault_session_token'); } catch (_) {}
     this._yalletProvider = null;
     this._connected = false;
     this._connecting = false;
