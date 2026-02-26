@@ -2,6 +2,10 @@
 
 Combines **Client**, **Authority**, and **Ops** portals into a single frontend application, deployed co-origin with the backend API.
 
+## PQC Ready
+
+The cryptographic layer is **post-quantum ready**. All client-side key derivation, signing, and encryption run inside ACE-GF WASM modules that support **ML-DSA (FIPS 204)** digital signatures alongside classical Ed25519/X25519 curves, providing a hybrid migration path toward quantum-resistant custody.
+
 ## Usage
 
 - **Development**: Run `npm run dev` from the project root; both backend and frontend are served by `server/index.js`.
