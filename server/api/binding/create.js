@@ -84,11 +84,15 @@ router.post('/', authorityAuthMiddleware, async (req, res) => {
       db.bindings.runTransaction(() => {
         const innerDb = db._getDb();
 
-        // Re-read the authority inside the transaction for consistency
-        const rows = innerDb.exec('SELECT data FROM "authorities" WHERE id = ?', [bindingData.authority_id]);
-        if (rows.length === 0 || rows[0].values.length === 0) throw new Error('AUTHORITY_NOT_FOUND');
+        // Re-read the authority inside the transaction (parameterized SELECT via prepare/bind/step)
+        const stmt = innerDb.prepare('SELECT data FROM "authorities" WHERE id = ?');
+        stmt.bind([bindingData.authority_id]);
+        let authorityData = null;
+        if (stmt.step()) authorityData = stmt.get()[0];
+        stmt.free();
+        if (!authorityData) throw new Error('AUTHORITY_NOT_FOUND');
 
-        const currentAuthority = JSON.parse(rows[0].values[0][0]);
+        const currentAuthority = JSON.parse(authorityData);
         if (currentAuthority.active_bindings >= currentAuthority.max_capacity) {
           throw new Error('CAPACITY_EXCEEDED');
         }

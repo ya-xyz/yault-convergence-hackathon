@@ -50,14 +50,18 @@ router.delete('/:id', authorityAuthMiddleware, async (req, res) => {
     }
 
     // Atomic: terminate binding + decrement counter in a single SQLite transaction
+    // Use prepare/bind/step for parameterized SELECT (sql.js exec does not bind params)
     db.bindings.runTransaction(() => {
       const innerDb = db._getDb();
 
-      // Re-read binding inside the transaction
-      const bindingRows = innerDb.exec('SELECT data FROM "bindings" WHERE id = ?', [id]);
-      if (bindingRows.length === 0 || bindingRows[0].values.length === 0) return;
+      let stmt = innerDb.prepare('SELECT data FROM "bindings" WHERE id = ?');
+      stmt.bind([id]);
+      let bindingData = null;
+      if (stmt.step()) bindingData = stmt.get()[0];
+      stmt.free();
+      if (!bindingData) return;
 
-      const currentBinding = JSON.parse(bindingRows[0].values[0][0]);
+      const currentBinding = JSON.parse(bindingData);
       if (currentBinding.status === 'terminated') return;
 
       // Mark as terminated
@@ -66,10 +70,14 @@ router.delete('/:id', authorityAuthMiddleware, async (req, res) => {
       innerDb.run('UPDATE "bindings" SET data = ? WHERE id = ?',
         [JSON.stringify(currentBinding), id]);
 
-      // Decrement authority's active binding count
-      const authorityRows = innerDb.exec('SELECT data FROM "authorities" WHERE id = ?', [currentBinding.authority_id]);
-      if (authorityRows.length > 0 && authorityRows[0].values.length > 0) {
-        const currentAuthority = JSON.parse(authorityRows[0].values[0][0]);
+      // Decrement authority's active binding count (parameterized SELECT)
+      stmt = innerDb.prepare('SELECT data FROM "authorities" WHERE id = ?');
+      stmt.bind([currentBinding.authority_id]);
+      let authorityData = null;
+      if (stmt.step()) authorityData = stmt.get()[0];
+      stmt.free();
+      if (authorityData) {
+        const currentAuthority = JSON.parse(authorityData);
         currentAuthority.active_bindings = Math.max((currentAuthority.active_bindings || 1) - 1, 0);
         innerDb.run('UPDATE "authorities" SET data = ? WHERE id = ?',
           [JSON.stringify(currentAuthority), currentBinding.authority_id]);

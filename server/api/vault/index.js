@@ -56,8 +56,8 @@ router.get('/balance/:address', dualAuthMiddleware, async (req, res) => {
   }
   const address = normalizeAddr(rawAddr);
 
-  // C-01 FIX: Verify caller owns this address
-  if (req.auth.pubkey !== address) {
+  // C-01 FIX: Verify caller owns this address (compare normalized to allow 0x or no 0x)
+  if (normalizeAddr(req.auth.pubkey) !== address) {
     return res.status(403).json({
       error: 'Forbidden',
       detail: 'You can only view your own vault balance',
@@ -187,18 +187,18 @@ router.get('/balance/:address', dualAuthMiddleware, async (req, res) => {
             // Track escrow principal: snapshot the WETH value at first observation (≈ deposit time).
             // Stored on the binding record so yield can be calculated as value - principal.
             let principalStr = '0';
-            if (activeBinding && activeBinding.escrow_principal) {
+            if (activeBinding && activeBinding.escrow_principal != null && activeBinding.escrow_principal !== '') {
               principalStr = String(activeBinding.escrow_principal);
-            } else {
+            } else if (activeBinding && activeBinding.binding_id) {
               // First time seeing escrow balance: record current value as principal
               principalStr = valueStr;
-              if (activeBinding) {
-                try {
-                  await db.bindings.update(activeBinding.id, { escrow_principal: valueStr });
-                } catch (e) {
-                  console.warn('[vault/balance] Failed to save escrow_principal:', e.message);
-                }
+              try {
+                await db.bindings.update(activeBinding.binding_id, { ...activeBinding, escrow_principal: valueStr });
+              } catch (e) {
+                console.warn('[vault/balance] Failed to save escrow_principal for binding %s:', activeBinding.binding_id, e);
               }
+            } else {
+              principalStr = valueStr;
             }
 
             const escrowYield = Math.max(0, parseFloat(valueStr) - parseFloat(principalStr));

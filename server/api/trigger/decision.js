@@ -31,10 +31,15 @@ const config = require('../../config');
 const { evaluateReleaseAttestationGate } = require('../../services/attestationGate');
 const { deliverRwaPackageForRecipient, recordDeliveryFailure } = require('../../services/deliverRwaRelease');
 const { submitFallbackAttestation } = require('../../services/attestationSubmitter');
+const { getAttestation: getAttestationOnChain } = require('../../services/attestationClient');
 const { isReleasePaused, isHighValueWallet, hasLegalConfirmation } = require('../../services/triggerPolicy');
 const { sendCooldownNotification } = require('../../services/email');
 
 const router = Router();
+
+// Process-level lock to prevent concurrent finalizers (cooldown-finalizer + scheduler) from
+// racing on the same trigger, causing duplicate deliveries and thundering herd on the mint API.
+const _finalizingTriggers = new Set();
 
 // #5 FIX: Cancel cooldown period — prevents cancel+resubmit bypass
 const CANCEL_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour after cancellation
@@ -52,6 +57,17 @@ async function submitReleaseAttestationForAllRecipients(walletId, recipientIndic
   const reason = (reasonCode && typeof reasonCode === 'string' && reasonCode.length >= 64) ? reasonCode : '0x' + '0'.repeat(64);
   for (const idx of recipientIndices) {
     try {
+      // Skip if a RELEASE attestation already exists on-chain (idempotent retry guard)
+      const existing = await getAttestationOnChain({
+        rpcUrl: config?.oracle?.rpcUrl,
+        contractAddress: config.oracle.releaseAttestationAddress,
+        walletId,
+        recipientIndex: Number(idx),
+      });
+      if (existing && existing.decision === 'release') {
+        console.log('[trigger/decision] On-chain RELEASE attestation already exists for recipient %s, skipping', idx);
+        continue;
+      }
       await submitFallbackAttestation(config, {
         walletId,
         recipientIndex: Number(idx),
@@ -222,9 +238,24 @@ async function persistDecisionAudit(triggerId, triggerSnapshot, auditPayload, er
  * @param {object} trigger
  * @returns {Promise<object|null>} Updated trigger, or same trigger if not finalized
  */
-async function maybeFinalizeDecision(triggerId, trigger) {
-  if (trigger.status !== 'cooldown') return trigger;
+async function maybeFinalizeDecision(triggerId, existingTrigger) {
+  // Re-read from DB to avoid stale state from concurrent callers
+  const trigger = (await db.triggers.findById(triggerId)) || existingTrigger;
+  if (!trigger || trigger.status !== 'cooldown') return trigger;
 
+  // Process-level lock: prevent two concurrent finalizers (cooldown-finalizer + scheduler)
+  // from racing on the same trigger, which causes thundering herd on the mint API.
+  if (_finalizingTriggers.has(triggerId)) return trigger;
+  _finalizingTriggers.add(triggerId);
+
+  try {
+    return await _doFinalizeTrigger(triggerId, trigger);
+  } finally {
+    _finalizingTriggers.delete(triggerId);
+  }
+}
+
+async function _doFinalizeTrigger(triggerId, trigger) {
   const now = Date.now();
   if (now < trigger.effective_at) return trigger;
 
@@ -283,8 +314,10 @@ async function maybeFinalizeDecision(triggerId, trigger) {
       );
       if (activeBinding && Array.isArray(activeBinding.recipient_indices)) {
         const deliveredIndices = [];
-        for (const idx of activeBinding.recipient_indices) {
-          const recipientIndex = Number(idx);
+        for (let i = 0; i < activeBinding.recipient_indices.length; i++) {
+          const recipientIndex = Number(activeBinding.recipient_indices[i]);
+          // Stagger delivery requests to avoid rate-limiting on the mint API
+          if (i > 0) await new Promise((r) => setTimeout(r, 1500));
           try {
             const delivery = await deliverRwaPackageForRecipient(activeBinding, recipientIndex);
             if (delivery.delivered) {
@@ -507,8 +540,10 @@ router.post('/:id/decision', authorityAuthMiddleware, async (req, res) => {
         );
         if (activeBinding && Array.isArray(activeBinding.recipient_indices)) {
           const deliveredIndices = [];
-          for (const idx of activeBinding.recipient_indices) {
-            const recipientIndex = Number(idx);
+          for (let i = 0; i < activeBinding.recipient_indices.length; i++) {
+            const recipientIndex = Number(activeBinding.recipient_indices[i]);
+            // Stagger delivery requests to avoid rate-limiting on the mint API
+            if (i > 0) await new Promise((r) => setTimeout(r, 1500));
             try {
               const delivery = await deliverRwaPackageForRecipient(activeBinding, recipientIndex);
               if (delivery.delivered) {
