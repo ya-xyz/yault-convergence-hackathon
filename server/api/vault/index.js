@@ -45,6 +45,11 @@ function normalizeAddr(addr) {
 // ─── GET /balance/:address ───
 
 router.get('/balance/:address', dualAuthMiddleware, async (req, res) => {
+  // Prevent 304 Not Modified — balance must always reflect latest on-chain state
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+
   const rawAddr = req.params.address;
   if (!isValidAddress(rawAddr)) {
     return res.status(400).json({ error: 'Invalid address format' });
@@ -121,7 +126,7 @@ router.get('/balance/:address', dualAuthMiddleware, async (req, res) => {
 
   // Query escrow balance: remaining (unclaimed) shares locked per recipient.
   // Use sum of remainingForRecipient(), not totalDeposited(), so the display decreases when a recipient claims.
-  let escrowData = { shares: '0', value: '0', recipient_indices: [] };
+  let escrowData = { shares: '0', value: '0', principal: '0', yield: '0', recipient_indices: [] };
   const escrowAddr = (config.escrow?.address || '').trim();
   if (escrowAddr && hasVaultContract()) {
     try {
@@ -130,6 +135,7 @@ router.get('/balance/:address', dualAuthMiddleware, async (req, res) => {
       const ctx = escrowContract.getEscrowReadOnly(config);
       if (ctx) {
         let recipientIndices = [];
+        let activeBinding = null;
         try {
           let walletBindings = await db.bindings.findByWallet(evmAddress);
           if (walletBindings.length === 0) {
@@ -140,7 +146,7 @@ router.get('/balance/:address', dualAuthMiddleware, async (req, res) => {
               }
             } catch (_) {}
           }
-          const activeBinding = walletBindings.find((b) => b.status === 'active');
+          activeBinding = walletBindings.find((b) => b.status === 'active');
           if (activeBinding && Array.isArray(activeBinding.recipient_indices)) {
             recipientIndices = activeBinding.recipient_indices.map(Number);
           } else {
@@ -173,13 +179,36 @@ router.get('/balance/:address', dualAuthMiddleware, async (req, res) => {
             const vaultAddr = config.contracts.vaultAddress;
             const vault = new ethers.Contract(vaultAddr, ['function convertToAssets(uint256) view returns (uint256)'], provider);
             const assets = await vault.convertToAssets(totalRemaining);
+            const valueStr = ethers.formatUnits(assets, decimals);
+            const sharesStr = ethers.formatUnits(totalRemaining, decimals);
+
+            // Track escrow principal: snapshot the WETH value at first observation (≈ deposit time).
+            // Stored on the binding record so yield can be calculated as value - principal.
+            let principalStr = '0';
+            if (activeBinding && activeBinding.escrow_principal) {
+              principalStr = String(activeBinding.escrow_principal);
+            } else {
+              // First time seeing escrow balance: record current value as principal
+              principalStr = valueStr;
+              if (activeBinding) {
+                try {
+                  await db.bindings.update(activeBinding.id, { escrow_principal: valueStr });
+                } catch (e) {
+                  console.warn('[vault/balance] Failed to save escrow_principal:', e.message);
+                }
+              }
+            }
+
+            const escrowYield = Math.max(0, parseFloat(valueStr) - parseFloat(principalStr));
             escrowData = {
-              shares: ethers.formatUnits(totalRemaining, decimals),
-              value: ethers.formatUnits(assets, decimals),
+              shares: sharesStr,
+              value: valueStr,
+              principal: principalStr,
+              yield: escrowYield.toFixed(6),
               recipient_indices: recipientIndices,
             };
           } else {
-            escrowData = { shares: '0', value: '0', recipient_indices: recipientIndices };
+            escrowData = { shares: '0', value: '0', principal: '0', yield: '0', recipient_indices: recipientIndices };
           }
         }
       }
