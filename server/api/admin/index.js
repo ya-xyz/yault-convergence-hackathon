@@ -23,6 +23,7 @@ const crypto = require('crypto');
 const db = require('../../db');
 const config = require('../../config');
 const vaultContract = require('../../services/vaultContract');
+const { deliverByRegistry } = require('../../services/deliverRwaRelease');
 const { verifySignature, verifyClientSessionToken, dualAuthMiddleware } = require('../../middleware/auth');
 
 const router = Router();
@@ -519,6 +520,111 @@ router.get('/triggers', async (_req, res) => {
   }
 });
 
+// ─── GET /release/redeliver-candidates — All recipients for released plans (admin; grouped by plan) ───
+
+function deliveryLogId(walletId, authorityId, recipientIndex) {
+  return `${String(walletId).trim().toLowerCase()}_${String(authorityId || '').trim()}_${recipientIndex}`;
+}
+
+router.get('/release/redeliver-candidates', async (_req, res) => {
+  try {
+    const triggers = await db.triggers.findAll();
+    const released = (Array.isArray(triggers) ? triggers : []).filter((t) => t.status === 'released');
+    const bindings = await db.bindings.findAll();
+    const activeBindings = (Array.isArray(bindings) ? bindings : []).filter((b) => b.status === 'active');
+    const bindingKey = (walletId, authorityId) => `${(walletId || '').toLowerCase()}_${authorityId || ''}`;
+    const bindingMap = new Map();
+    for (const b of activeBindings) {
+      bindingMap.set(bindingKey(b.wallet_id, b.authority_id ?? ''), b);
+    }
+
+    const pathCacheByWallet = new Map();
+    async function getRecipientLabel(walletId, recipientIndex) {
+      const w = (walletId || '').toLowerCase();
+      if (!pathCacheByWallet.has(w)) {
+        const pathRecs = await db.recipientPaths.findByWallet(walletId);
+        pathCacheByWallet.set(w, pathRecs?.[0]?.paths || []);
+      }
+      const paths = pathCacheByWallet.get(w);
+      const path = paths.find((p) => Number(p.index) === recipientIndex || Number(p.index) === recipientIndex + 1);
+      return (path && path.label) || `Recipient ${recipientIndex}`;
+    }
+
+    const planMap = new Map();
+    for (const trigger of released) {
+      const walletId = trigger.wallet_id;
+      if (!walletId) continue;
+      const authorityId = trigger.authority_id ?? '';
+      const binding = bindingMap.get(bindingKey(walletId, authorityId));
+      if (!binding || !Array.isArray(binding.recipient_indices)) continue;
+
+      const planKey = bindingKey(walletId, authorityId);
+      if (!planMap.has(planKey)) {
+        planMap.set(planKey, {
+          wallet_id: walletId,
+          authority_id: authorityId === '' ? null : authorityId,
+          trigger_id: trigger.trigger_id,
+          recipients: [],
+        });
+      }
+      const plan = planMap.get(planKey);
+
+      for (const ri of binding.recipient_indices) {
+        const idx = Number(ri);
+        if (Number.isNaN(idx) || idx < 0) continue;
+        const logId = deliveryLogId(walletId, authorityId, idx);
+        const log = await db.rwaDeliveryLog.findById(logId).catch(() => null);
+        const name = await getRecipientLabel(walletId, idx);
+        plan.recipients.push({
+          recipient_index: idx,
+          delivery_status: log?.status ?? null,
+          delivery_tx_id: log?.txId ?? null,
+          name,
+        });
+      }
+    }
+
+    const plans = Array.from(planMap.values());
+    const candidates = [];
+    for (const plan of plans) {
+      for (const rec of plan.recipients) {
+        candidates.push({
+          wallet_id: plan.wallet_id,
+          authority_id: plan.authority_id == null ? '' : plan.authority_id,
+          recipient_index: rec.recipient_index,
+          delivery_status: rec.delivery_status,
+          trigger_id: plan.trigger_id,
+        });
+      }
+    }
+    return res.json({ plans, candidates });
+  } catch (err) {
+    console.error('[admin/release/redeliver-candidates] Error:', err);
+    return res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+// ─── POST /release/redeliver — Admin-triggered redelivery (any wallet/authority/recipient) ───
+
+router.post('/release/redeliver', async (req, res) => {
+  try {
+    const { wallet_id, authority_id, recipient_index, force_redeliver } = req.body || {};
+    if (!wallet_id || recipient_index == null) {
+      return res.status(400).json({ error: 'wallet_id and recipient_index are required' });
+    }
+    const result = await deliverByRegistry(wallet_id, authority_id || '', Number(recipient_index), {
+      forceRedeliver: !!force_redeliver,
+    });
+    if (result.delivered) {
+      return res.json({ delivered: true, txId: result.txId, message: 'RWA NFT redelivered successfully.' });
+    }
+    return res.status(502).json({ delivered: false, error: result.error || 'Delivery failed' });
+  } catch (err) {
+    console.error('[admin/release/redeliver] Error:', err);
+    return res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
 // ─── GET /trigger/policy — Release pause and high-value wallet list (from config/env) ───
 
 router.get('/trigger/policy', (_req, res) => {
@@ -692,8 +798,9 @@ router.post('/trigger/emergency-release', async (req, res) => {
     const { TriggerEvent } = require('../../models/schemas');
     const { submitFallbackAttestation } = require('../../services/attestationSubmitter');
     const { sendCooldownNotification } = require('../../services/email');
+    const cooldownDefaultMinutes = config.cooldown && config.cooldown.defaultMinutes != null ? config.cooldown.defaultMinutes : null;
     const cooldownDefaultHours = (config.cooldown && config.cooldown.defaultHours) != null ? config.cooldown.defaultHours : 168;
-    const cooldownMs = cooldownDefaultHours * 60 * 60 * 1000;
+    const cooldownMs = cooldownDefaultMinutes != null ? cooldownDefaultMinutes * 60 * 1000 : cooldownDefaultHours * 60 * 60 * 1000;
     const ORACLE_AUTHORITY_ID =
       config.oracle?.oracleAuthorityId ||
       crypto.createHash('sha256').update('yault-chainlink-oracle', 'utf8').digest('hex');

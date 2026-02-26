@@ -24,7 +24,7 @@ const TEST_DB_PATH = path.join(__dirname, '..', '..', 'data', 'test-escrow-flow-
 process.env.DATABASE_PATH = TEST_DB_PATH;
 process.env.NODE_ENV = 'test';
 process.env.ADMIN_TOKEN = 'test-admin-token-1234567890';
-process.env.DEFAULT_COOLDOWN_HOURS = '0'; // immediate finalization for tests
+process.env.COOLDOWN_DEFAULT_HOURS = '0'; // immediate finalization for tests
 
 const nacl = require('tweetnacl');
 

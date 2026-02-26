@@ -5,6 +5,11 @@
  * Callback: Optionally validate via platform API, then submit attestation to ReleaseAttestation contract
  *           via EVM Write (source = ORACLE). Only CRE DON/Forwarder can submit oracle attestations.
  *
+ * External data sources (3):
+ *   A) drand beacon — fetch latest round as cryptographic timestamp proof
+ *   B) On-chain vault balance — verify vault holds assets before attesting
+ *   C) Compliance API — external KYC/sanctions screening before release
+ *
  * Chainlink CRE docs: https://docs.chain.link/cre
  * - Triggers: https://docs.chain.link/cre/guides/workflow/using-triggers/overview
  * - EVM Write: https://docs.chain.link/cre/guides/workflow/using-evm-client/onchain-write/overview
@@ -23,6 +28,10 @@ const ConfigSchema = z.object({
   rpcUrl: z.string().url(),
   releaseAttestationAddress: z.string(),
   platformApiBaseUrl: z.string().url().optional(),
+  // --- External data source configs ---
+  drandUrl: z.string().url().optional(),           // A: drand beacon endpoint
+  vaultAddress: z.string().optional(),              // B: ERC-4626 vault for balance check
+  complianceApiUrl: z.string().url().optional(),    // C: External KYC/compliance API
 });
 
 type Config = z.infer<typeof ConfigSchema>;
@@ -72,8 +81,9 @@ const RELEASE_ATTESTATION_ABI = [
 const SOURCE_ORACLE = 0;
 
 // ---------------------------------------------------------------------------
-// Cron-triggered path: e.g. poll platform for "pending oracle" requests, then submit attestation.
-// Satisfies "at least one blockchain + one external API" for hackathon.
+// Cron-triggered path: poll platform for "pending oracle" requests, then run
+// 3 external data source checks (drand beacon, vault balance, compliance API)
+// before submitting attestation via CRE EVM Write.
 // ---------------------------------------------------------------------------
 
 async function onCronTrigger(
@@ -109,6 +119,181 @@ async function onCronTrigger(
   return doSubmitAttestation(runtime, config, input);
 }
 
+// ===========================================================================
+// External Data Source A: drand Beacon (cryptographic timestamp proof)
+// ===========================================================================
+
+const DRAND_DEFAULT_URL = "https://drand.cloudflare.com";
+const DRAND_CHAIN_HASH = "dbd506d6ef76e5f386f41c651dcb808c5bcbd75471cc4eafa3f4df7ad4e4c493";
+
+type DrandBeacon = {
+  round: number;
+  randomness: string;
+  signature: string;
+};
+
+/**
+ * Fetch the latest drand beacon round. Used as a verifiable timestamp proof
+ * embedded into the evidence hash so attestations are anchored to wall-clock time.
+ */
+async function fetchDrandBeacon(
+  runtime: Runtime<Config>,
+  config: Config
+): Promise<DrandBeacon> {
+  const baseUrl = config.drandUrl || DRAND_DEFAULT_URL;
+  const url = `${baseUrl}/${DRAND_CHAIN_HASH}/public/latest`;
+  const res = await runtime.http.get(url);
+  const data = res.body as { round?: number; randomness?: string; signature?: string };
+  if (!data?.round || !data?.randomness) {
+    throw new Error("Invalid drand beacon response");
+  }
+  return {
+    round: data.round,
+    randomness: data.randomness,
+    signature: data.signature || "",
+  };
+}
+
+// ===========================================================================
+// External Data Source B: On-chain Vault Balance Check
+// ===========================================================================
+
+// ERC-4626 totalAssets() selector: 0x01e1d114
+const TOTAL_ASSETS_SELECTOR = "0x01e1d114";
+// Minimum vault balance (in underlying asset smallest unit) to proceed with attestation.
+// Prevents attesting releases on empty vaults.
+const MIN_VAULT_BALANCE = BigInt(1);
+
+type VaultBalanceResult = {
+  totalAssets: bigint;
+  sufficient: boolean;
+};
+
+/**
+ * Query the ERC-4626 vault's totalAssets() to verify it holds funds before attesting.
+ * This is an on-chain read via JSON-RPC (eth_call) — a genuine external data source.
+ */
+async function checkVaultBalance(
+  runtime: Runtime<Config>,
+  config: Config
+): Promise<VaultBalanceResult> {
+  if (!config.vaultAddress) {
+    // No vault configured — skip check, assume sufficient
+    return { totalAssets: BigInt(0), sufficient: true };
+  }
+
+  const rpcUrl = config.rpcUrl;
+  const res = await runtime.http.post(rpcUrl, {
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "eth_call",
+      params: [
+        { to: config.vaultAddress, data: TOTAL_ASSETS_SELECTOR },
+        "latest",
+      ],
+    }),
+    headers: { "Content-Type": "application/json" },
+  });
+
+  const rpcResult = res.body as { result?: string; error?: { message: string } };
+  if (rpcResult.error) {
+    throw new Error(`Vault balance RPC error: ${rpcResult.error.message}`);
+  }
+
+  const totalAssets = BigInt(rpcResult.result || "0x0");
+  return {
+    totalAssets,
+    sufficient: totalAssets >= MIN_VAULT_BALANCE,
+  };
+}
+
+// ===========================================================================
+// External Data Source C: Compliance / KYC Screening API
+// ===========================================================================
+
+type ComplianceResult = {
+  cleared: boolean;
+  provider: string;
+  checkId: string;
+  riskScore: number;
+};
+
+/**
+ * Call an external compliance API to screen the wallet/recipient before release.
+ * In production this would be a real KYC/AML provider (e.g. Chainalysis, Elliptic).
+ * For hackathon, the platform exposes GET /api/compliance/screen as a proxy.
+ */
+async function checkCompliance(
+  runtime: Runtime<Config>,
+  config: Config,
+  walletId: string,
+  recipientIndex: number
+): Promise<ComplianceResult> {
+  if (!config.complianceApiUrl) {
+    // No compliance API configured — default pass
+    return { cleared: true, provider: "none", checkId: "skip", riskScore: 0 };
+  }
+
+  const url = `${config.complianceApiUrl}/screen?wallet_id=${encodeURIComponent(walletId)}&recipient_index=${recipientIndex}`;
+  const res = await runtime.http.get(url);
+  const data = res.body as {
+    cleared?: boolean;
+    provider?: string;
+    check_id?: string;
+    risk_score?: number;
+  };
+
+  return {
+    cleared: data?.cleared ?? true,
+    provider: data?.provider || "unknown",
+    checkId: data?.check_id || "unknown",
+    riskScore: data?.risk_score ?? 0,
+  };
+}
+
+// ===========================================================================
+// Pre-Attestation Gate: run all 3 external checks before submitting
+// ===========================================================================
+
+type PreAttestationContext = {
+  drand: DrandBeacon;
+  vault: VaultBalanceResult;
+  compliance: ComplianceResult;
+};
+
+/**
+ * Run all external data source checks in parallel. Returns aggregated context
+ * used to enrich evidence_hash and gate the attestation.
+ */
+async function runPreAttestationChecks(
+  runtime: Runtime<Config>,
+  config: Config,
+  input: AttestationInput
+): Promise<PreAttestationContext> {
+  const [drand, vault, compliance] = await Promise.all([
+    fetchDrandBeacon(runtime, config),
+    checkVaultBalance(runtime, config),
+    checkCompliance(runtime, config, input.wallet_id, input.recipient_index),
+  ]);
+
+  // Gate: vault must hold assets
+  if (!vault.sufficient) {
+    throw new Error(
+      `Vault has insufficient assets (totalAssets=${vault.totalAssets.toString()}). Attestation aborted.`
+    );
+  }
+
+  // Gate: compliance must be cleared
+  if (!compliance.cleared) {
+    throw new Error(
+      `Compliance check failed (provider=${compliance.provider}, riskScore=${compliance.riskScore}). Attestation aborted.`
+    );
+  }
+
+  return { drand, vault, compliance };
+}
+
 // ---------------------------------------------------------------------------
 // Shared: build calldata and submit to chain via CRE EVM Write (report + writeReport).
 // ---------------------------------------------------------------------------
@@ -139,7 +324,12 @@ async function doSubmitAttestation(
   config: Config,
   input: AttestationInput
 ): Promise<string> {
-  const { encodeFunctionData } = await import("viem");
+  const { encodeFunctionData, keccak256: viemKeccak256, toHex } = await import("viem");
+
+  // -----------------------------------------------------------------------
+  // Step 1: Run all 3 external data source checks (drand + vault + compliance)
+  // -----------------------------------------------------------------------
+  const ctx = await runPreAttestationChecks(runtime, config, input);
 
   // #SUGGESTION: Map decision string to contract uint8 and validate.
   const decisionValue = DECISION_MAP[input.decision];
@@ -149,9 +339,28 @@ async function doSubmitAttestation(
 
   const walletIdHash = await keccak256WalletId(input.wallet_id);
   const reasonCodeHash = await reasonCodeToBytes32(input.reason_code);
-  const evidenceHash = input.evidence_hash.startsWith("0x")
-    ? (input.evidence_hash as `0x${string}`)
-    : (`0x${input.evidence_hash}` as `0x${string}`);
+
+  // -----------------------------------------------------------------------
+  // Step 2: Enrich evidence hash with external data source attestation context.
+  //   Final evidence = keccak256(original_evidence || drand_round || drand_randomness
+  //                               || vault_totalAssets || compliance_checkId)
+  //   This anchors the attestation to a verifiable drand timestamp, on-chain vault
+  //   state, and compliance screening result — all from independent external sources.
+  // -----------------------------------------------------------------------
+  const rawEvidence = input.evidence_hash.startsWith("0x")
+    ? input.evidence_hash
+    : `0x${input.evidence_hash}`;
+
+  const enrichedEvidencePreimage = [
+    rawEvidence,
+    toHex(BigInt(ctx.drand.round), { size: 32 }),
+    `0x${ctx.drand.randomness}`,
+    toHex(ctx.vault.totalAssets, { size: 32 }),
+    toHex(new TextEncoder().encode(ctx.compliance.checkId)),
+  ].join("");
+
+  // keccak256 of concatenated preimage gives a single bytes32 evidence hash
+  const enrichedEvidence = viemKeccak256(enrichedEvidencePreimage as `0x${string}`);
 
   const calldata = encodeFunctionData({
     abi: RELEASE_ATTESTATION_ABI,
@@ -162,7 +371,7 @@ async function doSubmitAttestation(
       BigInt(input.recipient_index),
       decisionValue,
       reasonCodeHash,
-      evidenceHash as `0x${string}`,
+      enrichedEvidence,
     ],
   });
 

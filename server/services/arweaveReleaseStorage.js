@@ -194,6 +194,47 @@ async function uploadPayloadsAndManifest(walletId, authorityId, packages) {
   return { manifest_arweave_tx_id: manifestTxId, payload_tx_ids: Object.values(manifest) };
 }
 
+/**
+ * Replace a single path's payload (e.g. after fixing wrong xidentity encryption).
+ * Fetches current manifest, uploads new payload for the given recipient_index, updates manifest, re-uploads manifest.
+ * Caller must update registry and binding with the returned new manifest_arweave_tx_id.
+ *
+ * @param {string} walletId
+ * @param {string} authorityId
+ * @param {number} recipientIndex
+ * @param {object} rwaUploadBody - Same shape as in distribute (data, leafOwner, ...)
+ * @param {string} currentManifestTxId - Current manifest Arweave tx id (from binding or registry)
+ * @returns {Promise<{ manifest_arweave_tx_id: string | null, error?: string }>}
+ */
+async function replacePathPayload(walletId, authorityId, recipientIndex, rwaUploadBody, currentManifestTxId) {
+  if (!currentManifestTxId || typeof rwaUploadBody !== 'object' || !rwaUploadBody.data || !rwaUploadBody.leafOwner) {
+    return { manifest_arweave_tx_id: null, error: 'currentManifestTxId and rwa_upload_body (data, leafOwner) are required' };
+  }
+  const text = await fetchFromArweave(currentManifestTxId);
+  if (!text) {
+    return { manifest_arweave_tx_id: null, error: 'Could not fetch current manifest from Arweave' };
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(text);
+  } catch (_) {
+    return { manifest_arweave_tx_id: null, error: 'Invalid current manifest JSON' };
+  }
+  const key = manifestKey(walletId, authorityId, recipientIndex);
+  const dataStr = JSON.stringify(rwaUploadBody);
+  const newPayloadTxId = await uploadToArweave(dataStr, { type: 'payload' });
+  if (!newPayloadTxId) {
+    return { manifest_arweave_tx_id: null, error: 'Arweave payload upload failed for recipient index ' + recipientIndex };
+  }
+  manifest[key] = newPayloadTxId;
+  const manifestStr = JSON.stringify(manifest);
+  const newManifestTxId = await uploadToArweave(manifestStr, { type: 'manifest' });
+  if (!newManifestTxId) {
+    return { manifest_arweave_tx_id: null, error: 'Arweave manifest upload failed' };
+  }
+  return { manifest_arweave_tx_id: newManifestTxId };
+}
+
 // ---------------------------------------------------------------------------
 // Global registry: H(wallet_id, authority_id) → manifest_tx_id (so mapping survives DB loss)
 // ---------------------------------------------------------------------------
@@ -283,6 +324,7 @@ module.exports = {
   uploadToArweave,
   fetchFromArweave,
   uploadPayloadsAndManifest,
+  replacePathPayload,
   getRegistryTxId,
   setRegistryTxId,
   updateRegistryAndSave,

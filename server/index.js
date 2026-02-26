@@ -58,6 +58,8 @@
  *   GET    /api/invite/validate?token=  - Validate invite token (public)
  *   POST   /api/invite/accept          - Accept invite, become sub-account (auth)
  *
+ *   GET    /api/compliance/screen      - Compliance screening (CRE external data source)
+ *
  *   GET    /health                      - Health check
  */
 
@@ -70,7 +72,7 @@ const crypto = require('crypto');
 const express = require('express');
 const path = require('path');
 const rateLimit = require('express-rate-limit');
-const { generateChallenge, verifySignature, createClientSessionToken, authMiddleware, dualAuthMiddleware } = require('./middleware/auth');
+const { generateChallenge, verifySignature, createClientSessionToken, authMiddleware, dualAuthMiddleware, authorityAuthMiddleware } = require('./middleware/auth');
 
 // ---------------------------------------------------------------------------
 // API routers
@@ -109,9 +111,11 @@ const walletPlan = require('./api/wallet-plan');
 const releaseConfigure = require('./api/release/configure');
 const releaseDistribute = require('./api/release/distribute');
 const releaseDeliverFromRegistry = require('./api/release/deliver-from-registry');
+const releaseRedeliverCandidates = require('./api/release/redeliver-candidates');
 const releaseOracleAuthority = require('./api/release/oracle-authority');
 const releaseStatus = require('./api/release/status');
 const releaseFactors = require('./api/release/release-factors');
+const releaseReplacePathPayload = require('./api/release/replace-path-payload');
 const claimLookup = require('./api/claim/lookup');
 const pathClaimRouter = require('./api/path-claim');
 
@@ -376,6 +380,10 @@ app.use('/api/binding', bindingCreate);    // handles POST /
 app.use('/api/binding', bindingDelete);    // handles DELETE /:id
 app.use('/api/binding', bindingList);      // handles GET /
 
+// Compliance: CRE workflow calls GET /api/compliance/screen as external data source (KYC/AML screening)
+const complianceScreen = require('./api/compliance/screen');
+app.use('/api/compliance', complianceScreen);
+
 // Oracle: CRE workflow polls GET /api/oracle/pending; platform uses GET /api/trigger/attestation, POST /api/trigger/from-oracle
 const triggerOracle = require('./api/trigger/oracle');
 app.use('/api/oracle', triggerOracle.oraclePendingRouter); // GET /pending
@@ -430,10 +438,12 @@ app.use('/api/trial/request', trialRequest);
 app.use('/api/release/configure', dualAuthMiddleware, releaseConfigure);
 app.use('/api/release/prepare-distribute', dualAuthMiddleware, releasePrepareDistribute);
 app.use('/api/release/distribute', dualAuthMiddleware, releaseDistribute);
-app.use('/api/release/deliver-from-registry', dualAuthMiddleware, releaseDeliverFromRegistry);
+app.use('/api/release/deliver-from-registry', authorityAuthMiddleware, releaseDeliverFromRegistry);
+app.use('/api/release/redeliver-candidates', authorityAuthMiddleware, releaseRedeliverCandidates);
 app.use('/api/release/oracle-authority', dualAuthMiddleware, releaseOracleAuthority);
 app.use('/api/release/status', dualAuthMiddleware, releaseStatus);
 app.use('/api/release/release-factors', dualAuthMiddleware, releaseFactors);
+app.use('/api/release/replace-path-payload', dualAuthMiddleware, releaseReplacePathPayload);
 
 // Claim lookup (recipient retrieves released factors — requires auth)
 app.use('/api/claim', dualAuthMiddleware, claimLookup);

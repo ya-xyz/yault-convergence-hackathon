@@ -214,6 +214,10 @@ class WalletConnector {
     this._connected = true;
     this.authResult = result;
     this.sessionToken = result.session_token || null; // After login, data APIs use this token without requiring a second signature
+    // Persist session token so it survives page refresh within the same tab
+    if (this.sessionToken) {
+      try { sessionStorage.setItem('yault_session_token', this.sessionToken); } catch (_) {}
+    }
     // On first login, fetch all chain addresses supported by Yallet for backend storage
     let allAddresses = null;
     try {
@@ -230,6 +234,7 @@ class WalletConnector {
     this.allAddresses = null;
     this.authResult = null;
     this.sessionToken = null;
+    try { sessionStorage.removeItem('yault_session_token'); } catch (_) {}
     this._yalletProvider = null;
     this._connected = false;
     this._connecting = false;
@@ -416,6 +421,40 @@ class WalletConnector {
     container.querySelectorAll('[data-action="wallet-disconnect"]').forEach((btn) => {
       btn.addEventListener('click', () => this.disconnect());
     });
+
+    // If Yallet wasn't detected at render time, poll briefly (extension may inject after page load)
+    if (!WalletConnector.detectYallet()) {
+      this._startYalletDetectionPoll(container);
+    }
+  }
+
+  /**
+   * Poll for window.yallet for a few seconds after load; if it appears, remove "Yallet not detected" and update button.
+   * @param {HTMLElement} container
+   */
+  _startYalletDetectionPoll(container) {
+    const maxWaitMs = 2500;
+    const intervalMs = 200;
+    let elapsed = 0;
+    const t = setInterval(() => {
+      if (!container.isConnected) {
+        clearInterval(t);
+        return;
+      }
+      elapsed += intervalMs;
+      if (elapsed > maxWaitMs) {
+        clearInterval(t);
+        return;
+      }
+      if (!window.yallet) return;
+      clearInterval(t);
+      const alertEl = container.querySelector('.wallet-login .alert.alert-info');
+      if (alertEl && alertEl.textContent.indexOf('Yallet not detected') !== -1) {
+        alertEl.remove();
+      }
+      const small = container.querySelector('.wallet-login .wallet-btn[data-wallet="yallet"] .wallet-label small');
+      if (small) small.textContent = 'Ready to connect';
+    }, intervalMs);
   }
 }
 

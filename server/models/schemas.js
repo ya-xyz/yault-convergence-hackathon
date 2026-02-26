@@ -303,8 +303,8 @@ class ReleaseDecision {
   /** Default cooldown period before a release decision takes effect (ms).
    *  Prefer config.cooldown.defaultHours when available (see getDefaultCooldownMs()). */
   static DEFAULT_COOLDOWN_MS = (
-    process.env.DEFAULT_COOLDOWN_HOURS !== undefined
-      ? parseFloat(process.env.DEFAULT_COOLDOWN_HOURS) * 60 * 60 * 1000
+    process.env.COOLDOWN_DEFAULT_HOURS !== undefined && process.env.COOLDOWN_DEFAULT_HOURS !== ''
+      ? parseFloat(process.env.COOLDOWN_DEFAULT_HOURS) * 60 * 60 * 1000
       : 168 * 60 * 60 * 1000 // 168 hours = 1 week (fallback when config not used)
   );
 
@@ -363,7 +363,9 @@ class ReleaseDecision {
     let defaultCooldownMs = ReleaseDecision.DEFAULT_COOLDOWN_MS;
     try {
       const config = require('../config');
-      if (config.cooldown && config.cooldown.defaultHours != null) {
+      if (config.cooldown && config.cooldown.defaultMinutes != null) {
+        defaultCooldownMs = config.cooldown.defaultMinutes * 60 * 1000;
+      } else if (config.cooldown && config.cooldown.defaultHours != null) {
         defaultCooldownMs = config.cooldown.defaultHours * 60 * 60 * 1000;
       }
     } catch (_) {}

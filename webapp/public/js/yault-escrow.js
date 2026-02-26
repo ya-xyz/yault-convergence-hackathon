@@ -344,7 +344,8 @@
   async function reclaimAllFromEscrow(provider, cfg, ownerAddress, recipientIndices, onProgress) {
     const ethers = _ethers();
     const progress = onProgress || function () {};
-    const txHashes = [];
+    let txHashes = [];
+    let reclaimedCount = 0;
 
     try {
       const wHash = walletIdHash(ownerAddress);
@@ -366,23 +367,31 @@
         return { success: true, txHashes: [], reclaimedCount: 0, error: 'No remaining shares to reclaim' };
       }
 
-      // 2. Send reclaim tx for each recipient index with remaining shares
-      let reclaimedCount = 0;
+      // 2. Send reclaim tx per recipient; skip on revert (e.g. already RELEASE attested) so others can still be reclaimed
+      const errors = [];
       for (let i = 0; i < toReclaim.length; i++) {
         const { index, remaining } = toReclaim[i];
         progress(i + 1, toReclaim.length + 1, 'Reclaiming from recipient #' + index + '...');
-        const tx = buildReclaimTx(cfg.escrowAddress, wHash, index, remaining.toString(), cfg.chainId);
-        tx.from = ownerAddress;
-        const hash = await provider.request({ method: 'eth_sendTransaction', params: [tx] });
-        txHashes.push(hash);
-        await _waitForTx(cfg.rpcUrl, hash);
-        reclaimedCount++;
+        try {
+          const tx = buildReclaimTx(cfg.escrowAddress, wHash, index, remaining.toString(), cfg.chainId);
+          tx.from = ownerAddress;
+          const hash = await provider.request({ method: 'eth_sendTransaction', params: [tx] });
+          txHashes.push(hash);
+          await _waitForTx(cfg.rpcUrl, hash);
+          reclaimedCount++;
+        } catch (perErr) {
+          errors.push('recipient #' + index + ': ' + (perErr.message || perErr));
+          // continue to next recipient so one revert (e.g. AttestationAlreadyReleased) does not block the rest
+        }
       }
 
       progress(toReclaim.length + 1, toReclaim.length + 1, 'Reclaim complete!');
-      return { success: true, txHashes, reclaimedCount };
+      if (reclaimedCount === 0 && errors.length > 0) {
+        return { success: false, txHashes, reclaimedCount: 0, error: errors.join('; ') };
+      }
+      return { success: true, txHashes, reclaimedCount, partialErrors: errors.length > 0 ? errors : undefined };
     } catch (err) {
-      return { success: false, txHashes, reclaimedCount: 0, error: err.message || String(err) };
+      return { success: false, txHashes: [], reclaimedCount: 0, error: err.message || String(err) };
     }
   }
 

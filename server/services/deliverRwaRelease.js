@@ -53,9 +53,10 @@ async function recordDelivery(walletId, authorityId, recipientIndex, result) {
  *
  * @param {object} binding - Full binding record from DB (may have manifest_arweave_tx_id or encrypted_packages).
  * @param {number} recipientIndex - Path/recipient index that was released.
+ * @param {{ forceRedeliver?: boolean }} [opts] - If forceRedeliver is true, attempt delivery even when log says delivered (redelivery).
  * @returns {Promise<{ delivered: boolean, txId?: string, error?: string }>}
  */
-async function deliverRwaPackageForRecipient(binding, recipientIndex) {
+async function deliverRwaPackageForRecipient(binding, recipientIndex, opts = {}) {
   const apiUrl = config.rwa?.uploadAndMintApiUrl;
   if (!apiUrl || !apiUrl.trim()) {
     const result = { delivered: false, error: 'RWA upload-and-mint API URL not configured' };
@@ -63,10 +64,10 @@ async function deliverRwaPackageForRecipient(binding, recipientIndex) {
     return result;
   }
 
-  // Skip if already delivered
+  // Skip if already delivered (unless force redeliver)
   const logId = deliveryLogId(binding.wallet_id, binding.authority_id, recipientIndex);
   const existingLog = await db.rwaDeliveryLog.findById(logId).catch(() => null);
-  if (existingLog?.status === 'delivered') {
+  if (existingLog?.status === 'delivered' && !opts.forceRedeliver) {
     return { delivered: true, txId: existingLog.txId };
   }
 
@@ -166,20 +167,23 @@ async function deliverRwaPackageForRecipient(binding, recipientIndex) {
 
 /**
  * Deliver using only the global registry (no binding from DB). Use when DB is lost but RWA_RELEASE_REGISTRY_ARWEAVE_TX_ID is set.
+ * Pass opts.forceRedeliver to re-send even when log says delivered (redelivery).
  *
  * @param {string} walletId
  * @param {string} authorityId
  * @param {number} recipientIndex
+ * @param {{ forceRedeliver?: boolean }} [opts]
  * @returns {Promise<{ delivered: boolean, txId?: string, error?: string }>}
  */
-async function deliverByRegistry(walletId, authorityId, recipientIndex) {
+async function deliverByRegistry(walletId, authorityId, recipientIndex, opts = {}) {
   const manifestTxId = await getManifestTxIdFromRegistry(walletId, authorityId);
   if (!manifestTxId) {
     return { delivered: false, error: 'No manifest in registry for this wallet and authority' };
   }
   return deliverRwaPackageForRecipient(
     { wallet_id: walletId, authority_id: authorityId, manifest_arweave_tx_id: manifestTxId },
-    recipientIndex
+    recipientIndex,
+    opts
   );
 }
 
@@ -218,8 +222,29 @@ async function retryPendingDeliveries() {
   return { retried, succeeded, failed };
 }
 
+/**
+ * Record a delivery failure (e.g. when deliverRwaPackageForRecipient throws).
+ * Writes to rwaDeliveryLog so the scheduler can retry; does not throw.
+ *
+ * @param {string} walletId
+ * @param {string} authorityId
+ * @param {number} recipientIndex
+ * @param {string} errorMessage
+ */
+async function recordDeliveryFailure(walletId, authorityId, recipientIndex, errorMessage) {
+  try {
+    await recordDelivery(walletId, authorityId, recipientIndex, {
+      delivered: false,
+      error: errorMessage || 'Delivery threw (unexpected exception)',
+    });
+  } catch (err) {
+    console.error('[deliverRwaRelease] recordDeliveryFailure failed:', err?.message);
+  }
+}
+
 module.exports = {
   deliverRwaPackageForRecipient,
   deliverByRegistry,
   retryPendingDeliveries,
+  recordDeliveryFailure,
 };

@@ -37,11 +37,13 @@ const state = {
   error: null,
   userDetail: null,       // { address, kyc, bindings, triggers } when viewing a user
   selectedAuthority: null, // full authority object when viewing an authority
+  redeliverCandidates: [], // flat list for Redeliver button index
+  redeliverPlans: [],      // [{ wallet_id, authority_id, trigger_id, recipients: [{ recipient_index, delivery_status, name }] }]
 };
 
 let wallet = null; // WalletConnector instance
 
-const PAGES = ['dashboard', 'users', 'authorities', 'triggers', 'kyc', 'revenue', 'vault', 'campaigns'];
+const PAGES = ['dashboard', 'users', 'authorities', 'triggers', 'redeliver', 'kyc', 'revenue', 'vault', 'campaigns'];
 
 function esc(str) {
   if (!str) return '';
@@ -128,7 +130,7 @@ function renderLogin() {
 // ─── Nav ───
 
 function renderNav() {
-  var labels = { dashboard: T('dashboard'), users: T('users'), authorities: T('authorities'), triggers: T('triggers'), kyc: T('kyc'), revenue: T('revenue'), vault: 'Vault', campaigns: 'Campaigns' };
+  var labels = { dashboard: T('dashboard'), users: T('users'), authorities: T('authorities'), triggers: T('triggers'), redeliver: 'Redeliver NFT', kyc: T('kyc'), revenue: T('revenue'), vault: 'Vault', campaigns: 'Campaigns' };
   return `<div class="nav">${PAGES.map(p =>
     `<div class="nav-item ${state.page === p ? 'active' : ''}" data-page="${p}">${labels[p]}</div>`
   ).join('')}</div>`;
@@ -398,6 +400,75 @@ function renderTriggers() {
   `;
 }
 
+// ─── Redeliver NFT (admin: one card per plan) ───
+
+function renderRedeliver() {
+  const plans = state.redeliverPlans || [];
+  let candidateIndex = 0;
+
+  const cards = plans.map((plan) => {
+    const walletShort = (plan.wallet_id || '').substring(0, 14) + (plan.wallet_id && plan.wallet_id.length > 14 ? '...' : '');
+    const authorityDisplay = plan.authority_id != null && String(plan.authority_id).trim() !== ''
+      ? (plan.authority_id.substring(0, 10) + (plan.authority_id.length > 10 ? '...' : ''))
+      : '—';
+
+    const rows = (plan.recipients || []).map((rec) => {
+      const status = rec.delivery_status || '—';
+      const statusClass = status === 'delivered' ? 'badge-active' : (status === 'failed' || status === 'pending' ? 'badge-pending' : 'badge-muted');
+      const txShort = rec.delivery_tx_id ? (rec.delivery_tx_id.substring(0, 12) + (rec.delivery_tx_id.length > 12 ? '...' : '')) : '—';
+      const idx = candidateIndex++;
+      return `
+        <tr>
+          <td>${esc(rec.name || 'Recipient ' + rec.recipient_index)}</td>
+          <td><span class="badge ${statusClass}">${esc(status)}</span></td>
+          <td style="font-size:11px;color:var(--text-muted);" class="mono" title="${esc(rec.delivery_tx_id || '')}">${esc(txShort)}</td>
+          <td>
+            <button class="btn btn-sm btn-primary" data-action="redeliver-one" data-candidate-index="${idx}">Redeliver</button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    return `
+      <div class="card" style="margin-bottom:16px;">
+        <div class="card-header" style="border-bottom:1px solid var(--border);padding-bottom:8px;margin-bottom:12px;">
+          <div style="font-weight:600;">Wallet</div>
+          <div class="mono" style="font-size:13px;color:var(--text-secondary);">${esc(walletShort)}</div>
+          <div style="font-weight:600;margin-top:8px;">Authority</div>
+          <div class="mono" style="font-size:13px;color:var(--text-secondary);">${esc(authorityDisplay)}</div>
+        </div>
+        <div style="overflow-x:auto;">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Recipient</th>
+                <th>Delivery status</th>
+                <th>Last tx</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <h2>Redeliver RWA NFT</h2>
+    <p style="color:var(--text-secondary);margin-bottom:16px;font-size:14px;">
+      One card per released plan. Use when a beneficiary did not receive the RWA credential (e.g. plan created without an authority). Click Redeliver to re-send the same payload; no plan regeneration or re-signing needed.
+    </p>
+    <p style="font-size:12px;color:var(--text-muted);margin-bottom:16px;">
+      After each Redeliver, the result and tx are shown below. If only one recipient receives: verify the payload’s leafOwner matches that recipient’s wallet and check whether the RWA upload-and-mint API treats duplicate sends as no-op.
+    </p>
+    ${plans.length === 0
+    ? '<div class="card"><p style="color:var(--text-muted);">No released plans with recipients. Release a trigger first; then they appear here.</p></div>'
+    : cards}
+    <p id="redeliverResult" style="margin-top:12px;font-size:13px;display:none;"></p>
+  `;
+}
+
 // ─── KYC ───
 
 function renderKYC() {
@@ -652,6 +723,7 @@ function render() {
     case 'users': content = renderUsers(); break;
     case 'authorities': content = renderAuthorities(); break;
     case 'triggers': content = renderTriggers(); break;
+    case 'redeliver': content = renderRedeliver(); break;
     case 'kyc': content = renderKYC(); break;
     case 'revenue': content = renderRevenue(); break;
     case 'vault': content = renderVault(); break;
@@ -723,6 +795,23 @@ async function loadPage() {
       case 'campaigns':
         state.campaigns = await api('/admin/campaigns');
         break;
+      case 'redeliver': {
+        const data = await api('/admin/release/redeliver-candidates');
+        state.redeliverPlans = Array.isArray(data.plans) ? data.plans : [];
+        state.redeliverCandidates = [];
+        for (const plan of state.redeliverPlans) {
+          for (const rec of plan.recipients || []) {
+            state.redeliverCandidates.push({
+              wallet_id: plan.wallet_id,
+              authority_id: plan.authority_id == null ? '' : plan.authority_id,
+              recipient_index: rec.recipient_index,
+              delivery_status: rec.delivery_status,
+              trigger_id: plan.trigger_id,
+            });
+          }
+        }
+        break;
+      }
     }
   } catch (err) {
     state.error = 'Failed to load: ' + err.message;
@@ -1046,6 +1135,54 @@ function attachEvents() {
         document.getElementById('emergencyEvidenceHash').value = '';
         loadPage();
       } catch (err) { showToast('Failed: ' + err.message, 'error'); }
+    });
+  });
+
+  // Redeliver NFT (one row)
+  app.querySelectorAll('[data-action="redeliver-one"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const i = parseInt(btn.dataset.candidateIndex, 10);
+      const c = state.redeliverCandidates && state.redeliverCandidates[i];
+      if (!c) return;
+      const resultEl = document.getElementById('redeliverResult');
+      if (resultEl) { resultEl.style.display = 'none'; resultEl.textContent = ''; }
+      btn.disabled = true;
+      try {
+        const data = await apiPost('/admin/release/redeliver', {
+          wallet_id: c.wallet_id,
+          authority_id: c.authority_id,
+          recipient_index: c.recipient_index,
+          force_redeliver: true,
+        });
+        if (resultEl) {
+          resultEl.style.display = 'block';
+          if (data.delivered) {
+            resultEl.style.color = 'var(--success, #28a745)';
+            resultEl.textContent = 'Redelivered. Tx: ' + (data.txId || '—');
+            resultEl.title = data.txId || '';
+            showToast('Redeliver succeeded', 'success');
+            state.page = 'redeliver';
+            loadPage();
+          } else {
+            resultEl.style.color = 'var(--danger, #dc3545)';
+            resultEl.textContent = 'Failed: ' + (data.error || 'Redeliver failed');
+            resultEl.title = '';
+            showToast(data.error || 'Redeliver failed', 'error');
+          }
+        } else {
+          if (data.delivered) { showToast('Redeliver succeeded', 'success'); state.page = 'redeliver'; loadPage(); }
+          else showToast(data.error || 'Redeliver failed', 'error');
+        }
+      } catch (err) {
+        showToast(err.message || 'Redeliver request failed', 'error');
+        if (resultEl) {
+          resultEl.style.display = 'block';
+          resultEl.style.color = 'var(--danger, #dc3545)';
+          resultEl.textContent = 'Error: ' + (err.message || 'Request failed');
+        }
+      } finally {
+        btn.disabled = false;
+      }
     });
   });
 

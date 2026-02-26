@@ -38,11 +38,12 @@ const state = {
   triggers: [],
   releaseLinks: [], // AdminFactor release links sent by clients (plan creation)
   revenue: { total: 0, withdrawn: 0, pending: 0, records: [] },
+  redeliverCandidates: [], // { wallet_id, recipient_index, delivery_status, trigger_id }[]
 };
 
 // ─── Navigation ───
 
-const PAGES = ['overview', 'triggers', 'initiate', 'revenue', 'profile'];
+const PAGES = ['overview', 'triggers', 'redeliver', 'initiate', 'revenue', 'profile'];
 
 // Jurisdiction options (same as Asset plan search authority)
 const JURISDICTION_OPTIONS = [
@@ -187,6 +188,20 @@ async function loadRevenue() {
     const resp = await apiFetch(`${API_BASE}/revenue/authority/${encodeURIComponent(state.auth.authority_id)}`);
     if (resp.ok) state.revenue = await resp.json();
   } catch { /* non-fatal */ }
+}
+
+async function loadRedeliverCandidates() {
+  try {
+    const resp = await apiFetch(`${API_BASE}/release/redeliver-candidates`);
+    if (resp.ok) {
+      const data = await resp.json();
+      state.redeliverCandidates = Array.isArray(data.candidates) ? data.candidates : [];
+    } else {
+      state.redeliverCandidates = [];
+    }
+  } catch {
+    state.redeliverCandidates = [];
+  }
 }
 
 // ─── Auth Helper ───
@@ -356,7 +371,7 @@ function renderLogin() {
 function renderNav() {
   var items = PAGES.map(function (p) {
     var label = T(p);
-    if (label === p) label = p.charAt(0).toUpperCase() + p.slice(1);
+    if (label === p) label = (p === 'redeliver' ? 'Redeliver NFT' : p.charAt(0).toUpperCase() + p.slice(1));
     const pendingBadge = p === 'triggers' && state.triggers.length > 0
       ? ` <span class="badge badge-pending">${state.triggers.length}</span>`
       : '';
@@ -572,6 +587,51 @@ function renderTriggers() {
   `;
 }
 
+function renderRedeliver() {
+  const list = state.redeliverCandidates || [];
+  const rows = list.map((c, i) => {
+    const status = c.delivery_status || '—';
+    const statusClass = status === 'delivered' ? 'badge-active' : (status === 'failed' || status === 'pending' ? 'badge-pending' : 'badge-muted');
+    return `
+      <tr>
+        <td>${esc((c.wallet_id || '').substring(0, 14))}...</td>
+        <td>Recipient ${c.recipient_index}</td>
+        <td><span class="badge ${statusClass}">${esc(status)}</span></td>
+        <td>
+          <button class="btn btn-sm btn-primary" data-action="redeliver-one" data-candidate-index="${i}">Redeliver</button>
+        </td>
+      </tr>
+    `;
+  }).join('');
+
+  return `
+    <h2>Redeliver RWA NFT</h2>
+    <div class="card">
+      <p style="color:var(--text-secondary);margin-bottom:16px;font-size:14px;">
+        For released plans where a beneficiary did not receive the RWA credential (NFT), select the row below and click Redeliver. The same payload is re-sent; no need to regenerate the plan or re-sign.
+      </p>
+      ${list.length === 0
+    ? '<p style="color:var(--text-muted);">No released plans with recipients for your authority. Release a trigger first; then recipients appear here.</p>'
+    : `
+    <div style="overflow-x:auto;">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Client (wallet)</th>
+            <th>Recipient</th>
+            <th>Delivery status</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    `}
+      <p id="redeliverResult" style="margin-top:12px;font-size:13px;display:none;"></p>
+    </div>
+  `;
+}
+
 function renderInitiate() {
   return `
     <h2>Initiate Asset Release</h2>
@@ -746,6 +806,7 @@ function render() {
   switch (state.page) {
     case 'overview': content = renderOverview(); break;
     case 'triggers': content = renderTriggers(); break;
+    case 'redeliver': content = renderRedeliver(); break;
     case 'initiate': content = renderInitiate(); break;
     case 'revenue': content = renderRevenue(); break;
     case 'profile': content = renderProfile(); break;
@@ -782,6 +843,7 @@ function attachAppEvents() {
       const page = el.dataset.page;
       if (page === 'profile') await loadProfile();
       if (page === 'revenue') await loadRevenue();
+      if (page === 'redeliver') await loadRedeliverCandidates();
       navigate(page);
     });
   });
@@ -810,6 +872,55 @@ function attachAppEvents() {
       }
 
       await submitDecision(trigger, decision, evidence, reason);
+    });
+  });
+
+  // Redeliver RWA NFT (one row)
+  app.querySelectorAll('[data-action="redeliver-one"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const i = parseInt(btn.dataset.candidateIndex, 10);
+      const c = state.redeliverCandidates && state.redeliverCandidates[i];
+      if (!c) return;
+      const walletId = c.wallet_id;
+      const recipientIndex = c.recipient_index;
+      if (!walletId || recipientIndex == null) return;
+      const resultEl = document.getElementById('redeliverResult');
+      if (resultEl) { resultEl.style.display = 'none'; resultEl.textContent = ''; }
+      btn.disabled = true;
+      try {
+        const resp = await apiFetch(`${API_BASE}/release/deliver-from-registry`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            wallet_id: walletId,
+            authority_id: state.auth?.authority_id,
+            recipient_index: recipientIndex,
+            force_redeliver: true,
+          }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (resp.ok && data.delivered) {
+          showToast('Redeliver succeeded', 'success');
+          await loadRedeliverCandidates();
+          render();
+        } else {
+          showToast(data.error || data.detail || 'Redeliver failed', 'error');
+          if (resultEl) {
+            resultEl.style.display = 'block';
+            resultEl.style.color = 'var(--danger, #dc3545)';
+            resultEl.textContent = data.error || data.detail || (resp.statusText || 'Redeliver failed');
+          }
+        }
+      } catch (err) {
+        showToast(err.message || 'Redeliver request failed', 'error');
+        if (resultEl) {
+          resultEl.style.display = 'block';
+          resultEl.style.color = 'var(--danger, #dc3545)';
+          resultEl.textContent = err.message || 'Request failed';
+        }
+      } finally {
+        btn.disabled = false;
+      }
     });
   });
 
