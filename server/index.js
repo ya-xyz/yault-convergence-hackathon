@@ -240,6 +240,50 @@ const fromOracleLimiter = rateLimit({
 });
 app.use('/api/trigger/from-oracle', fromOracleLimiter);
 
+// Limit by-mnemonic-hash lookups (reduces brute-force enumeration of 64-char hash)
+const mnemonicHashLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many lookups, please try again later.' },
+  skip: () => process.env.NODE_ENV === 'test',
+});
+app.use('/api/claim/by-mnemonic-hash', mnemonicHashLimiter);
+
+// Stricter limit on release configure/distribute and invite accept
+const releaseLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please try again later.' },
+  skip: () => process.env.NODE_ENV === 'test',
+});
+app.use('/api/release/configure', releaseLimiter);
+app.use('/api/release/distribute', releaseLimiter);
+app.use('/api/release/prepare-distribute', releaseLimiter);
+
+const inviteAcceptLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many invite attempts, please try again later.' },
+  skip: () => process.env.NODE_ENV === 'test',
+});
+app.use('/api/invite/accept', inviteAcceptLimiter);
+
+const adminSessionLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many admin session attempts, please try again later.' },
+  skip: () => process.env.NODE_ENV === 'test',
+});
+app.use('/api/admin/session', adminSessionLimiter);
+
 // ---------------------------------------------------------------------------
 // Auth endpoints (challenge-response, not routers)
 // ---------------------------------------------------------------------------
@@ -448,8 +492,8 @@ app.use('/api/release/replace-path-payload', dualAuthMiddleware, releaseReplaceP
 // Claim lookup (recipient retrieves released factors — requires auth)
 app.use('/api/claim', dualAuthMiddleware, claimLookup);
 
-// Path claim contract (YaultPathClaim): config, remaining, claim-params for frontend
-app.use('/api/path-claim', pathClaimRouter);
+// Path claim contract (YaultPathClaim): config, remaining, claim-params for frontend (auth required to reduce scraping)
+app.use('/api/path-claim', dualAuthMiddleware, pathClaimRouter);
 
 // Chains configuration (public — no auth required)
 const chainsConfig = require('./config/chains');

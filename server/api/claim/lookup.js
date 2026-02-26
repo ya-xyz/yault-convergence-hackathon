@@ -317,9 +317,13 @@ router.get('/escrow-config', (req, res) => {
  *
  * Query VaultShareEscrow for a recipient's claimable balance.
  * Returns allocated shares, remaining shares, and underlying asset values.
+ * Security: caller must be plan owner or an authorized recipient for this wallet.
  */
 router.get('/escrow-balance', async (req, res) => {
   try {
+    if (!req.auth?.pubkey) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
     let walletId = (req.query.walletId || req.query.wallet_id || '').trim();
     const recipientIndex = parseInt(req.query.recipientIndex || req.query.recipient_index, 10);
     if (!walletId) {
@@ -327,6 +331,18 @@ router.get('/escrow-balance', async (req, res) => {
     }
     if (isNaN(recipientIndex) || recipientIndex < 0) {
       return res.status(400).json({ error: 'recipientIndex must be a non-negative integer' });
+    }
+    // Resolve path config for auth (try with and without 0x)
+    let pathConfigs = await db.recipientPaths.findByWallet(walletId);
+    if (pathConfigs.length === 0) {
+      pathConfigs = await db.recipientPaths.findByWallet(normalizeAddr(walletId));
+    }
+    const paths = pathConfigs.length > 0 ? pathConfigs[0].paths || [] : [];
+    if (!isAuthorized(req.auth.pubkey, walletId, paths)) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        detail: 'You can only view escrow balance for your own plan or as an authorized recipient',
+      });
     }
     // Ensure 0x prefix for EVM addresses — plan_wallet_id may be stored without it,
     // but the escrow contract hashes the 0x-prefixed address.

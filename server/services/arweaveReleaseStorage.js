@@ -128,31 +128,59 @@ async function uploadToArweave(dataStr, options = {}) {
 
 /**
  * Fetch data from Arweave by tx ID.
+ * Races all gateways concurrently — returns the first successful response.
+ * Falls back to a sequential retry if all concurrent attempts fail.
  *
  * @param {string} txId - Arweave transaction ID
  * @returns {Promise<string|null>} Response body text or null
  */
-const ARWEAVE_FETCH_TIMEOUT_MS = 30000; // 30s timeout for Arweave gateway fetches
+const ARWEAVE_FETCH_TIMEOUT_MS = 15000; // 15s per-gateway timeout
+const ARWEAVE_FALLBACK_GATEWAYS = ['https://arweave.net', 'https://ar-io.net'];
+
+async function fetchFromArweaveOnce(url, timeoutMs = ARWEAVE_FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) return null;
+    return await res.text();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 async function fetchFromArweave(txId) {
   if (!txId || typeof txId !== 'string' || !/^[a-zA-Z0-9_-]{43}$/.test(txId)) {
     return null;
   }
-  try {
-    const base = (config.arweave?.gateway || 'https://arweave.net').replace(/\/$/, '');
-    const url = `${base}/${txId}`;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), ARWEAVE_FETCH_TIMEOUT_MS);
+  const configured = (config.arweave?.gateway || 'https://arweave.net').replace(/\/$/, '');
+  const gateways = [...new Set([configured, ...ARWEAVE_FALLBACK_GATEWAYS])];
+
+  // Race all gateways concurrently — first success wins
+  const racePromises = gateways.map(async (gw) => {
+    const url = `${gw}/${txId}`;
     try {
-      const res = await fetch(url, { signal: controller.signal });
-      if (!res.ok) return null;
-      return await res.text();
-    } finally {
-      clearTimeout(timeout);
+      const text = await fetchFromArweaveOnce(url);
+      if (text !== null) return text;
+      throw new Error('empty response');
+    } catch (err) {
+      console.warn('[arweaveReleaseStorage] gateway %s failed for tx %s: %s', gw, txId, err.message);
+      throw err;
     }
-  } catch (err) {
-    console.error('[arweaveReleaseStorage] fetch failed:', err.message);
-    return null;
+  });
+
+  try {
+    return await Promise.any(racePromises);
+  } catch (_) {
+    // All gateways failed — one sequential retry with longer timeout
+    console.warn('[arweaveReleaseStorage] all gateways failed for tx %s, retrying with extended timeout', txId);
+    await new Promise((r) => setTimeout(r, 2000));
+    try {
+      return await fetchFromArweaveOnce(`${configured}/${txId}`, 30000);
+    } catch (err) {
+      console.error('[arweaveReleaseStorage] fetch exhausted all retries for tx %s: %s', txId, err.message);
+      return null;
+    }
   }
 }
 

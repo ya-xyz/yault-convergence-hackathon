@@ -62,7 +62,7 @@ router.get('/:address', dualAuthMiddleware, async (req, res) => {
     return res.status(400).json({ error: 'Valid address is required' });
   }
   const normalized = normalizeAddr(address);
-  if (req.auth.pubkey !== normalized) {
+  if (normalizeAddr(req.auth.pubkey) !== normalized) {
     return res.status(403).json({ error: 'Forbidden' });
   }
   try {
@@ -83,7 +83,7 @@ router.post('/', dualAuthMiddleware, async (req, res) => {
     return res.status(400).json({ error: 'Valid address is required' });
   }
   const normalized = normalizeAddr(address);
-  if (req.auth.pubkey !== normalized) {
+  if (normalizeAddr(req.auth.pubkey) !== normalized) {
     return res.status(403).json({ error: 'Forbidden' });
   }
   if (!type) {

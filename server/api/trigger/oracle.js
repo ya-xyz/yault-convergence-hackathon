@@ -377,15 +377,26 @@ router.post('/simulate-chainlink', dualAuthMiddleware, async (req, res) => {
 
         let attestationTxHash = null;
         try {
-          const atResult = await submitOracleAttestation(config, {
+          // Skip if a RELEASE attestation already exists (idempotent retry guard)
+          const existingAttestation = await getAttestation({
+            rpcUrl: config.oracle.rpcUrl,
+            contractAddress: config.oracle.releaseAttestationAddress,
             walletId,
             recipientIndex,
-            decision: 'release',
-            reasonCode: null,
-            evidenceHash,
           });
-          attestationTxHash = atResult.txHash;
-          console.log(`[simulate-chainlink] Attestation submitted for ${walletId}/${recipientIndex}: ${attestationTxHash}`);
+          if (existingAttestation && existingAttestation.decision === 'release') {
+            console.log(`[simulate-chainlink] RELEASE attestation already exists for ${walletId}/${recipientIndex}, skipping`);
+          } else {
+            const atResult = await submitOracleAttestation(config, {
+              walletId,
+              recipientIndex,
+              decision: 'release',
+              reasonCode: null,
+              evidenceHash,
+            });
+            attestationTxHash = atResult.txHash;
+            console.log(`[simulate-chainlink] Attestation submitted for ${walletId}/${recipientIndex}: ${attestationTxHash}`);
+          }
         } catch (atErr) {
           console.warn(`[simulate-chainlink] Attestation submit failed for index ${recipientIndex} (continuing):`, atErr.message);
         }
