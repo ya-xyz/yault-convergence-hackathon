@@ -65,6 +65,13 @@
     .badge-released, .badge-info { background: rgba(59,130,246,0.15); color: var(--primary); }
     .badge-rejected, .badge-danger { background: rgba(239,68,68,0.15); color: var(--danger); }
     .badge-muted { background: rgba(110,118,129,0.15); color: var(--text-muted); }
+    .badge-tag { background: rgba(59,130,246,0.12); color: var(--primary); font-weight: 500; font-size: 11px; }
+    .tag-bar { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
+    .tag-chip { padding: 4px 12px; border-radius: 16px; font-size: 12px; cursor: pointer; border: 1px solid var(--border); background: var(--surface-2); color: var(--text-secondary); transition: all 0.15s; }
+    .tag-chip:hover { border-color: var(--primary); color: var(--text); }
+    .tag-chip.active { background: var(--primary); color: white; border-color: var(--primary); }
+    .tag-chips-select { display: flex; gap: 6px; flex-wrap: wrap; }
+    .tag-chips-select .tag-chip.selected { background: rgba(59,130,246,0.2); color: var(--primary); border-color: var(--primary); }
     .form-group { margin-bottom: 16px; }
     .form-label { display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 4px; }
     .form-input { width: 100%; padding: 10px 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: 14px; }

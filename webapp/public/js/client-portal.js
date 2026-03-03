@@ -213,7 +213,8 @@ const state = {
   planMemo: '',            // optional "letter to future heirs" — encrypted with credential, sent to recipient on release
   planSubmitConfirmModal: false, // After clicking Submit, show a modal warning about n signature prompts
   planForConfigure: null,
-  savedPlan: null,         // { triggerTypes, recipients, triggerConfig } after Review Submit
+  savedPlan: null,         // { triggerTypes, recipients, triggerConfig } — latest plan for current chain+token
+  planHistory: [],          // all plans for current chain+token (newest first, includes savedPlan)
   generatedPathCredentials: null, // Deprecated: no longer displays plaintext, switched to RWA NFT
   credentialMintResults: null,     // [{ recipient, creds, success, txId?, error? }] — mint results, no plaintext included
   selectedFirms: [],      // [{ id, name, jurisdiction, publicKeyHex, verified }]
@@ -252,8 +253,11 @@ const state = {
   // Accounts page (related accounts, invite, transfer)
   accountsSection: 'accounts', // 'accounts' | 'invite' — left sidebar selection
   relatedAccountsInvites: [],  // [{ email, status: 'pending'|'accepted', label? }]
-  relatedAccounts: [],         // [{ email, label, address? }] — accepted / linked accounts
+  relatedAccounts: [],         // [{ email, label, address?, tags? }] — accepted / linked accounts
+  accountsTagFilter: null,     // null = show all, string = filter by tag
   accountsInviteEmail: '',
+  accountsInviteName: '',
+  accountsInviteTags: [],      // string[] — selected tags for new invite
   accountsTransferTarget: null, // index into relatedAccounts, or null when not in transfer view
   accountsTransferToken: 'ETH',
   accountsTransferAmount: '',
@@ -663,10 +667,10 @@ async function loadAccountInvites() {
     if (!resp.ok) return;
     const data = await resp.json();
     const list = data.invites || [];
-    state.relatedAccountsInvites = list.filter((i) => (i.status || 'pending') === 'pending').map((i) => ({ id: i.id, email: i.email, status: 'pending', label: i.label }));
+    state.relatedAccountsInvites = list.filter((i) => (i.status || 'pending') === 'pending').map((i) => ({ id: i.id, email: i.email, status: 'pending', label: i.label, tags: i.tags || [] }));
     state.relatedAccounts = list.filter((i) => (i.status || '') === 'accepted').map((i) => {
       const addr = i.linked_wallet_address ?? i.linkedWalletAddress ?? '';
-      return { id: i.id, email: i.email, label: i.label || (i.email || '').split('@')[0], address: (addr && String(addr).trim()) ? String(addr).trim() : undefined };
+      return { id: i.id, email: i.email, label: i.label || (i.email || '').split('@')[0], address: (addr && String(addr).trim()) ? String(addr).trim() : undefined, tags: i.tags || [] };
     });
     var evmList = state.relatedAccounts.map(function (a) { return a.address; }).filter(Boolean);
     if (evmList.length > 0) {
@@ -758,14 +762,30 @@ async function loadWalletPlan() {
     if (resp.status === 401 && wallet) wallet.sessionToken = null;
     if (!resp.ok) return;
     const data = await resp.json();
-    state.savedPlan = data.plan && (data.plan.triggerTypes || data.plan.recipients) ? {
-      triggerTypes: data.plan.triggerTypes || {},
-      recipients: data.plan.recipients || [],
-      triggerConfig: data.plan.triggerConfig || {},
-      chain_key: data.plan.chain_key || '',
-      token_symbol: data.plan.token_symbol || '',
-      createdAt: data.plan.createdAt,
-    } : null;
+    // Parse all plans (newest first from server)
+    const allPlans = (data.plans || []).map(function (p) {
+      return (p && (p.triggerTypes || p.recipients)) ? {
+        triggerTypes: p.triggerTypes || {},
+        recipients: p.recipients || [],
+        triggerConfig: p.triggerConfig || {},
+        chain_key: p.chain_key || '',
+        token_symbol: p.token_symbol || '',
+        createdAt: p.createdAt,
+      } : null;
+    }).filter(Boolean);
+    // Backward compat: also accept single `plan` if `plans` array empty
+    if (allPlans.length === 0 && data.plan && (data.plan.triggerTypes || data.plan.recipients)) {
+      allPlans.push({
+        triggerTypes: data.plan.triggerTypes || {},
+        recipients: data.plan.recipients || [],
+        triggerConfig: data.plan.triggerConfig || {},
+        chain_key: data.plan.chain_key || '',
+        token_symbol: data.plan.token_symbol || '',
+        createdAt: data.plan.createdAt,
+      });
+    }
+    state.planHistory = allPlans;
+    state.savedPlan = allPlans.length > 0 ? allPlans[0] : null;
   } catch { /* non-fatal */ }
 }
 
@@ -1063,7 +1083,7 @@ function renderLogin() {
 }
 
 function renderNav() {
-  var labels = { wallet: T('wallet'), accounts: T('accounts'), protection: T('protection'), claim: T('claim'), profile: T('profile') || 'Profile', settings: T('settings'), activities: 'Activities' };
+  var labels = { wallet: T('wallet'), accounts: 'Linked Accounts', protection: T('protection'), claim: T('claim'), profile: T('profile') || 'Profile', settings: T('settings'), activities: 'Activities' };
   const items = PAGES.map((p) => {
     var label = labels[p];
     if (label === p) label = p.charAt(0).toUpperCase() + p.slice(1);
@@ -1112,20 +1132,23 @@ function renderProtectionOverview() {
       const planToken = state.savedPlan.token_symbol || tokenLabel;
       const hasRemaining = state.planRemaining && (parseFloat(state.planRemaining.shares || '0') > 0 || parseFloat(state.planRemaining.value || '0') > 0);
       const isBalanceZero = state.planRemaining != null && parseFloat(state.planRemaining.shares || '0') <= 0 && parseFloat(state.planRemaining.value || '0') <= 0;
+      const olderPlans = (state.planHistory || []).slice(1); // all except the latest
       return `
-      ${!isBalanceZero ? `
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:16px;">
         <p style="font-size:13px;color:var(--text-muted);margin:0;">
           Manage the release plan for <strong>${esc(planChain)} — ${esc(planToken)}</strong>.
         </p>
         ${hasRemaining ? `<span style="font-size:13px;font-weight:500;">Remaining: ${esc(formatVaultShares(state.planRemaining.shares))} shares, ${esc(formatVaultNum(state.planRemaining.value))} ${esc(state.vaultUnderlyingSymbol || '')}</span>` : ''}
       </div>
-      <button class="btn btn-primary" id="btnCreatePlan" style="margin-bottom:20px;">Modify Plan</button>
+      <button class="btn btn-primary" id="btnCreatePlan" style="margin-bottom:20px;">Create New Plan</button>
+      ${!isBalanceZero ? `
       <button class="btn btn-secondary btn-sm" id="btnSimulateChainlinkOverview" style="margin-left:12px;margin-bottom:20px;vertical-align:middle;">Simulate Chainlink Event</button>
       <span id="chainlinkOverviewHint" style="display:none;font-size:12px;color:var(--text-muted);margin-left:10px;vertical-align:middle;"></span>
       ` : ''}
       <div class="card">
-        <h3>Current Plan <span style="font-size:12px;color:var(--text-muted);font-weight:400;">[${esc(planChain)} — ${esc(planToken)}]</span></h3>
+        <h3>Latest Plan <span style="font-size:12px;color:var(--text-muted);font-weight:400;">[${esc(planChain)} — ${esc(planToken)}]</span>
+          ${state.savedPlan.createdAt ? `<span style="font-size:11px;color:var(--text-muted);font-weight:400;margin-left:8px;">${new Date(state.savedPlan.createdAt).toLocaleDateString()}</span>` : ''}
+        </h3>
         ${isBalanceZero ? '<p style="font-size:14px;color:var(--warning);margin:0 0 10px 0;">This plan has been fully claimed.</p>' : ''}
         <h4 style="margin-top:12px;">Recipients</h4>
         <table class="table" style="width:100%;margin-top:8px;">
@@ -1168,6 +1191,37 @@ function renderProtectionOverview() {
         </div>
         ` : ''}
       </div>
+
+      ${olderPlans.length > 0 ? `
+      <div class="card" style="margin-top:16px;">
+        <h3>Plan History <span style="font-size:12px;color:var(--text-muted);font-weight:400;">(${olderPlans.length} previous plan${olderPlans.length > 1 ? 's' : ''})</span></h3>
+        <div style="display:flex;flex-direction:column;gap:12px;margin-top:12px;">
+          ${olderPlans.map((plan, idx) => {
+            const pt = plan.triggerTypes || {};
+            let ptText = '—';
+            if (pt.oracle) ptText = 'Chain attestation';
+            else if (pt.legal_authority) ptText = 'Legal authority';
+            else if (pt.inactivity) ptText = 'Inactivity';
+            const dateStr = plan.createdAt ? new Date(plan.createdAt).toLocaleDateString() + ' ' + new Date(plan.createdAt).toLocaleTimeString() : '—';
+            const recipientNames = (plan.recipients || []).map(r => r.label || r.name || '?').join(', ');
+            return `
+            <div style="padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2);">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                <span style="font-size:13px;font-weight:500;">Plan #${state.planHistory.length - idx}</span>
+                <span style="font-size:11px;color:var(--text-muted);">${esc(dateStr)}</span>
+              </div>
+              <div style="font-size:12px;color:var(--text-secondary);">
+                <span>Trigger: ${esc(ptText)}</span>
+                <span style="margin-left:16px;">Recipients: ${esc(recipientNames || 'None')}</span>
+              </div>
+              <div style="font-size:12px;color:var(--text-muted);margin-top:4px;">
+                ${(plan.recipients || []).map(r => `${esc(r.label || r.name || '?')} (${r.percentage}%)`).join(' &middot; ')}
+              </div>
+            </div>`;
+          }).join('')}
+        </div>
+      </div>
+      ` : ''}
     `;
     })()}
 
@@ -2251,9 +2305,11 @@ function renderWallet() {
 
 const TOKEN_OPTIONS = ['ETH', 'SOL', 'BTC', 'WETH', 'WBTC', 'USDC'];
 const ACCOUNTS_SECTIONS = [
-  { key: 'accounts', label: 'Accounts' },
+  { key: 'accounts', label: 'Linked Accounts' },
   { key: 'invite', label: 'Invite' },
 ];
+
+const DEFAULT_ACCOUNT_TAGS = ['Family', 'Business', 'Friends', 'Institutional'];
 
 function renderAccountsRelatedSection() {
   if (state.accountsTransferTarget !== null) {
@@ -2284,23 +2340,36 @@ function renderAccountsRelatedSection() {
     `;
   }
   const accepted = state.relatedAccounts;
+  // Collect all unique tags from accounts + defaults
+  const allTags = Array.from(new Set([
+    ...DEFAULT_ACCOUNT_TAGS,
+    ...accepted.flatMap(a => a.tags || []),
+  ]));
+  const activeFilter = state.accountsTagFilter;
+  const filtered = activeFilter
+    ? accepted.filter(a => (a.tags || []).includes(activeFilter))
+    : accepted;
   return `
-    <h2>Related Accounts</h2>
-    <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px;">Accounts that have accepted your invitation. Click Transfer to send tokens to them.</p>
+    <div class="tag-bar">
+      <span class="tag-chip ${!activeFilter ? 'active' : ''}" data-action="tag-filter" data-tag="">All</span>
+      ${allTags.map(t => `<span class="tag-chip ${activeFilter === t ? 'active' : ''}" data-action="tag-filter" data-tag="${esc(t)}">${esc(t)}</span>`).join('')}
+    </div>
     <div class="card">
-      <h3>Related Accounts</h3>
-      ${accepted.length > 0 ? `
-        ${accepted.map((acc, i) => `
-          <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;${i < accepted.length - 1 ? 'border-bottom:1px solid var(--border);' : ''}">
+      ${filtered.length > 0 ? `
+        ${filtered.map((acc, i) => {
+          const origIdx = accepted.indexOf(acc);
+          const tagBadges = (acc.tags || []).map(t => `<span class="badge badge-tag">${esc(t)}</span>`).join(' ');
+          return `
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;${i < filtered.length - 1 ? 'border-bottom:1px solid var(--border);' : ''}">
             <div>
-              <div style="font-weight:600;">${esc(acc.label || acc.email)}</div>
+              <div style="font-weight:600;display:flex;align-items:center;gap:8px;">${esc(acc.label || acc.email)} ${tagBadges}</div>
               <div style="font-size:12px;color:var(--text-muted);">${esc(acc.email)}${acc.address ? ' <span class="mono" style="font-size:11px;opacity:0.85;">' + esc(shortEvm(acc.address)) + '</span>' : ''}</div>
             </div>
-            <button type="button" class="btn btn-primary" style="width:auto;padding:6px 14px;font-size:13px;" data-action="accounts-transfer" data-index="${i}">Transfer</button>
-          </div>
-        `).join('')}
+            <button type="button" class="btn btn-primary" style="width:auto;padding:6px 14px;font-size:13px;" data-action="accounts-transfer" data-index="${origIdx}">Transfer</button>
+          </div>`;
+        }).join('')}
       ` : `
-        <p style="color:var(--text-muted);font-size:13px;">No related accounts yet. Use Invite to send invitations; when they accept, they will appear here.</p>
+        <p style="color:var(--text-muted);font-size:13px;">${activeFilter ? 'No accounts with tag "' + esc(activeFilter) + '". ' : 'No linked accounts yet. Use Invite to send invitations; when they accept, they will appear here.'}</p>
       `}
     </div>
   `;
@@ -2308,20 +2377,32 @@ function renderAccountsRelatedSection() {
 
 function renderAccountsInviteSection() {
   const pending = state.relatedAccountsInvites.filter(i => i.status === 'pending');
+  const selectedTags = state.accountsInviteTags || [];
   return `
     <h2>Invite to Platform</h2>
-    <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px;">Send an invitation email. When the recipient signs up and accepts, they will appear in your accounts list.</p>
+    <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px;">Send an invitation. When the recipient signs up and accepts, they will appear in your linked accounts.</p>
     <div class="card">
       <h3>Invite to Platform</h3>
-      <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">Send an invitation email. When the recipient signs up and accepts, they will appear in your accounts list.</p>
+      <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">Send an invitation. When the recipient signs up and accepts, they will appear in your linked accounts.</p>
+      <div class="form-group">
+        <label class="form-label">Name</label>
+        <input type="text" class="form-input" id="accountsInviteNameInput" placeholder="Display name (optional)" value="${esc(state.accountsInviteName)}" />
+      </div>
       <div class="form-group">
         <label class="form-label">Email</label>
         <input type="email" class="form-input" id="accountsInviteEmailInput" placeholder="email@example.com" value="${esc(state.accountsInviteEmail)}" />
       </div>
+      <div class="form-group">
+        <label class="form-label">Tags</label>
+        <div class="tag-chips-select" style="margin-bottom:8px;">
+          ${DEFAULT_ACCOUNT_TAGS.map(t => `<span class="tag-chip ${selectedTags.includes(t) ? 'selected' : ''}" data-action="invite-tag-toggle" data-tag="${esc(t)}">${esc(t)}</span>`).join('')}
+        </div>
+        <input type="text" class="form-input" id="accountsInviteCustomTags" placeholder="Custom tags (comma-separated)" style="font-size:12px;" />
+      </div>
       <div class="form-group" style="margin-top:8px;">
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
           <input type="checkbox" id="accountsInviteSubAccount" />
-          <span style="font-size:13px;">Add as my sub-account</span>
+          <span style="font-size:13px;">Add as my linked account</span>
         </label>
       </div>
       <button class="btn btn-primary" id="btnAccountsSendInvite" style="margin-top:12px;">Send Invitation</button>
@@ -3823,6 +3904,7 @@ function attachAppEvents() {
         createdAt: new Date().toISOString(),
       };
       state.savedPlan = planData;
+      state.planHistory = [planData, ...(state.planHistory || [])]; // prepend as newest
       const btnPlanSubmit = document.getElementById('btnPlanSubmit');
       if (btnPlanSubmit) btnPlanSubmit.disabled = true;
       try {
@@ -3852,10 +3934,35 @@ function attachAppEvents() {
         // Note: currently each yallet_changePassphraseWithAdmin triggers an approve popup with passkey verification, so N recipients will trigger N passkey prompts.
         // To verify only once, the extension would need to support a "batch" API (unlock once, then generate mnemonics for multiple paths consecutively).
         const recipients = state.planRecipients || [];
-        if (recipients.length > 0 && window.YaultWasm) {
+        if (recipients.length > 0) {
+          if (!window.YaultWasm) {
+            showToast('YaultWasm not loaded. Refresh the page and ensure Yallet is connected, then try again.', 'error');
+            state.planSubmitConfirmModal = false;
+            state.protectionStep = 'overview';
+            state.planStep = 'triggers';
+            render();
+            return;
+          }
           try {
             await window.YaultWasm.init();
-            if (window.YaultWasm.custody) {
+          } catch (initErr) {
+            showToast('YaultWasm init failed: ' + (initErr.message || 'unknown') + '. Refresh and reconnect Yallet.', 'error');
+            state.planSubmitConfirmModal = false;
+            state.protectionStep = 'overview';
+            state.planStep = 'triggers';
+            render();
+            return;
+          }
+          if (!window.YaultWasm.custody) {
+            const hint = (window.YaultWasm.custodyError || '').trim() ? ' ' + window.YaultWasm.custodyError : '';
+            showToast('Custody WASM not available.' + hint + ' Refresh the page and reconnect Yallet.', 'error');
+            state.planSubmitConfirmModal = false;
+            state.protectionStep = 'overview';
+            state.planStep = 'triggers';
+            render();
+            return;
+          }
+          try {
               const provider = (wallet && wallet._yalletProvider) || window.yallet;
               function normAddr(addr) {
                 if (!addr || !String(addr).trim()) return '';
@@ -4286,12 +4393,9 @@ function attachAppEvents() {
               state._signDeferredNav = { planStep: 'credentials' };
               // Don't render() here; modal is showing "done" state
               return;
-            } else {
-              state.protectionStep = 'overview';
-              state.planStep = 'triggers';
-            }
           } catch (wasmErr) {
             console.warn('[Plan] WASM credential generation failed:', wasmErr);
+            showToast('Credential generation failed: ' + (wasmErr.message || 'unknown'), 'error');
             state.planSubmitConfirmModal = false;
             state.protectionStep = 'overview';
             state.planStep = 'triggers';
@@ -4581,10 +4685,35 @@ function attachAppEvents() {
 
   // ── Accounts page events ──
 
+  // Tag filter chip clicks (Linked Accounts page)
+  app.querySelectorAll('[data-action="tag-filter"]').forEach((el) => {
+    el.addEventListener('click', () => {
+      const tag = el.dataset.tag || '';
+      state.accountsTagFilter = tag || null;
+      render();
+    });
+  });
+
+  // Invite form: tag chip toggle
+  app.querySelectorAll('[data-action="invite-tag-toggle"]').forEach((el) => {
+    el.addEventListener('click', () => {
+      const tag = el.dataset.tag;
+      if (!tag) return;
+      const tags = state.accountsInviteTags || [];
+      if (tags.includes(tag)) {
+        state.accountsInviteTags = tags.filter(t => t !== tag);
+      } else {
+        state.accountsInviteTags = [...tags, tag];
+      }
+      render();
+    });
+  });
+
   const btnAccountsSendInvite = document.getElementById('btnAccountsSendInvite');
   if (btnAccountsSendInvite) {
     btnAccountsSendInvite.addEventListener('click', async () => {
       const email = (document.getElementById('accountsInviteEmailInput')?.value || '').trim().toLowerCase();
+      const name = (document.getElementById('accountsInviteNameInput')?.value || '').trim();
       if (!email) {
         showToast('Please enter an email address', 'error');
         return;
@@ -4593,13 +4722,25 @@ function attachAppEvents() {
         showToast('This email is already invited or linked', 'error');
         return;
       }
+      // Merge preset tags + custom tags
+      const presetTags = state.accountsInviteTags || [];
+      const customRaw = (document.getElementById('accountsInviteCustomTags')?.value || '').trim();
+      const customTags = customRaw ? customRaw.split(',').map(t => t.trim()).filter(Boolean) : [];
+      const tags = Array.from(new Set([...presetTags, ...customTags]));
+
       btnAccountsSendInvite.disabled = true;
       try {
         const headers = await getAuthHeadersAsync();
+        const body = {
+          email,
+          is_sub_account: !!(document.getElementById('accountsInviteSubAccount')?.checked),
+        };
+        if (name) body.name = name;
+        if (tags.length > 0) body.tags = tags;
         const resp = await apiFetch(`${API_BASE}/account-invites`, {
           method: 'POST',
           headers: { ...headers, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email, is_sub_account: !!(document.getElementById('accountsInviteSubAccount')?.checked) }),
+          body: JSON.stringify(body),
         });
         if (resp.status === 401 && wallet) wallet.sessionToken = null;
         if (!resp.ok) {
@@ -4607,8 +4748,10 @@ function attachAppEvents() {
           throw new Error(err.error || 'Failed to send invitation');
         }
         const created = await resp.json();
-        state.relatedAccountsInvites.push({ id: created.id, email: created.email, status: 'pending', label: created.label });
+        state.relatedAccountsInvites.push({ id: created.id, email: created.email, status: 'pending', label: created.label, tags: created.tags });
         state.accountsInviteEmail = '';
+        state.accountsInviteName = '';
+        state.accountsInviteTags = [];
         showToast('Invitation sent to ' + email, 'success');
       } catch (err) {
         showToast(err.message || 'Failed to send invitation', 'error');
@@ -6408,6 +6551,7 @@ function setupGlobalContextSelectors() {
     });
     // Reload plan for new chain+token context
     state.savedPlan = null;
+    state.planHistory = [];
     loadWalletPlan().then(function () { render(); });
     render();
   });
@@ -6416,6 +6560,7 @@ function setupGlobalContextSelectors() {
     state.globalTokenKey = tokenSelect.value;
     // Reload plan for new token context
     state.savedPlan = null;
+    state.planHistory = [];
     loadWalletPlan().then(function () { render(); });
     render();
   });

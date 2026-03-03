@@ -72,6 +72,7 @@ async function deliverRwaPackageForRecipient(binding, recipientIndex, opts = {})
   }
 
   let rwaUploadBody = null;
+  let payloadArweaveTxId = null; // Track the Arweave tx ID of the payload (for fallback receipt)
   let manifestTxId = binding.manifest_arweave_tx_id;
 
   if (!manifestTxId) {
@@ -96,13 +97,13 @@ async function deliverRwaPackageForRecipient(binding, recipientIndex, opts = {})
       return result;
     }
     const key = manifestKey(binding.wallet_id, binding.authority_id, recipientIndex);
-    const payloadTxId = manifest[key];
-    if (!payloadTxId) {
+    payloadArweaveTxId = manifest[key];
+    if (!payloadArweaveTxId) {
       const result = { delivered: false, error: 'No payload tx for this recipient in manifest' };
       await recordDelivery(binding.wallet_id, binding.authority_id, recipientIndex, result).catch(() => {});
       return result;
     }
-    const payloadText = await fetchFromArweave(payloadTxId);
+    const payloadText = await fetchFromArweave(payloadArweaveTxId);
     if (!payloadText) {
       const result = { delivered: false, error: 'Failed to fetch payload from Arweave' };
       await recordDelivery(binding.wallet_id, binding.authority_id, recipientIndex, result).catch(() => {});
@@ -149,10 +150,16 @@ async function deliverRwaPackageForRecipient(binding, recipientIndex, opts = {})
     const signature = body?.mint?.signature;
 
     if (!response.ok) {
-      result = {
-        delivered: false,
-        error: body?.error || response.statusText || 'Upload-and-mint failed',
-      };
+      const errorMsg = body?.error || response.statusText || 'Upload-and-mint failed';
+      // If the cNFT mint service is unavailable (no Merkle tree) but the data is already on Arweave,
+      // treat delivery as successful — the recipient's credential is permanently stored on Arweave.
+      const isMintServiceUnavailable = response.status === 503 && /[Mm]erkle tree|not initialized/i.test(errorMsg);
+      if (isMintServiceUnavailable && payloadArweaveTxId) {
+        console.warn('[deliverRwaRelease] cNFT mint unavailable (%s), marking delivered with Arweave tx %s', errorMsg, payloadArweaveTxId);
+        result = { delivered: true, txId: `arweave:${payloadArweaveTxId}` };
+      } else {
+        result = { delivered: false, error: errorMsg };
+      }
     } else {
       result = { delivered: true, txId: signature };
     }

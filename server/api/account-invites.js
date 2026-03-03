@@ -46,8 +46,12 @@ router.post('/', dualAuthMiddleware, async (req, res) => {
     if (!owner) return res.status(401).json({ error: 'Authentication required' });
     const email = (req.body?.email || '').trim().toLowerCase();
     if (!email) return res.status(400).json({ error: 'email is required' });
-    const label = (req.body?.label || email.split('@')[0] || email).trim();
+    const name = (req.body?.name || '').trim();
+    const label = name || (req.body?.label || email.split('@')[0] || email).trim();
     const isSubAccount = req.body?.is_sub_account === true;
+    const tags = Array.isArray(req.body?.tags)
+      ? req.body.tags.map(t => String(t).trim()).filter(Boolean)
+      : [];
 
     const existing = await db.accountInvites.findByOwner(owner);
     if (existing.some((i) => i.email === email)) {
@@ -61,6 +65,7 @@ router.post('/', dualAuthMiddleware, async (req, res) => {
       owner_wallet_id: owner,
       email,
       label,
+      tags,
       is_sub_account: isSubAccount,
       status: 'pending',
       linked_wallet_address: null,

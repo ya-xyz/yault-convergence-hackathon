@@ -100,7 +100,7 @@ module.exports = {
 
   // RWA: upload-and-mint API for delivering stored credential NFT after attestation release.
   rwa: {
-    uploadAndMintApiUrl: process.env.RWA_UPLOAD_AND_MINT_API_URL || (isDev ? 'https://api-dev.yallet.xyz/api/v1/storage/rwa/upload-and-mint' : 'https://api.yallet.xyz/api/v1/storage/rwa/upload-and-mint'),
+    uploadAndMintApiUrl: process.env.RWA_UPLOAD_AND_MINT_API_URL || 'https://api.yallet.xyz/api/v1/storage/rwa/upload-and-mint',
   },
 
   // Inactivity monitor: background service detects wallets with trigger_type='activity_drand'

@@ -56639,7 +56639,7 @@ Message: ${transactionMessage}.
   // ../dev.yallet.rwa-sdk/dist/credential-nft-server.js
   var RWA_UPLOAD_AND_MINT_ENDPOINTS = {
     prod: "https://api.yallet.xyz/api/v1/storage/rwa/upload-and-mint",
-    dev: "https://api-dev.yallet.xyz/api/v1/storage/rwa/upload-and-mint"
+    dev: "https://api.yallet.xyz/api/v1/storage/rwa/upload-and-mint"
   };
   var NOTE_TITLE = "Yault Release Credentials";
   function bytesToBase642(bytes) {

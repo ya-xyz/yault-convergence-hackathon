@@ -33,11 +33,22 @@ function normalizeAddr(addr) {
  * Build composite plan key: walletId_chainKey_tokenSymbol
  * Falls back to walletId alone for backward compatibility when chain/token missing.
  */
-function planKey(walletId, chainKey, tokenSymbol) {
-  if (!chainKey && !tokenSymbol) return walletId; // legacy fallback
+/**
+ * Build composite plan prefix: walletId_chainKey_tokenSymbol
+ * Used to query all plans for a given wallet+chain+token combo.
+ */
+function planPrefix(walletId, chainKey, tokenSymbol) {
   const c = (chainKey || 'ethereum').toLowerCase().trim();
   const t = (tokenSymbol || '').toUpperCase().trim();
   return `${walletId}_${c}_${t}`;
+}
+
+/**
+ * Build unique plan key by appending a timestamp suffix.
+ * Format: walletId_chain_token_ts (e.g. abc123_ethereum_ETH_1709500000000)
+ */
+function newPlanKey(walletId, chainKey, tokenSymbol) {
+  return `${planPrefix(walletId, chainKey, tokenSymbol)}_${Date.now()}`;
 }
 
 function stripAdminFactorFromLink(link) {
@@ -55,7 +66,7 @@ function stripAdminFactorFromLink(link) {
   }
 }
 
-/** GET / — get saved plan for wallet + chain + token */
+/** GET / — get all plans for wallet + chain + token (newest first) */
 router.get('/', dualAuthMiddleware, async (req, res) => {
   try {
     const walletId = normalizeAddr(req.auth.pubkey);
@@ -63,40 +74,67 @@ router.get('/', dualAuthMiddleware, async (req, res) => {
 
     const chainKey = (req.query.chain || '').trim();
     const tokenSymbol = (req.query.token || '').trim();
-    const key = planKey(walletId, chainKey, tokenSymbol);
+    const prefix = planPrefix(walletId, chainKey || 'ethereum', tokenSymbol || 'ETH');
 
-    let plan = await db.walletPlans.findById(key);
+    // Find all plan IDs that match the prefix (including legacy exact-match key)
+    const allIds = await db.walletPlans.findAllIds();
+    const matchingIds = allIds.filter(
+      (id) => id === prefix || id.startsWith(prefix + '_')
+    );
 
-    // Legacy migration (one-time): if chain+token provided but no composite plan found,
-    // try legacy walletId-only key. Migrate it once, then mark legacy record so it won't
-    // be copied to every token the user switches to.
-    if (!plan && chainKey && tokenSymbol) {
+    // Legacy migration: if no plans found under new format, check legacy walletId-only key
+    if (matchingIds.length === 0 && chainKey && tokenSymbol) {
       const legacy = await db.walletPlans.findById(walletId);
       if (legacy && !legacy._migrated) {
-        // Save under composite key with chain+token
         const migrated = { ...legacy };
-        migrated.chain_key = chainKey.toLowerCase();
-        migrated.token_symbol = tokenSymbol.toUpperCase();
+        migrated.chain_key = (chainKey || 'ethereum').toLowerCase();
+        migrated.token_symbol = (tokenSymbol || 'ETH').toUpperCase();
         migrated.updatedAt = new Date().toISOString();
-        await db.walletPlans.create(key, migrated);
-        // Mark legacy record so it won't trigger migration again for other tokens
+        const newKey = newPlanKey(walletId, chainKey, tokenSymbol);
+        await db.walletPlans.create(newKey, migrated);
+        // Mark legacy record
         legacy._migrated = true;
-        legacy.chain_key = chainKey.toLowerCase();
-        legacy.token_symbol = tokenSymbol.toUpperCase();
         await db.walletPlans.create(walletId, legacy);
-        plan = migrated;
+        return res.json({ plan: migrated, plans: [migrated] });
       }
     }
 
-    if (!plan) return res.json({ plan: null });
-    return res.json({ plan });
+    // Also check if old exact-match key exists (pre-multi-plan) and migrate it
+    if (matchingIds.length === 1 && matchingIds[0] === prefix) {
+      const oldPlan = await db.walletPlans.findById(prefix);
+      if (oldPlan && !oldPlan._migratedToMulti) {
+        // Copy to timestamped key, mark old one
+        const ts = oldPlan.createdAt ? new Date(oldPlan.createdAt).getTime() : Date.now();
+        const migratedKey = `${prefix}_${ts}`;
+        await db.walletPlans.create(migratedKey, { ...oldPlan });
+        oldPlan._migratedToMulti = true;
+        await db.walletPlans.create(prefix, oldPlan);
+        matchingIds.push(migratedKey);
+      }
+    }
+
+    // Fetch all matching plans, filter out migration markers
+    const plans = (await Promise.all(
+      matchingIds.map((id) => db.walletPlans.findById(id))
+    )).filter((p) => p != null && !p._migratedToMulti);
+
+    // Sort by createdAt descending (newest first)
+    plans.sort((a, b) => {
+      const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      return tb - ta;
+    });
+
+    // Return latest plan as `plan` for backward compat, plus full `plans` array
+    const latest = plans.length > 0 ? plans[0] : null;
+    return res.json({ plan: latest, plans });
   } catch (err) {
     console.error('[wallet-plan] GET error:', err);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-/** GET /all — get all plans for wallet (any chain/token) */
+/** GET /all — get all plans for wallet (any chain/token), sorted newest first */
 router.get('/all', dualAuthMiddleware, async (req, res) => {
   try {
     const walletId = normalizeAddr(req.auth.pubkey);
@@ -106,18 +144,24 @@ router.get('/all', dualAuthMiddleware, async (req, res) => {
     const matchingIds = allIds.filter(
       (id) => id === walletId || id.startsWith(walletId + '_')
     );
-    const plans = await Promise.all(
+    const plans = (await Promise.all(
       matchingIds.map((id) => db.walletPlans.findById(id))
-    );
-    const validPlans = plans.filter((p) => p != null);
-    return res.json({ plans: validPlans });
+    )).filter((p) => p != null && !p._migrated && !p._migratedToMulti);
+
+    plans.sort((a, b) => {
+      const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      return tb - ta;
+    });
+
+    return res.json({ plans });
   } catch (err) {
     console.error('[wallet-plan] GET /all error:', err);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-/** PUT / — save plan (with chain_key + token_symbol) */
+/** PUT / — create a new plan (always appends, never overwrites) */
 router.put('/', dualAuthMiddleware, async (req, res) => {
   try {
     const walletId = normalizeAddr(req.auth.pubkey);
@@ -126,7 +170,7 @@ router.put('/', dualAuthMiddleware, async (req, res) => {
     const { triggerTypes, recipients, triggerConfig, chain_key, token_symbol } = req.body || {};
     const chainKey = (chain_key || '').trim().toLowerCase() || 'ethereum';
     const tokenSym = (token_symbol || '').trim().toUpperCase() || 'ETH';
-    const key = planKey(walletId, chainKey, tokenSym);
+    const key = newPlanKey(walletId, chainKey, tokenSym);
 
     const data = {
       triggerTypes: triggerTypes || {},
@@ -137,11 +181,6 @@ router.put('/', dualAuthMiddleware, async (req, res) => {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
-
-    const existing = await db.walletPlans.findById(key);
-    if (existing && existing.createdAt) {
-      data.createdAt = existing.createdAt;
-    }
 
     await db.walletPlans.create(key, data);
     return res.json({ plan: data });
