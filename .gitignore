@@ -40,6 +40,9 @@ env/frontend.js
 # SQLite database
 data/
 
+# Arweave upload cache (server-side)
+server/.arweave-cache/
+
 # Cloudflare Worker secrets
 cloudflare-worker/.dev.vars
 dev.yallet.proxy-api/.dev.vars

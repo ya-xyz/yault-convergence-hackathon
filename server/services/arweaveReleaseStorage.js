@@ -19,6 +19,8 @@
 'use strict';
 
 const crypto = require('crypto');
+const path = require('path');
+const fs = require('fs');
 const config = require('../config');
 
 const MANIFEST_TAG = 'Yault-Type';
@@ -29,6 +31,39 @@ const REGISTRY_VALUE = 'rwa-release-registry';
 // Cached Arweave client and wallet (avoid re-init on every upload)
 let _cachedWallet = undefined; // undefined = not yet loaded, null = load failed
 let _cachedArweaveClient = null;
+
+// In-memory cache for recently uploaded data (avoids Arweave gateway seeding delay).
+// Keyed by tx ID, value = data string. Entries expire after 10 minutes.
+const _recentUploads = new Map();
+
+// ---------------------------------------------------------------------------
+// Persistent file-based cache for Arweave uploads.
+// Survives server restarts — critical when Arweave gateways are slow to seed.
+// Each tx is stored as a separate file: .arweave-cache/<txId>.json
+// ---------------------------------------------------------------------------
+const ARWEAVE_CACHE_DIR = path.join(__dirname, '..', '.arweave-cache');
+
+function _ensureCacheDir() {
+  try { fs.mkdirSync(ARWEAVE_CACHE_DIR, { recursive: true }); } catch (_) {}
+}
+
+function _writeDiskCache(txId, dataStr) {
+  try {
+    _ensureCacheDir();
+    fs.writeFileSync(path.join(ARWEAVE_CACHE_DIR, `${txId}.json`), dataStr, 'utf-8');
+  } catch (err) {
+    console.warn('[arweaveReleaseStorage] disk cache write failed for', txId, err.message);
+  }
+}
+
+function _readDiskCache(txId) {
+  try {
+    return fs.readFileSync(path.join(ARWEAVE_CACHE_DIR, `${txId}.json`), 'utf-8');
+  } catch (_) {
+    return null;
+  }
+}
+const UPLOAD_CACHE_TTL_MS = 10 * 60 * 1000;
 
 async function loadArweaveWallet() {
   if (_cachedWallet !== undefined) return _cachedWallet;
@@ -117,6 +152,10 @@ async function uploadToArweave(dataStr, options = {}) {
     const response = await arweave.transactions.post(tx);
 
     if (response.status === 200 || response.status === 202) {
+      // Cache the uploaded data so subsequent reads don't need to wait for gateway seeding
+      _recentUploads.set(tx.id, { data: dataStr, ts: Date.now() });
+      // Also persist to disk so cache survives server restarts
+      _writeDiskCache(tx.id, dataStr);
       return tx.id;
     }
     return null;
@@ -135,7 +174,7 @@ async function uploadToArweave(dataStr, options = {}) {
  * @returns {Promise<string|null>} Response body text or null
  */
 const ARWEAVE_FETCH_TIMEOUT_MS = 15000; // 15s per-gateway timeout
-const ARWEAVE_FALLBACK_GATEWAYS = ['https://arweave.net', 'https://ar-io.net'];
+const ARWEAVE_FALLBACK_GATEWAYS = ['https://arweave.net', 'https://ar-io.net', 'https://arweave.developerdao.com'];
 
 async function fetchFromArweaveOnce(url, timeoutMs = ARWEAVE_FETCH_TIMEOUT_MS) {
   const controller = new AbortController();
@@ -149,9 +188,25 @@ async function fetchFromArweaveOnce(url, timeoutMs = ARWEAVE_FETCH_TIMEOUT_MS) {
   }
 }
 
-async function fetchFromArweave(txId) {
+async function fetchFromArweave(txId, { skipExtendedRetry = false } = {}) {
   if (!txId || typeof txId !== 'string' || !/^[a-zA-Z0-9_-]{43}$/.test(txId)) {
     return null;
+  }
+  // Check in-memory cache first (recently uploaded data — avoids gateway seeding delay)
+  const cached = _recentUploads.get(txId);
+  if (cached) {
+    if (Date.now() - cached.ts < UPLOAD_CACHE_TTL_MS) {
+      return cached.data;
+    }
+    _recentUploads.delete(txId); // expired — but disk cache may still be valid
+  }
+  // Check persistent disk cache (survives server restarts)
+  const diskCached = _readDiskCache(txId);
+  if (diskCached) {
+    console.log('[arweaveReleaseStorage] disk cache hit for tx', txId);
+    // Re-populate in-memory cache
+    _recentUploads.set(txId, { data: diskCached, ts: Date.now() });
+    return diskCached;
   }
   const configured = (config.arweave?.gateway || 'https://arweave.net').replace(/\/$/, '');
   const gateways = [...new Set([configured, ...ARWEAVE_FALLBACK_GATEWAYS])];
@@ -172,15 +227,21 @@ async function fetchFromArweave(txId) {
   try {
     return await Promise.any(racePromises);
   } catch (_) {
-    // All gateways failed — one sequential retry with longer timeout
-    console.warn('[arweaveReleaseStorage] all gateways failed for tx %s, retrying with extended timeout', txId);
-    await new Promise((r) => setTimeout(r, 2000));
-    try {
-      return await fetchFromArweaveOnce(`${configured}/${txId}`, 30000);
-    } catch (err) {
-      console.error('[arweaveReleaseStorage] fetch exhausted all retries for tx %s: %s', txId, err.message);
+    if (skipExtendedRetry) {
+      console.warn('[arweaveReleaseStorage] all gateways failed for tx %s (skipping extended retry)', txId);
       return null;
     }
+    // All gateways failed — sequential retry each gateway with longer timeout
+    console.warn('[arweaveReleaseStorage] all gateways failed for tx %s, retrying with extended timeout', txId);
+    await new Promise((r) => setTimeout(r, 2000));
+    for (const gw of gateways) {
+      try {
+        const text = await fetchFromArweaveOnce(`${gw}/${txId}`, 30000);
+        if (text !== null) return text;
+      } catch (_) {}
+    }
+    console.error('[arweaveReleaseStorage] fetch exhausted all retries for tx %s', txId);
+    return null;
   }
 }
 
@@ -238,15 +299,27 @@ async function replacePathPayload(walletId, authorityId, recipientIndex, rwaUplo
   if (!currentManifestTxId || typeof rwaUploadBody !== 'object' || !rwaUploadBody.data || !rwaUploadBody.leafOwner) {
     return { manifest_arweave_tx_id: null, error: 'currentManifestTxId and rwa_upload_body (data, leafOwner) are required' };
   }
-  const text = await fetchFromArweave(currentManifestTxId);
-  if (!text) {
-    return { manifest_arweave_tx_id: null, error: 'Could not fetch current manifest from Arweave' };
-  }
   let manifest;
-  try {
-    manifest = JSON.parse(text);
-  } catch (_) {
-    return { manifest_arweave_tx_id: null, error: 'Invalid current manifest JSON' };
+  // Try fast local caches first before hitting slow gateways
+  const cachedManifest = _recentUploads.get(currentManifestTxId);
+  const localText = cachedManifest
+    ? cachedManifest.data
+    : _readDiskCache(currentManifestTxId);
+  // Only hit Arweave gateways if not cached locally.
+  // Use skipExtendedRetry since we have a fallback (fresh manifest).
+  const text = localText || await fetchFromArweave(currentManifestTxId, { skipExtendedRetry: true });
+  if (!text) {
+    // Can't fetch old manifest from any source — start fresh.
+    // This is safe when re-sending ALL recipients (each Resend adds its path to the manifest).
+    // The disk cache ensures subsequent Resends in the same session can read the updated manifest.
+    console.warn('[arweaveReleaseStorage] Could not fetch manifest %s, starting fresh manifest', currentManifestTxId);
+    manifest = {};
+  } else {
+    try {
+      manifest = JSON.parse(text);
+    } catch (_) {
+      return { manifest_arweave_tx_id: null, error: 'Invalid current manifest JSON' };
+    }
   }
   const key = manifestKey(walletId, authorityId, recipientIndex);
   const dataStr = JSON.stringify(rwaUploadBody);

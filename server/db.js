@@ -58,7 +58,12 @@ async function initDb() {
 
   if (fs.existsSync(DB_PATH)) {
     const fileBuffer = fs.readFileSync(DB_PATH);
-    _db = new SQL.Database(fileBuffer);
+    if (fileBuffer.length > 0) {
+      _db = new SQL.Database(fileBuffer);
+    } else {
+      console.warn('[db] Database file exists but is empty (0 bytes). Creating new database.');
+      _db = new SQL.Database();
+    }
   } else {
     _db = new SQL.Database();
   }
@@ -114,7 +119,11 @@ async function _saveToDisk() {
   try {
     const data = _db.export();
     const buffer = Buffer.from(data);
-    await fs.promises.writeFile(DB_PATH, buffer);
+    // Atomic write: write to temp file first, then rename to prevent
+    // 0-byte files if the process exits mid-write (rename is atomic on POSIX).
+    const tmpPath = DB_PATH + '.tmp';
+    await fs.promises.writeFile(tmpPath, buffer);
+    await fs.promises.rename(tmpPath, DB_PATH);
     _dirty = false;
   } catch (err) {
     console.error('[db] Failed to save database:', err.message);
