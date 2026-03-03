@@ -133,7 +133,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use((_req, res, next) => {
   res.header('X-Content-Type-Options', 'nosniff');
   res.header('X-Frame-Options', 'DENY');
-  res.header('Content-Security-Policy', "default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; connect-src 'self' https://*.infura.io https://*.llamarpc.com https://*.arweave.net https://arweave.net; img-src 'self' data:; font-src 'self';");
+  res.header('Content-Security-Policy', "default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; connect-src 'self' https://*.infura.io https://*.llamarpc.com https://*.publicnode.com https://*.arweave.net https://arweave.net; img-src 'self' data:; font-src 'self';");
   res.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   res.header('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
