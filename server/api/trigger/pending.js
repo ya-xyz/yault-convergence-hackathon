@@ -68,6 +68,10 @@ function startCooldownFinalizer() {
 // Start the background finalizer on module load
 startCooldownFinalizer();
 
+// Start the inactivity monitor for activity_drand wallets (queues Oracle requests when threshold exceeded)
+const { startInactivityMonitor } = require('../../services/inactivityMonitor');
+startInactivityMonitor();
+
 /**
  * @route GET /
  * @description List pending trigger events.

@@ -133,21 +133,25 @@ app.use(express.urlencoded({ extended: true }));
 app.use((_req, res, next) => {
   res.header('X-Content-Type-Options', 'nosniff');
   res.header('X-Frame-Options', 'DENY');
-  res.header('X-XSS-Protection', '1; mode=block');
+  res.header('Content-Security-Policy', "default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; connect-src 'self' https://*.infura.io https://*.llamarpc.com https://*.arweave.net https://arweave.net; img-src 'self' data:; font-src 'self';");
+  res.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  res.header('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
   next();
 });
 
 // CORS (permissive for dev; tighten in production)
 app.use((req, res, next) => {
-  const isProduction = process.env.NODE_ENV === 'production';
-  const allowedOrigin = process.env.CORS_ORIGIN || (isProduction ? undefined : '*');
+  const isDev = process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test';
+  const allowedOrigin = process.env.CORS_ORIGIN || (isDev ? '*' : undefined);
   if (allowedOrigin) {
     res.header('Access-Control-Allow-Origin', allowedOrigin);
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Admin-Token, X-Admin-Session, X-Authority-Session, X-Yallet-Identity, X-Yallet-Signing-Key, X-Yallet-Address, X-Yallet-EVM-Address, X-Yallet-Signature, X-Yallet-Nonce');
-  } else if (isProduction) {
-    // #12 FIX: In production without CORS_ORIGIN, block OPTIONS and don't set Allow-Origin
-    console.error('[cors] CORS_ORIGIN not set in production — cross-origin requests are BLOCKED');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Admin-Token, X-Admin-Session, X-Authority-Session, X-Yallet-Identity, X-Yallet-Signing-Key, X-Yallet-Address, X-Yallet-EVM-Address, X-Yallet-Signature, X-Yallet-Nonce, X-Oracle-Internal-Key');
+  } else if (!isDev) {
+    // #12 FIX: In non-development without CORS_ORIGIN, block OPTIONS and don't set Allow-Origin.
+    // This also handles the case where NODE_ENV is unset (defaults to blocking).
+    console.error('[cors] CORS_ORIGIN not set — cross-origin requests are BLOCKED');
     if (req.method === 'OPTIONS') {
       return res.status(403).json({ error: 'CORS not configured' });
     }
@@ -165,8 +169,8 @@ app.use((req, res, next) => {
     const referer = req.headers['referer'];
     const allowedOrigin = process.env.CORS_ORIGIN;
 
-    // In production, verify Origin matches allowed origin
-    if (process.env.NODE_ENV === 'production' && allowedOrigin && allowedOrigin !== '*') {
+    // In all non-development/non-test environments, verify Origin matches allowed origin
+    if (process.env.NODE_ENV !== 'development' && process.env.NODE_ENV !== 'test' && allowedOrigin && allowedOrigin !== '*') {
       let requestOrigin = origin || null;
       if (!requestOrigin && referer) {
         try {
@@ -175,6 +179,11 @@ app.use((req, res, next) => {
           // Malformed referer — reject to be safe
           return res.status(403).json({ error: 'CSRF check failed: invalid referer' });
         }
+      }
+      // Reject requests with no Origin/Referer (prevents CSRF from programmatic clients)
+      const hasApiKey = req.headers['x-api-key'] || req.headers['authorization'];
+      if (!requestOrigin && !hasApiKey) {
+        return res.status(403).json({ error: 'CSRF check failed: missing origin' });
       }
       if (requestOrigin && requestOrigin !== allowedOrigin) {
         return res.status(403).json({ error: 'CSRF check failed: origin mismatch' });
@@ -263,6 +272,28 @@ const releaseLimiter = rateLimit({
 app.use('/api/release/configure', releaseLimiter);
 app.use('/api/release/distribute', releaseLimiter);
 app.use('/api/release/prepare-distribute', releaseLimiter);
+
+// Stricter limit on authority registration: 10 per minute per IP
+const authorityRegisterLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many registration attempts, please try again later.' },
+  skip: () => process.env.NODE_ENV === 'test',
+});
+app.use('/api/authority/register', authorityRegisterLimiter);
+
+// Stricter limit on wallet-plan endpoints: 30 per minute per IP
+const walletPlanLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many wallet-plan requests, please try again later.' },
+  skip: () => process.env.NODE_ENV === 'test',
+});
+app.use('/api/wallet-plan', walletPlanLimiter);
 
 const inviteAcceptLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -555,7 +586,8 @@ app.post('/api/trial/apply', async (req, res) => {
 
     return res.json({ success: true, id: application.id });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    console.error('[trial] Application error:', err.message);
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -681,8 +713,8 @@ function warnProductionConfig() {
 if (require.main === module) {
   db.ensureReady()
     .then(() => {
-      // #21 FIX: Guard test authority seed — never in production
-      if (process.env.NODE_ENV !== 'production') {
+      // #21 FIX: Guard test authority seed — only in development
+      if (process.env.NODE_ENV === 'development') {
         return seedTestAuthorityIfNeeded();
       }
     })

@@ -61,6 +61,7 @@ contract ReleaseAttestation is Ownable {
     //  Errors
     // -----------------------------------------------------------------------
 
+    error ZeroAddress();
     error OnlyOracleSubmitter();
     error OnlyFallbackSubmitter();
     error InvalidSource();
@@ -78,6 +79,8 @@ contract ReleaseAttestation is Ownable {
 
     /// @notice Set the address allowed to submit oracle attestations (CRE Forwarder or DON).
     function setOracleSubmitter(address _oracleSubmitter) external onlyOwner {
+        // L-01 FIX: Prevent setting oracle submitter to address(0).
+        if (_oracleSubmitter == address(0)) revert ZeroAddress();
         address previous = oracleSubmitter;
         oracleSubmitter = _oracleSubmitter;
         emit OracleSubmitterSet(previous, _oracleSubmitter);

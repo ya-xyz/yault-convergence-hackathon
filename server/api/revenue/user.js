@@ -91,6 +91,7 @@ router.get('/:walletId', authMiddleware, async (req, res) => {
         user_bps: config.revenue.userShareBps,
         platform_bps: config.revenue.platformShareBps,
         authority_bps: config.revenue.authorityShareBps,
+        platform_full_bps: config.revenue.platformFullShareBps, // when no authority bound
       },
       records: summaryRecords,
     });

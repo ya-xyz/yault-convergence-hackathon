@@ -14,6 +14,7 @@
 'use strict';
 
 const { Router } = require('express');
+const db = require('../../db');
 const { deliverByRegistry } = require('../../services/deliverRwaRelease');
 
 const router = Router();
@@ -32,6 +33,17 @@ router.post('/', async (req, res) => {
       return res.status(403).json({
         error: 'Forbidden',
         detail: 'You can only deliver for your own authority',
+      });
+    }
+
+    // Verify authority has an active binding with this wallet
+    const normalizedWallet = wallet_id.replace(/^0x/i, '').toLowerCase();
+    const bindings = await db.bindings.findByWallet(normalizedWallet);
+    const hasBinding = bindings?.some(b => b.authority_id === authority_id && b.status === 'active');
+    if (!hasBinding) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        detail: 'You do not have an active binding with this wallet',
       });
     }
 
@@ -55,7 +67,7 @@ router.post('/', async (req, res) => {
     });
   } catch (err) {
     console.error('[release/deliver-from-registry] Error:', err);
-    return res.status(500).json({ error: err.message || 'Internal server error' });
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 

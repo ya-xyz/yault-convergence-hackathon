@@ -82,6 +82,25 @@ async function submitReleaseAttestationForAllRecipients(walletId, recipientIndic
   }
 }
 
+/**
+ * Find active binding for a trigger's wallet/authority/recipient.
+ * Used by both cooldown finalizer and immediate release paths.
+ * @returns {Promise<object|null>} active binding or null
+ */
+async function findActiveBindingForTrigger(trigger) {
+  const wid = trigger.wallet_id;
+  const widAlt = wid.startsWith('0x') ? wid.slice(2) : `0x${wid}`;
+  const bindings = [...(await db.bindings.findByWallet(wid)), ...(await db.bindings.findByWallet(widAlt))];
+  return bindings.find(
+    (b) =>
+      b.authority_id === trigger.authority_id &&
+      b.status === 'active' &&
+      Array.isArray(b.recipient_indices) &&
+      b.recipient_indices.some((idx) => Number(idx) === Number(trigger.recipient_index)) &&
+      (b.manifest_arweave_tx_id || (Array.isArray(b.encrypted_packages) && b.encrypted_packages.some(p => p.rwa_upload_body)))
+  ) || null;
+}
+
 // H-05 FIX: Retry helper for Arweave audit uploads
 async function retryArweaveUpload(fn, maxRetries = 3) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -289,6 +308,33 @@ async function _doFinalizeTrigger(triggerId, trigger) {
     return trigger;
   }
 
+  // ── Pre-finalization: write FALLBACK attestation for non-oracle triggers ──
+  // For non-oracle (legal_event, activity_drand): write FALLBACK attestation to chain BEFORE
+  // finalizing trigger status. This ensures VaultShareEscrow blocks owner reclaim atomically
+  // with the release decision. If attestation write fails, DON'T finalize — the background
+  // scheduler will retry next cycle (safe because no human is waiting).
+  // For oracle triggers: Oracle attestation already exists from CRE; supplementary FALLBACK
+  // for other recipients is written after delivery (unchanged).
+  const activeBinding = trigger.decision === 'release' && trigger.recipient_index != null
+    ? await findActiveBindingForTrigger(trigger)
+    : null;
+
+  if (!isOracleTrigger && trigger.decision === 'release' && activeBinding && Array.isArray(activeBinding.recipient_indices)) {
+    try {
+      await submitReleaseAttestationForAllRecipients(
+        activeBinding.wallet_id,
+        activeBinding.recipient_indices.map(Number),
+        trigger.decision_evidence_hash,
+        trigger.decision_reason_code
+      );
+      console.log('[trigger/decision] Pre-finalization FALLBACK attestation written for all recipients (non-oracle cooldown)');
+    } catch (attestErr) {
+      console.error('[trigger/decision] CRITICAL: Pre-finalization FALLBACK attestation failed, deferring finalization:', attestErr.message);
+      // Don't finalize — background scheduler will retry next 30s cycle
+      return trigger;
+    }
+  }
+
   // Cooldown expired → finalize
   const finalizedTrigger = {
     ...trigger,
@@ -299,20 +345,9 @@ async function _doFinalizeTrigger(triggerId, trigger) {
   await db.triggers.update(triggerId, finalizedTrigger);
 
   // When finalized as 'release', deliver stored RWA credential NFT to all recipients on the binding.
-  if (trigger.decision === 'release' && trigger.recipient_index != null) {
+  if (trigger.decision === 'release' && trigger.recipient_index != null && activeBinding) {
     try {
-      const wid = trigger.wallet_id;
-      const widAlt = wid.startsWith('0x') ? wid.slice(2) : `0x${wid}`;
-      const bindings = [...(await db.bindings.findByWallet(wid)), ...(await db.bindings.findByWallet(widAlt))];
-      const activeBinding = bindings.find(
-        (b) =>
-          b.authority_id === trigger.authority_id &&
-          b.status === 'active' &&
-          Array.isArray(b.recipient_indices) &&
-          b.recipient_indices.some((idx) => Number(idx) === Number(trigger.recipient_index)) &&
-          (b.manifest_arweave_tx_id || (Array.isArray(b.encrypted_packages) && b.encrypted_packages.some(p => p.rwa_upload_body)))
-      );
-      if (activeBinding && Array.isArray(activeBinding.recipient_indices)) {
+      if (Array.isArray(activeBinding.recipient_indices)) {
         const deliveredIndices = [];
         for (let i = 0; i < activeBinding.recipient_indices.length; i++) {
           const recipientIndex = Number(activeBinding.recipient_indices[i]);
@@ -343,9 +378,9 @@ async function _doFinalizeTrigger(triggerId, trigger) {
             } catch (_) { /* audit best-effort */ }
           }
         }
-        // Only write on-chain RELEASE attestation for recipients we successfully delivered NFT to.
-        // Recipients we didn't deliver to have no attestation → owner can still reclaim their shares.
-        if (deliveredIndices.length > 0) {
+        // For oracle triggers: write supplementary FALLBACK attestation for delivered recipients
+        // (non-oracle already wrote attestation pre-finalization for ALL recipients above)
+        if (isOracleTrigger && deliveredIndices.length > 0) {
           await submitReleaseAttestationForAllRecipients(
             activeBinding.wallet_id,
             deliveredIndices,
@@ -488,6 +523,29 @@ router.post('/:id/decision', authorityAuthMiddleware, async (req, res) => {
       newStatus = decisionData.decision;
     }
 
+    // ── Pre-status-update: write FALLBACK attestation for non-oracle immediate release ──
+    // For non-oracle triggers with immediate release (zero cooldown), write FALLBACK attestation
+    // BEFORE updating trigger status. This ensures VaultShareEscrow blocks owner reclaim
+    // atomically. Best-effort: if fails, log critical warning but proceed (authority explicitly
+    // requested immediate action; blocking could impede legal execution).
+    if (newStatus === 'released' && !isOracleTrigger && trigger.recipient_index != null) {
+      const preReleaseBinding = await findActiveBindingForTrigger(trigger);
+      if (preReleaseBinding && Array.isArray(preReleaseBinding.recipient_indices)) {
+        try {
+          await submitReleaseAttestationForAllRecipients(
+            preReleaseBinding.wallet_id,
+            preReleaseBinding.recipient_indices.map(Number),
+            decisionData.evidence_hash,
+            decisionData.reason_code
+          );
+          console.log('[trigger/decision] Pre-release FALLBACK attestation written for all recipients (non-oracle immediate)');
+        } catch (attestErr) {
+          console.error('[trigger/decision] CRITICAL: Pre-release FALLBACK attestation failed (proceeding with release):', attestErr.message);
+          // Best-effort for immediate release: authority's signed decision is the trust anchor
+        }
+      }
+    }
+
     // Update the trigger with the decision
     const updatedTrigger = {
       ...trigger,
@@ -527,17 +585,7 @@ router.post('/:id/decision', authorityAuthMiddleware, async (req, res) => {
     // If release (immediate or after cooldown), deliver RWA NFT to all recipients on the binding
     if (newStatus === 'released' && trigger.recipient_index != null) {
       try {
-        const wid = trigger.wallet_id;
-        const widAlt = wid.startsWith('0x') ? wid.slice(2) : `0x${wid}`;
-        const bindings = [...(await db.bindings.findByWallet(wid)), ...(await db.bindings.findByWallet(widAlt))];
-        const activeBinding = bindings.find(
-          (b) =>
-            b.authority_id === trigger.authority_id &&
-            b.status === 'active' &&
-            Array.isArray(b.recipient_indices) &&
-            b.recipient_indices.some((idx) => Number(idx) === Number(trigger.recipient_index)) &&
-            (b.manifest_arweave_tx_id || (Array.isArray(b.encrypted_packages) && b.encrypted_packages.some(p => p.rwa_upload_body)))
-        );
+        const activeBinding = await findActiveBindingForTrigger(trigger);
         if (activeBinding && Array.isArray(activeBinding.recipient_indices)) {
           const deliveredIndices = [];
           for (let i = 0; i < activeBinding.recipient_indices.length; i++) {
@@ -569,8 +617,9 @@ router.post('/:id/decision', authorityAuthMiddleware, async (req, res) => {
               } catch (_) { /* audit best-effort */ }
             }
           }
-          // Only write on-chain RELEASE attestation for recipients we successfully delivered NFT to.
-          if (deliveredIndices.length > 0) {
+          // For oracle triggers: write supplementary FALLBACK attestation for delivered recipients
+          // (non-oracle already wrote attestation pre-status-update for ALL recipients above)
+          if (isOracleTrigger && deliveredIndices.length > 0) {
             await submitReleaseAttestationForAllRecipients(
               activeBinding.wallet_id,
               deliveredIndices,

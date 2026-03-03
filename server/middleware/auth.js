@@ -577,7 +577,22 @@ async function authorityAuthMiddleware(req, res, next) {
     }
     return res.status(401).json({ error: 'Session expired, please sign in again' });
   }
-  return authMiddleware(req, res, next);
+
+  // Fallback to challenge-response auth, then verify the caller is a registered authority
+  return authMiddleware(req, res, async () => {
+    if (!req.auth?.pubkey) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+    // Derive authority_id and verify it exists in the registry
+    const crypto = require('crypto');
+    const derivedAuthorityId = crypto.createHash('sha256').update(req.auth.pubkey).digest('hex');
+    const authority = await db.authorities.findById(derivedAuthorityId);
+    if (!authority) {
+      return res.status(403).json({ error: 'Forbidden', detail: 'Caller is not a registered authority' });
+    }
+    req.auth.authority_id = derivedAuthorityId;
+    next();
+  });
 }
 
 // ---------------------------------------------------------------------------

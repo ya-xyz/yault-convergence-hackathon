@@ -3,7 +3,11 @@
 jest.mock('../../server/db', () => ({
   triggers: {
     findAll: jest.fn(),
+    findById: jest.fn(),
     update: jest.fn(),
+  },
+  bindings: {
+    findByWallet: jest.fn().mockResolvedValue([]),
   },
   auditLog: {
     create: jest.fn().mockResolvedValue(undefined),
@@ -14,6 +18,12 @@ jest.mock('../../server/services/attestationGate', () => ({
   evaluateReleaseAttestationGate: jest.fn(),
 }));
 
+jest.mock('../../server/services/triggerPolicy', () => ({
+  isReleasePaused: jest.fn().mockReturnValue(false),
+  isHighValueWallet: jest.fn().mockReturnValue(false),
+  hasLegalConfirmation: jest.fn().mockReturnValue(false),
+}));
+
 const db = require('../../server/db');
 const { evaluateReleaseAttestationGate } = require('../../server/services/attestationGate');
 const pendingRouter = require('../../server/api/trigger/pending');
@@ -21,6 +31,11 @@ const pendingRouter = require('../../server/api/trigger/pending');
 describe('trigger pending cooldown finalizer', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    // By default, findById returns the trigger passed to it (consistent with findAll mock)
+    db.triggers.findById.mockImplementation(async (id) => {
+      const all = await db.triggers.findAll();
+      return all.find(t => t.trigger_id === id) || null;
+    });
   });
 
   test('keeps cooldown state on ATTESTATION_RPC_ERROR (soft failure)', async () => {
@@ -94,4 +109,3 @@ describe('trigger pending cooldown finalizer', () => {
     expect(updated.status).toBe('released');
   });
 });
-

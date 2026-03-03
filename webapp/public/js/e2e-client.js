@@ -77,10 +77,9 @@ async function initE2EClient(provider) {
       _e2e.solanaAddress = identity.solanaAddress;
       _e2e.evmAddress = identity.evmAddress;
       _e2e.enabled = true;
-      console.log('[E2E] Identity loaded:', {
-        xidentity: _e2e.xidentity.substring(0, 16) + '...',
-        solana: _e2e.solanaAddress.substring(0, 12) + '...',
-      });
+      if (window.YAULT_ENV && window.YAULT_ENV.logging && window.YAULT_ENV.logging.enableConsoleLog) {
+        console.log('[E2E] Identity loaded');
+      }
       return true;
     }
   } catch (err) {

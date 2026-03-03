@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {Test, console2} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 import {YaultVault} from "../src/YaultVault.sol";
 import {YaultVaultCreator} from "../src/YaultVaultCreator.sol";
@@ -59,8 +60,9 @@ contract VaultShareEscrowTest is Test {
         token = new MockToken();
 
         // Deploy vault via factory
-        YaultVaultCreator creator = new YaultVaultCreator();
+        YaultVaultCreator creator = new YaultVaultCreator(address(this));
         YaultVaultFactory factory = new YaultVaultFactory(deployer, platform, address(creator));
+        creator.transferOwnership(address(factory));
         vm.prank(deployer);
         address vaultAddr = factory.createVault(IERC20(address(token)), "Yault USDC", "yUSDC");
         vault = YaultVault(vaultAddr);
@@ -86,9 +88,9 @@ contract VaultShareEscrowTest is Test {
         vm.prank(alice);
         vault.deposit(DEPOSIT_AMOUNT, alice);
 
-        // Alice registers wallet in escrow
-        vm.prank(alice);
-        escrow.registerWallet(WALLET_HASH);
+        // Alice registers wallet in escrow (owner registers on behalf)
+        vm.prank(deployer);
+        escrow.registerWallet(WALLET_HASH, alice);
     }
 
     // -----------------------------------------------------------------------
@@ -469,8 +471,41 @@ contract VaultShareEscrowTest is Test {
         // setUp already registered WALLET_HASH for alice
         assertEq(escrow.walletOwner(WALLET_HASH), alice);
 
-        vm.prank(attacker);
+        // Owner tries to register same wallet again — should revert
+        vm.prank(deployer);
         vm.expectRevert(VaultShareEscrow.WalletAlreadyRegistered.selector);
-        escrow.registerWallet(WALLET_HASH);
+        escrow.registerWallet(WALLET_HASH, alice);
+    }
+
+    function testThreat_RegisterWallet_NonOwnerReverts() public {
+        bytes32 newHash = keccak256("new-wallet");
+        vm.prank(attacker);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, attacker));
+        escrow.registerWallet(newHash, attacker);
+    }
+
+    function testThreat_RegisterWallet_ZeroOwnerReverts() public {
+        bytes32 newHash = keccak256("zero-owner-wallet");
+        vm.prank(deployer);
+        vm.expectRevert(VaultShareEscrow.ZeroAddress.selector);
+        escrow.registerWallet(newHash, address(0));
+    }
+
+    function testClaim_TotalDepositedDecrements() public {
+        uint256 shares = vault.balanceOf(alice);
+        uint256[] memory indices = new uint256[](1);
+        uint256[] memory amounts = new uint256[](1);
+        indices[0] = 1;
+        amounts[0] = shares;
+
+        _approveAndDeposit(shares, indices, amounts);
+        assertEq(escrow.totalDeposited(WALLET_HASH), shares, "totalDeposited should equal shares after deposit");
+
+        _submitRelease(1);
+
+        vm.prank(alice);
+        escrow.claim(WALLET_HASH, 1, bob, shares, true);
+
+        assertEq(escrow.totalDeposited(WALLET_HASH), 0, "totalDeposited should be 0 after full claim");
     }
 }

@@ -17,8 +17,12 @@ const TEST_DB_PATH = path.join(__dirname, '..', '..', 'data', 'test-oracle-' + D
 process.env.DATABASE_PATH = TEST_DB_PATH;
 process.env.NODE_ENV = 'test';
 process.env.ADMIN_TOKEN = 'test-admin-token-oracle';
+process.env.MULTISIG_DISABLED = 'true';
 process.env.ORACLE_ATTESTATION_ENABLED = 'true';
 process.env.RELEASE_ATTESTATION_ADDRESS = '0x0000000000000000000000000000000000000001';
+process.env.ORACLE_INTERNAL_API_KEY = 'test-oracle-key';
+
+const nacl = require('tweetnacl');
 
 jest.mock('../../server/services/attestationClient', () => ({
   getAttestation: jest.fn(),
@@ -30,11 +34,36 @@ const { getAttestation } = require('../../server/services/attestationClient');
 
 let app;
 let request;
+let sessionToken;
 
-beforeAll(() => {
+function generateKeypair() {
+  const kp = nacl.sign.keyPair();
+  return {
+    publicKey: Buffer.from(kp.publicKey).toString('hex'),
+    secretKey: kp.secretKey,
+  };
+}
+
+async function authenticate(pubkeyHex, secretKey) {
+  const challengeRes = await request
+    .post('/api/auth/challenge')
+    .send({ pubkey: pubkeyHex })
+    .expect(200);
+  const { challenge_id, challenge } = challengeRes.body;
+  const sig = nacl.sign.detached(Buffer.from(challenge, 'hex'), secretKey);
+  return { challenge_id, signature: Buffer.from(sig).toString('hex') };
+}
+
+beforeAll(async () => {
   const supertest = require('supertest');
   app = require('../../server/index');
   request = supertest(app);
+
+  // Get a session token for authenticated requests
+  const kp = generateKeypair();
+  const auth = await authenticate(kp.publicKey, kp.secretKey);
+  const verifyRes = await request.post('/api/auth/verify').send(auth).expect(200);
+  sessionToken = verifyRes.body.session_token;
 });
 
 afterAll(() => {
@@ -62,6 +91,7 @@ describe('GET /api/trigger/attestation', () => {
 
     const res = await request
       .get('/api/trigger/attestation')
+      .set('X-Client-Session', sessionToken)
       .query({ wallet_id: 'wallet-1', recipient_index: 0 })
       .expect(200);
 
@@ -82,6 +112,7 @@ describe('GET /api/trigger/attestation', () => {
 
     const res = await request
       .get('/api/trigger/attestation')
+      .set('X-Client-Session', sessionToken)
       .query({ wallet_id: 'w2', recipient_index: 1 })
       .expect(200);
 
@@ -90,32 +121,38 @@ describe('GET /api/trigger/attestation', () => {
   });
 
   test('returns 400 when wallet_id or recipient_index missing', async () => {
-    await request.get('/api/trigger/attestation').query({ wallet_id: 'w1' }).expect(400);
-    await request.get('/api/trigger/attestation').query({ recipient_index: 0 }).expect(400);
+    await request.get('/api/trigger/attestation').set('X-Client-Session', sessionToken).query({ wallet_id: 'w1' }).expect(400);
+    await request.get('/api/trigger/attestation').set('X-Client-Session', sessionToken).query({ recipient_index: 0 }).expect(400);
   });
 
   test('returns 400 when recipient_index is invalid', async () => {
     await request
       .get('/api/trigger/attestation')
+      .set('X-Client-Session', sessionToken)
       .query({ wallet_id: 'w1', recipient_index: -1 })
       .expect(400);
     await request
       .get('/api/trigger/attestation')
+      .set('X-Client-Session', sessionToken)
       .query({ wallet_id: 'w1', recipient_index: 'not-a-number' })
       .expect(400);
     await request
       .get('/api/trigger/attestation')
+      .set('X-Client-Session', sessionToken)
       .query({ wallet_id: 'w1', recipient_index: '1abc' })
       .expect(400);
   });
 });
 
 describe('POST /api/trigger/from-oracle', () => {
+  const oracleKeyHeader = { 'X-Oracle-Internal-Key': 'test-oracle-key' };
+
   test('returns 404 when no oracle attestation on chain', async () => {
     getAttestation.mockResolvedValue(null);
 
     const res = await request
       .post('/api/trigger/from-oracle')
+      .set(oracleKeyHeader)
       .send({ wallet_id: 'wallet-xyz', recipient_index: 0 })
       .expect(404);
 
@@ -133,6 +170,7 @@ describe('POST /api/trigger/from-oracle', () => {
 
     await request
       .post('/api/trigger/from-oracle')
+      .set(oracleKeyHeader)
       .send({ wallet_id: 'w1', recipient_index: 0 })
       .expect(400);
   });
@@ -149,6 +187,7 @@ describe('POST /api/trigger/from-oracle', () => {
 
     const res = await request
       .post('/api/trigger/from-oracle')
+      .set(oracleKeyHeader)
       .send({ wallet_id: 'wallet-release-1', recipient_index: 0 })
       .expect(201);
 
@@ -161,6 +200,7 @@ describe('POST /api/trigger/from-oracle', () => {
     getAttestation.mockResolvedValue(null);
     const attestRes = await request
       .get('/api/trigger/attestation')
+      .set('X-Client-Session', sessionToken)
       .query({ wallet_id: 'wallet-release-1', recipient_index: 0 });
     expect(attestRes.body.attestation).toBeNull();
   });
@@ -175,14 +215,14 @@ describe('POST /api/trigger/from-oracle', () => {
     });
 
     const body = { wallet_id: 'dup-wallet', recipient_index: 2 };
-    await request.post('/api/trigger/from-oracle').send(body).expect(201);
-    const res = await request.post('/api/trigger/from-oracle').send(body).expect(409);
+    await request.post('/api/trigger/from-oracle').set(oracleKeyHeader).send(body).expect(201);
+    const res = await request.post('/api/trigger/from-oracle').set(oracleKeyHeader).send(body).expect(409);
     expect(res.body.error).toContain('Duplicate trigger');
   });
 
   test('returns 400 when wallet_id or recipient_index missing', async () => {
-    await request.post('/api/trigger/from-oracle').send({ wallet_id: 'w1' }).expect(400);
-    await request.post('/api/trigger/from-oracle').send({ recipient_index: 0 }).expect(400);
+    await request.post('/api/trigger/from-oracle').set(oracleKeyHeader).send({ wallet_id: 'w1' }).expect(400);
+    await request.post('/api/trigger/from-oracle').set(oracleKeyHeader).send({ recipient_index: 0 }).expect(400);
   });
 
   test('trims wallet_id and uses it consistently', async () => {
@@ -196,6 +236,7 @@ describe('POST /api/trigger/from-oracle', () => {
 
     const res = await request
       .post('/api/trigger/from-oracle')
+      .set(oracleKeyHeader)
       .send({ wallet_id: '  trimmed-wallet  ', recipient_index: 0 })
       .expect(201);
 
@@ -211,7 +252,10 @@ describe('POST /api/trigger/from-oracle', () => {
 
 describe('GET /api/oracle/pending', () => {
   test('returns { requests: [] } when oracle is enabled', async () => {
-    const res = await request.get('/api/oracle/pending').expect(200);
+    const res = await request
+      .get('/api/oracle/pending')
+      .set('X-Oracle-Internal-Key', 'test-oracle-key')
+      .expect(200);
     expect(res.body).toEqual({ requests: [] });
   });
 });

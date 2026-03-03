@@ -63,8 +63,9 @@ contract IntegrationEscrowClaimTest is Test {
         token = new IntegrationMockToken();
 
         // Deploy vault via factory
-        YaultVaultCreator creator = new YaultVaultCreator();
+        YaultVaultCreator creator = new YaultVaultCreator(address(this));
         YaultVaultFactory factory = new YaultVaultFactory(deployer, platform, address(creator));
+        creator.transferOwnership(address(factory));
         vm.prank(deployer);
         address vaultAddr = factory.createVault(IERC20(address(token)), "Yault USDC", "yUSDC");
         vault = YaultVault(vaultAddr);
@@ -104,8 +105,8 @@ contract IntegrationEscrowClaimTest is Test {
         uint256[] memory indices,
         uint256[] memory amounts
     ) internal {
-        vm.prank(alice);
-        escrow.registerWallet(walletHash);
+        vm.prank(deployer);
+        escrow.registerWallet(walletHash, alice);
         vm.prank(alice);
         vault.approve(address(escrow), shares);
         vm.prank(alice);
@@ -476,8 +477,8 @@ contract IntegrationEscrowClaimTest is Test {
         assertEq(vault.balanceOf(alice), shares, "alice got shares back");
 
         // Alice can re-deposit (different wallet hash, since same wallet was already registered)
-        vm.prank(alice);
-        escrow.registerWallet(WALLET_HASH_2);
+        vm.prank(deployer);
+        escrow.registerWallet(WALLET_HASH_2, alice);
         vm.prank(alice);
         vault.approve(address(escrow), shares);
 
@@ -617,18 +618,18 @@ contract IntegrationEscrowClaimTest is Test {
     // =======================================================================
 
     function testE2E_DoubleRegister_Reverts() public {
-        vm.prank(alice);
-        escrow.registerWallet(WALLET_HASH);
+        vm.prank(deployer);
+        escrow.registerWallet(WALLET_HASH, alice);
 
         // Second registration should fail
-        vm.prank(alice);
+        vm.prank(deployer);
         vm.expectRevert(VaultShareEscrow.WalletAlreadyRegistered.selector);
-        escrow.registerWallet(WALLET_HASH);
+        escrow.registerWallet(WALLET_HASH, alice);
 
-        // Different user also cannot register same wallet
-        vm.prank(bob);
+        // Different wallet owner also cannot register same wallet hash
+        vm.prank(deployer);
         vm.expectRevert(VaultShareEscrow.WalletAlreadyRegistered.selector);
-        escrow.registerWallet(WALLET_HASH);
+        escrow.registerWallet(WALLET_HASH, bob);
     }
 
     // =======================================================================
@@ -638,8 +639,8 @@ contract IntegrationEscrowClaimTest is Test {
     function testE2E_DepositSumMismatch_Reverts() public {
         uint256 shares = _aliceDepositsToVault(DEPOSIT_AMOUNT);
 
-        vm.prank(alice);
-        escrow.registerWallet(WALLET_HASH);
+        vm.prank(deployer);
+        escrow.registerWallet(WALLET_HASH, alice);
         vm.prank(alice);
         vault.approve(address(escrow), shares);
 

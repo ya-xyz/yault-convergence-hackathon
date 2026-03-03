@@ -354,21 +354,23 @@ export function custody_parse_admin_factor_with_amount(blob_hex) {
 }
 
 /**
- * Reconstruct a secret from Shamir shares.
+ * Reconstruct a secret from Shamir shares with explicit threshold enforcement.
  * Returns hex-encoded secret, or "error:...".
  *
  * # Arguments
  * * `shares_json` - JSON array string: [{"index": 1, "data_hex": "..."}, ...]
+ * * `threshold` - Minimum number of shares required (must match the original split threshold)
  * @param {string} shares_json
+ * @param {number} threshold
  * @returns {string}
  */
-export function custody_shamir_reconstruct(shares_json) {
+export function custody_shamir_reconstruct(shares_json, threshold) {
     let deferred2_0;
     let deferred2_1;
     try {
         const ptr0 = passStringToWasm0(shares_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.custody_shamir_reconstruct(ptr0, len0);
+        const ret = wasm.custody_shamir_reconstruct(ptr0, len0, threshold);
         deferred2_0 = ret[0];
         deferred2_1 = ret[1];
         return getStringFromWasm0(ret[0], ret[1]);

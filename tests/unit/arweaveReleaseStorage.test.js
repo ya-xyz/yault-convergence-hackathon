@@ -107,9 +107,10 @@ describe('fetchFromArweave', () => {
     });
     const result = await fetchFromArweave(validTxId);
     expect(result).toBe('{"data":"test"}');
-    expect(global.fetch).toHaveBeenCalledTimes(1);
-    const calledUrl = global.fetch.mock.calls[0][0];
-    expect(calledUrl).toBe(`https://arweave.net/${validTxId}`);
+    // Multi-gateway: races configured gateway + fallback gateways concurrently
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    const calledUrls = global.fetch.mock.calls.map(c => c[0]);
+    expect(calledUrls).toContain(`https://arweave.net/${validTxId}`);
   });
 
   test('returns null on HTTP error', async () => {

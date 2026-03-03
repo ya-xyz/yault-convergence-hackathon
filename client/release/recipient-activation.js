@@ -27,7 +27,6 @@ try {
 
 import {
   custody_build_composite,
-  custody_shamir_reconstruct,
   custody_build_acegf_context,
 } from '../../wasm-core/pkg/yault_custody_wasm';
 
@@ -514,7 +513,12 @@ export async function initiateTransfer(credentials, chain, toAddress, amount) {
     }
 
     const satoshis = Math.floor(parseFloat(amount) * 1e8);
-    const feeRate = 10;
+    // Fetch current fee rate from mempool API, fallback to default if unavailable
+    let feeRate = 10; // default: 10 sat/vB
+    try {
+      const feeEstimates = await _fetchJson(`${MEMPOOL_API}/v1/fees/recommended`);
+      feeRate = feeEstimates?.halfHourFee || feeEstimates?.hourFee || 10;
+    } catch (_) { /* use default fee rate */ }
     const estimatedFee = 140 * feeRate;
 
     utxos.sort((a, b) => b.value - a.value);
@@ -572,7 +576,11 @@ export async function initiateTransfer(credentials, chain, toAddress, amount) {
 
     const rpcUrl = evmChain.rpc;
     const chainId = evmChain.chainId;
-    const weiAmount = '0x' + BigInt(Math.floor(parseFloat(amount) * 1e18)).toString(16);
+    // Use string-based conversion to avoid parseFloat precision loss for large ETH amounts
+    const parts = String(amount).split('.');
+    const wholePart = parts[0] || '0';
+    const fracPart = (parts[1] || '').padEnd(18, '0').slice(0, 18);
+    const weiAmount = '0x' + BigInt(wholePart + fracPart).toString(16);
 
     const wallet = view_wallet_wasm(mnemonic, compositeHex);
     _checkWasmObject(wallet);

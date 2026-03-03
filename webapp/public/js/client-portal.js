@@ -25,19 +25,167 @@ const API_BASE = (typeof YAULT_ENV !== 'undefined' && YAULT_ENV?.api?.baseUrl)
   ? YAULT_ENV.api.baseUrl
   : (window.location.port === '3001' ? '/api' : (window.location.hostname === 'localhost' ? 'http://localhost:3001/api' : 'https://api.yault.xyz/api'));
 
+const PLAN_WRITE_QUEUE_KEY = 'yault_plan_write_retry_v1';
+const PLAN_WRITE_RETRY_BASE_MS = 30 * 1000;
+let _planWriteFlushInFlight = false;
+let _planWriteRetryTimer = null;
+
+function _loadPlanWriteQueue() {
+  try {
+    const raw = sessionStorage.getItem(PLAN_WRITE_QUEUE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function _savePlanWriteQueue(items) {
+  try {
+    if (!items || items.length === 0) {
+      sessionStorage.removeItem(PLAN_WRITE_QUEUE_KEY);
+      return;
+    }
+    sessionStorage.setItem(PLAN_WRITE_QUEUE_KEY, JSON.stringify(items));
+  } catch (_) {
+    // Best effort only.
+  }
+}
+
+function _planWriteEndpoint(type) {
+  if (type === 'admin_factor') return '/wallet-plan/admin-factor';
+  if (type === 'path_credentials') return '/wallet-plan/path-credentials';
+  if (type === 'send_release_link') return '/wallet-plan/send-release-link';
+  return null;
+}
+
+function _planWriteKey(type, payload) {
+  const p = payload || {};
+  if (type === 'admin_factor') return `${type}:${p.recipientIndex || ''}:${p.label || ''}`;
+  if (type === 'path_credentials') return `${type}:${p.recipientIndex || ''}:${p.mnemonic_hash || ''}`;
+  if (type === 'send_release_link') return `${type}:${p.authority_id || ''}:${p.recipient_id || ''}`;
+  return `${type}:${JSON.stringify(p)}`;
+}
+
+function queuePlanWrite(type, payload, reason) {
+  const endpoint = _planWriteEndpoint(type);
+  if (!endpoint) return;
+  const key = _planWriteKey(type, payload);
+  const now = Date.now();
+  const queue = _loadPlanWriteQueue();
+  const existingIndex = queue.findIndex((item) => item && item.key === key);
+  const nextItem = {
+    key,
+    type,
+    endpoint,
+    payload,
+    attempts: 0,
+    next_retry_at: now + PLAN_WRITE_RETRY_BASE_MS,
+    last_error: reason || 'queued',
+    updated_at: now,
+  };
+  if (existingIndex >= 0) queue[existingIndex] = { ...queue[existingIndex], ...nextItem };
+  else queue.push(nextItem);
+  _savePlanWriteQueue(queue);
+}
+
+async function _postPlanWrite(endpoint, payload, headers) {
+  const resp = await apiFetch(`${API_BASE}${endpoint}`, {
+    method: 'POST',
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) {
+    const errBody = await resp.json().catch(() => ({}));
+    throw new Error(errBody.error || resp.statusText || `HTTP ${resp.status}`);
+  }
+}
+
+async function persistPlanWriteOrQueue(type, payload) {
+  const endpoint = _planWriteEndpoint(type);
+  if (!endpoint) return { ok: false, queued: false, error: 'unknown type' };
+  try {
+    const headers = await getAuthHeadersAsync();
+    await _postPlanWrite(endpoint, payload, headers);
+    return { ok: true, queued: false };
+  } catch (err) {
+    queuePlanWrite(type, payload, err.message || 'request failed');
+    return { ok: false, queued: true, error: err.message || 'request failed' };
+  }
+}
+
+async function flushPendingPlanWrites() {
+  if (_planWriteFlushInFlight) return { flushed: 0, remaining: _loadPlanWriteQueue().length };
+  if (!wallet || !wallet.connected || !state.auth) return { flushed: 0, remaining: _loadPlanWriteQueue().length };
+  const queue = _loadPlanWriteQueue();
+  if (queue.length === 0) return { flushed: 0, remaining: 0 };
+
+  _planWriteFlushInFlight = true;
+  try {
+    const headers = await getAuthHeadersAsync();
+    const now = Date.now();
+    const nextQueue = [];
+    let flushed = 0;
+
+    for (const item of queue) {
+      if (!item || !item.endpoint) continue;
+      if (item.next_retry_at && now < Number(item.next_retry_at)) {
+        nextQueue.push(item);
+        continue;
+      }
+      try {
+        await _postPlanWrite(item.endpoint, item.payload, headers);
+        flushed += 1;
+      } catch (err) {
+        const attempts = Number(item.attempts || 0) + 1;
+        const backoff = Math.min(60 * 60 * 1000, PLAN_WRITE_RETRY_BASE_MS * Math.pow(2, Math.min(attempts, 8) - 1));
+        nextQueue.push({
+          ...item,
+          attempts,
+          next_retry_at: Date.now() + backoff,
+          last_error: err.message || 'retry failed',
+          updated_at: Date.now(),
+        });
+      }
+    }
+
+    _savePlanWriteQueue(nextQueue);
+    return { flushed, remaining: nextQueue.length };
+  } finally {
+    _planWriteFlushInFlight = false;
+  }
+}
+
+function ensurePlanWriteRetryLoop() {
+  if (_planWriteRetryTimer) return;
+  _planWriteRetryTimer = setInterval(() => {
+    flushPendingPlanWrites().catch(() => {});
+  }, 60 * 1000);
+}
+
 /** Generate a random password of given length (alphanumeric, easy to type), default 12 chars. */
 function generateRandomPassphrase(len) {
   len = len || 12;
   var chars = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  var buf = new Uint8Array(len);
-  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
-    crypto.getRandomValues(buf);
-  } else {
-    for (var i = 0; i < len; i++) buf[i] = Math.floor(Math.random() * 256);
+  if (typeof crypto === 'undefined' || !crypto.getRandomValues) {
+    throw new Error('Secure random number generator not available');
   }
-  var out = '';
-  for (var i = 0; i < len; i++) out += chars[buf[i] % chars.length];
-  return out;
+  var buf = new Uint8Array(len);
+  crypto.getRandomValues(buf);
+  // Use rejection sampling to avoid modulo bias
+  var result = '';
+  for (var i = 0; i < len; i++) {
+    var maxUnbiased = 256 - (256 % chars.length); // = 228
+    var val = buf[i];
+    while (val >= maxUnbiased) {
+      var extra = new Uint8Array(1);
+      crypto.getRandomValues(extra);
+      val = extra[0];
+    }
+    result += chars[val % chars.length];
+  }
+  return result;
 }
 
 // ─── Wallet Connector (loaded from shared module) ───
@@ -69,7 +217,7 @@ const state = {
   generatedPathCredentials: null, // Deprecated: no longer displays plaintext, switched to RWA NFT
   credentialMintResults: null,     // [{ recipient, creds, success, txId?, error? }] — mint results, no plaintext included
   selectedFirms: [],      // [{ id, name, jurisdiction, publicKeyHex, verified }]
-  adminFactorHex: '',     // not shown to user; generated only in memory during distribute, then sent to authorities
+  adminFactorHex: null,   // SECURITY: sensitive key material, cleared after use. Never persists beyond distribute flow.
   distributionResult: null, // { shares, fingerprint? } — fingerprint not shown to user
   firmSearchResults: [],
   boundFirms: [],         // already bound firms from server
@@ -120,6 +268,8 @@ const state = {
   pathIndex: 1,
   mnemonic: '',
   passphrase: '',         // formerly "UserCred"
+  claimDecryptedPayloadText: '', // pasted Yallet/wasm decrypted credential JSON
+  claimDecryptLoading: false,
   releaseKey: '',         // formerly "AdminFactor" (may be filled from claim/lookup factors)
   releaseStatus: null,
   claimLookupFactors: [], // factors[] from GET /api/claim/:wallet_id when released
@@ -367,6 +517,8 @@ function initWallet() {
           info.allAddresses || addressesToSave ? Promise.resolve() : loadWalletAddresses(),
           refreshWalletBalances(), // Also fetch balances when opening the Wallet tab by default
         ]);
+        ensurePlanWriteRetryLoop();
+        flushPendingPlanWrites().catch(() => {});
         render();
       } catch (err) {
         showToast('Auth failed: ' + err.message, 'error');
@@ -626,6 +778,154 @@ async function hashMnemonic(mnemonic) {
   return arr.map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+function normalizeHexLike(value) {
+  return String(value || '').trim().toLowerCase().replace(/^0x/, '');
+}
+
+function isHexWithLen(value, len) {
+  const s = normalizeHexLike(value);
+  return !!s && s.length === len && /^[0-9a-f]+$/.test(s);
+}
+
+function isPlainClaimAdminFactor(value) {
+  return isHexWithLen(value, 64);
+}
+
+function isPlainClaimBlob(value) {
+  return isHexWithLen(value, 80);
+}
+
+function getEncryptedAdminPayloadFromItem(item) {
+  if (!item || typeof item !== 'object') return null;
+  const direct = item.encrypted_admin_factor || item.admin_factor_encrypted || item.admin_factor_cipher || item.encrypted_payload;
+  if (direct == null) return null;
+  if (typeof direct === 'string') return direct.trim();
+  if (typeof direct === 'object') return direct;
+  return null;
+}
+
+function pickFirstNonEmpty(source, keys) {
+  if (!source || typeof source !== 'object') return '';
+  for (const key of keys) {
+    const value = source[key];
+    if (value != null && String(value).trim() !== '') return String(value).trim();
+  }
+  return '';
+}
+
+function parseClaimDecryptedPayload(rawText) {
+  const text = String(rawText || '').trim();
+  if (!text) throw new Error('Please paste decrypted JSON first.');
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (_) {
+    throw new Error('Invalid JSON format.');
+  }
+
+  // Some decrypt outputs wrap payload JSON in content/body/data string.
+  let payload = parsed;
+  if (payload && typeof payload === 'object') {
+    const wrapped = pickFirstNonEmpty(payload, ['content', 'body', 'data', 'payload']);
+    if (wrapped && (wrapped.startsWith('{') || wrapped.startsWith('['))) {
+      try {
+        payload = JSON.parse(wrapped);
+      } catch (_) {
+        // Keep original payload if nested JSON parse fails.
+      }
+    }
+  }
+  if (!payload || typeof payload !== 'object') throw new Error('Decrypted payload must be a JSON object.');
+
+  const nestedCred = payload.credential && typeof payload.credential === 'object' ? payload.credential : null;
+  const nestedMeta = payload.meta && typeof payload.meta === 'object' ? payload.meta : null;
+  const nestedWallet = payload.wallet && typeof payload.wallet === 'object' ? payload.wallet : null;
+  const ctx = [payload, nestedCred, nestedMeta, nestedWallet].filter(Boolean);
+  const pickAny = (keys) => {
+    for (const c of ctx) {
+      const v = pickFirstNonEmpty(c, keys);
+      if (v) return v;
+    }
+    return '';
+  };
+
+  const mnemonic = pickAny(['mnemonic', 'new_mnemonic', 'recipient_mnemonic']);
+  const passphrase = pickAny(['passphrase', 'user_cred', 'userCred', 'recipient_passphrase']);
+  const releaseKey = pickAny(['admin_factor_hex', 'adminFactor', 'admin_factor', 'secondaryPassphrase', 'secondary_passphrase', 'blob_hex']);
+  const walletId = pickAny(['wallet_id', 'walletId', 'plan_wallet_id']);
+  const rawPathIndex = pickAny(['path_index', 'pathIndex', 'recipient_index', 'recipientIndex']);
+  const pathIndexNum = rawPathIndex ? parseInt(rawPathIndex, 10) : NaN;
+
+  return {
+    mnemonic,
+    passphrase,
+    releaseKey,
+    walletId,
+    pathIndex: Number.isFinite(pathIndexNum) && pathIndexNum > 0 ? pathIndexNum : null,
+  };
+}
+
+function applyClaimDecryptedPayloadToState(parsedPayload) {
+  const parsed = parsedPayload || {};
+  if (parsed.mnemonic) state.mnemonic = parsed.mnemonic;
+  if (parsed.passphrase) state.passphrase = parsed.passphrase;
+  if (parsed.releaseKey) state.releaseKey = parsed.releaseKey;
+  if (parsed.walletId) state.walletId = parsed.walletId;
+  if (parsed.pathIndex) state.pathIndex = parsed.pathIndex;
+
+  if (parsed.releaseKey) {
+    const targetAF = normalizeHexLike(parsed.releaseKey);
+    const match = (state.claimMeItems || []).find((it) => {
+      const af = normalizeHexLike(it.admin_factor_hex);
+      const blob = normalizeHexLike(it.blob_hex);
+      return (af && af === targetAF) || (blob && blob === targetAF);
+    });
+    if (match) {
+      state.selectedClaimItem = match;
+      if (match.wallet_id) state.walletId = match.wallet_id;
+      if (match.path_index) state.pathIndex = match.path_index;
+    }
+  }
+}
+
+function parseDecryptResultToClaimPayload(result) {
+  if (result == null) throw new Error('Empty decrypt result from Yallet.');
+  if (typeof result === 'string') {
+    const v = result.trim();
+    if (isPlainClaimAdminFactor(v) || isPlainClaimBlob(v)) return { releaseKey: v };
+    return parseClaimDecryptedPayload(v);
+  }
+  if (typeof result === 'object') {
+    const af = pickFirstNonEmpty(result, ['admin_factor_hex', 'adminFactor', 'admin_factor', 'blob_hex']);
+    if (af && (isPlainClaimAdminFactor(af) || isPlainClaimBlob(af))) {
+      const rawPathIndex = pickFirstNonEmpty(result, ['path_index', 'pathIndex', 'recipient_index', 'recipientIndex']);
+      const pathIndexNum = rawPathIndex ? parseInt(rawPathIndex, 10) : NaN;
+      return {
+        mnemonic: pickFirstNonEmpty(result, ['mnemonic', 'new_mnemonic', 'recipient_mnemonic']),
+        passphrase: pickFirstNonEmpty(result, ['passphrase', 'user_cred', 'userCred', 'recipient_passphrase']),
+        releaseKey: af,
+        walletId: pickFirstNonEmpty(result, ['wallet_id', 'walletId', 'plan_wallet_id']),
+        pathIndex: Number.isFinite(pathIndexNum) && pathIndexNum > 0 ? pathIndexNum : null,
+      };
+    }
+    return parseClaimDecryptedPayload(JSON.stringify(result));
+  }
+  throw new Error('Unsupported decrypt result type.');
+}
+
+async function decryptClaimPayloadWithYallet(encryptedPayload) {
+  if (typeof window !== 'undefined' && typeof window.YAULT_CLAIM_DECRYPTOR === 'function') {
+    const out = await window.YAULT_CLAIM_DECRYPTOR(encryptedPayload);
+    return parseDecryptResultToClaimPayload(out);
+  }
+  const provider = (window && (window.yallet || window.ethereum)) || null;
+  if (!provider || typeof provider.request !== 'function') {
+    throw new Error('Yallet provider not found.');
+  }
+  const out = await provider.request({ method: 'yallet_decryptWithXidentity', params: [encryptedPayload] });
+  return parseDecryptResultToClaimPayload(out);
+}
+
 /** Load user custom tokens for Redeem chain (GET /api/me/tokens?chain=) */
 async function loadRedeemUserTokens(chainKey) {
   try {
@@ -662,12 +962,14 @@ async function loadClaimMe() {
       state.selectedClaimItem = items[0];
       state.walletId = items[0].wallet_id;
       state.pathIndex = items[0].path_index;
-      state.releaseKey = items[0].admin_factor_hex || items[0].blob_hex || '';
+      const pref = items[0].admin_factor_hex || items[0].blob_hex || '';
+      state.releaseKey = (isPlainClaimAdminFactor(pref) || isPlainClaimBlob(pref)) ? pref : '';
     } else if (items.length > 1) {
       state.selectedClaimItem = items[0];
       state.walletId = items[0].wallet_id;
       state.pathIndex = items[0].path_index;
-      state.releaseKey = items[0].admin_factor_hex || items[0].blob_hex || '';
+      const pref = items[0].admin_factor_hex || items[0].blob_hex || '';
+      state.releaseKey = (isPlainClaimAdminFactor(pref) || isPlainClaimBlob(pref)) ? pref : '';
     } else {
       state.selectedClaimItem = null;
       state.error = 'No released assets for your address. Ensure you are logged in as the designated recipient and the authority has released.';
@@ -1296,7 +1598,7 @@ function renderPlanStepReview() {
       <p>${esc(planTypeLabel)}</p>
       <h3 style="margin-top:14px;">Trigger type</h3>
       <p>${triggerSummary}</p>
-      <p style="font-size:12px;color:var(--text-muted);margin-top:6px;">After the trigger condition is met, a cooldown period (e.g. about 7 days) applies before release takes effect. This gives time to correct any mistakes.</p>
+      <p style="font-size:12px;color:var(--text-muted);margin-top:6px;">After the trigger condition is met, a configurable cooldown period applies before release takes effect. This gives the owner time to correct any mistakes or cancel the release.</p>
       <h3 style="margin-top:14px;">Recipients</h3>
       ${recipients.map(r => `<div>${esc(r.label || r.name || '')} — ${r.percentage}%</div>`).join('')}
       <p style="font-size:12px;margin-top:6px;">Total: ${totalPct}%</p>
@@ -2080,12 +2382,13 @@ function renderClaimStepIndicator() {
 
 function renderClaimStep1() {
   // Use claimMeItems as sole source — /api/claim/me merges trigger + plan releases.
-  // Deduplicate by admin_factor_hex (same AF may appear from both trigger and plan flow).
-  const rawItems = (state.claimMeItems || []).filter(it => it.admin_factor_hex || it.blob_hex);
+  // Deduplicate by factor/payload key (same release may appear from multiple sources).
+  const rawItems = (state.claimMeItems || []).filter(it => it.admin_factor_hex || it.blob_hex || getEncryptedAdminPayloadFromItem(it));
   const seenAF = new Set();
   const meItems = [];
   for (const item of rawItems) {
-    const afKey = item.admin_factor_hex || item.blob_hex || '';
+    const enc = getEncryptedAdminPayloadFromItem(item);
+    const afKey = item.admin_factor_hex || item.blob_hex || (enc ? (typeof enc === 'string' ? enc : JSON.stringify(enc)) : '');
     if (afKey && seenAF.has(afKey)) continue;
     if (afKey) seenAF.add(afKey);
     meItems.push(item);
@@ -2093,13 +2396,21 @@ function renderClaimStep1() {
   const merged = meItems.map((item, i) => ({
     label: item.label || ('Release #' + (item.path_index || '')),
     walletId: item.wallet_id || item.plan_wallet_id || '',
+    pathIndex: item.path_index || '',
     af: item.admin_factor_hex || item.blob_hex || '',
+    hasEncryptedPayload: !!getEncryptedAdminPayloadFromItem(item),
     created_at: item.created_at || null,
     _meIdx: i,
   }));
   const hasReleases = merged.length > 0;
   // Pre-fill admin_factor from selected release if available
-  const prefilledAF = state.releaseKey || '';
+  const prefilledAF = (isPlainClaimAdminFactor(state.releaseKey) || isPlainClaimBlob(state.releaseKey)) ? state.releaseKey : '';
+  const selectedRelease = state.selectedClaimItem || meItems[0] || null;
+  const selectedEncryptedPayload = getEncryptedAdminPayloadFromItem(selectedRelease);
+  const canPromptDecrypt = !!selectedEncryptedPayload && !isPlainClaimAdminFactor(state.releaseKey) && !isPlainClaimBlob(state.releaseKey);
+  const selectedEncryptedPayloadText = selectedEncryptedPayload
+    ? (typeof selectedEncryptedPayload === 'string' ? selectedEncryptedPayload : JSON.stringify(selectedEncryptedPayload))
+    : '';
 
   return `
     <div class="card">
@@ -2115,7 +2426,9 @@ function renderClaimStep1() {
               <span style="font-weight:500;">${esc(item.label || 'Release')}</span>
               <span style="font-size:11px;color:var(--text-muted);margin-left:8px;">${item.walletId ? esc(item.walletId.substring(0, 12)) + '...' : ''}</span>
               ${item.created_at ? '<span style="font-size:10px;color:var(--text-muted);margin-left:8px;">' + esc(new Date(typeof item.created_at === 'number' ? item.created_at : item.created_at).toLocaleString()) + '</span>' : ''}
-              ${!item.af ? '<span style="font-size:11px;color:var(--text-muted);margin-left:8px;">Pending</span>' : ''}
+              ${!item.af && !item.hasEncryptedPayload ? '<span style="font-size:11px;color:var(--text-muted);margin-left:8px;">Pending</span>' : ''}
+              ${item.hasEncryptedPayload ? '<span style="font-size:11px;color:var(--warning);margin-left:8px;">Encrypted (decrypt required)</span>' : ''}
+              <button type="button" class="btn btn-secondary btn-use-release-af" data-release-idx="${item._meIdx}" data-release-af="${esc(item.af || '')}" data-wallet-id="${esc(item.walletId || '')}" data-path-index="${esc(String(item.pathIndex || ''))}" style="margin-left:8px;font-size:11px;padding:2px 8px;">Use</button>
             </div>
           `).join('')}
         </div>
@@ -2128,6 +2441,17 @@ function renderClaimStep1() {
       <div class="form-group">
         <label class="form-label">Mnemonic (24 words)</label>
         <textarea class="form-input form-textarea" id="claimMnemonic" rows="2" placeholder="Enter your 24-word mnemonic from the credential NFT...">${esc(state.mnemonic || '')}</textarea>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Decrypted Payload (JSON, optional)</label>
+        <textarea class="form-input form-textarea" id="claimDecryptedPayload" rows="4" placeholder='Paste Yallet/wasm decrypted JSON (or {"content":"...json..."})'>${esc(state.claimDecryptedPayloadText || '')}</textarea>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;">
+          <p class="form-hint" style="margin:0;">Auto-fills mnemonic, passphrase and AdminFactor into claim state.${canPromptDecrypt ? ' Or decrypt directly via Yallet.' : ''}</p>
+          <div style="display:flex;align-items:center;gap:8px;">
+            ${canPromptDecrypt ? `<button type="button" class="btn btn-secondary" id="btnClaimDecryptWithYallet" style="font-size:12px;" data-encrypted='${esc(selectedEncryptedPayloadText)}' ${state.claimDecryptLoading ? 'disabled' : ''}>${state.claimDecryptLoading ? 'Decrypting...' : 'Decrypt via Yallet'}</button>` : ''}
+            <button type="button" class="btn btn-secondary" id="btnClaimApplyDecryptedPayload" style="font-size:12px;">Auto Fill</button>
+          </div>
+        </div>
       </div>
       <div class="form-group">
         <label class="form-label">Passphrase</label>
@@ -2819,6 +3143,7 @@ async function handleFixEncryptionClick(e) {
       showToast('Custody WASM not available.' + hint + ' Refresh the page and reconnect Yallet, then try again.', 'error');
       return;
     }
+    // Generate AdminFactor (256-bit random) via WASM
     const afResult = window.YaultWasm.custody.custody_generate_admin_factor();
     if (afResult && afResult.error) {
       showToast(afResult.message || 'AdminFactor failed', 'error');
@@ -2846,7 +3171,6 @@ async function handleFixEncryptionClick(e) {
       return;
     }
     const prepared = await window.YaultRwaSdk.prepareCredentialNftPayload(solanaAddress, {
-      admin_factor: adminFactorHex,
       mnemonic: newMnemonic,
       passphrase: newPassphrase,
       index: recipientIndex,
@@ -2995,7 +3319,7 @@ function attachAppEvents() {
           if (existing) existing.remove();
           const toast = document.createElement('div');
           toast.className = 'toast toast-success';
-          toast.innerHTML = 'Attestation on chain (' + explorerName + '). <a href="' + explorerUrl + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:600;">View on block explorer</a>';
+          toast.innerHTML = 'Attestation on chain (' + esc(explorerName) + '). <a href="' + safeUrl(explorerUrl) + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:600;">View on block explorer</a>';
           document.body.appendChild(toast);
           setTimeout(function () { return toast.remove(); }, 10000);
         }
@@ -3576,11 +3900,11 @@ function attachAppEvents() {
                          : '<span style="color:var(--warning);">&#9679;</span>';
                 var rowId = 'signRow_' + idx;
                 var existingRow = document.getElementById(rowId);
-                var text = icon + ' ' + recipientLabel + (detail ? ' <span style="font-size:12px;color:var(--text-muted);">— ' + detail + '</span>' : '');
+                var text = icon + ' ' + esc(recipientLabel) + (detail ? ' <span style="font-size:12px;color:var(--text-muted);">\u2014 ' + esc(detail) + '</span>' : '');
                 if (existingRow) {
                   existingRow.innerHTML = text;
                 } else {
-                  listEl.insertAdjacentHTML('beforeend', '<div id="' + rowId + '" style="padding:4px 0;">' + text + '</div>');
+                  listEl.insertAdjacentHTML('beforeend', '<div id="' + esc(rowId) + '" style="padding:4px 0;">' + text + '</div>');
                 }
                 if (hintEl) {
                   if (status === 'waiting') hintEl.textContent = 'Signing ' + (idx + 1) + ' of ' + total + ': please approve the passkey prompt.';
@@ -3599,9 +3923,9 @@ function attachAppEvents() {
                 if (doneEl) doneEl.style.display = 'block';
                 if (doneList) {
                   doneList.innerHTML = results.map(function (mr) {
-                    var rLabel = (mr.recipient.label || mr.recipient.name || 'Recipient');
+                    var rLabel = esc(mr.recipient.label || mr.recipient.name || 'Recipient');
                     if (mr.success) return '<div style="padding:3px 0;"><span style="color:var(--success);">&#10003;</span> ' + rLabel + '</div>';
-                    return '<div style="padding:3px 0;"><span style="color:var(--danger);">&#10007;</span> ' + rLabel + ' — ' + (mr.error || 'failed') + '</div>';
+                    return '<div style="padding:3px 0;"><span style="color:var(--danger);">&#10007;</span> ' + rLabel + ' \u2014 ' + esc(mr.error || 'failed') + '</div>';
                   }).join('');
                 }
                 if (headerText) {
@@ -3614,6 +3938,7 @@ function attachAppEvents() {
                 const label = (r.label || r.name || '').trim() || ('Recipient ' + (i + 1));
                 const index = i + 1;
                 _signProgress(i, recipients.length, label, 'waiting', 'generating credentials...');
+                // Generate AdminFactor (256-bit random) via WASM
                 const afResult = window.YaultWasm.custody.custody_generate_admin_factor();
                 if (afResult && afResult.error) {
                   _signProgress(i, recipients.length, label, 'fail', afResult.message || 'AdminFactor failed');
@@ -3646,14 +3971,14 @@ function attachAppEvents() {
                   continue;
                 }
                 _signProgress(i, recipients.length, label, 'ok', 'signed');
-                try {
-                  const headers = await getAuthHeadersAsync();
-                  await apiFetch(`${API_BASE}/wallet-plan/admin-factor`, {
-                    method: 'POST',
-                    headers: { ...headers, 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ recipientIndex: index, label, admin_factor_hex: adminFactorHex }),
-                  });
-                } catch (_) {}
+                const adminPersist = await persistPlanWriteOrQueue('admin_factor', {
+                  recipientIndex: index,
+                  label,
+                  admin_factor_hex: adminFactorHex,
+                });
+                if (adminPersist.queued) {
+                  _signProgress(i, recipients.length, label, 'waiting', 'admin factor queued for retry');
+                }
                 var mnemonicHashHex = '';
                 try {
                   mnemonicHashHex = await hashMnemonic(newMnemonic);
@@ -3661,22 +3986,18 @@ function attachAppEvents() {
                 var evmForRecipient = (r.id && inviteIdToEvm[r.id]) ? inviteIdToEvm[r.id] : normAddr(r.address);
                 if (!evmForRecipient && evmKey) evmForRecipient = evmKey;
                 if (evmForRecipient && !evmForRecipient.startsWith('0x')) evmForRecipient = '0x' + evmForRecipient;
-                try {
-                  const headers = await getAuthHeadersAsync();
-                  await apiFetch(`${API_BASE}/wallet-plan/path-credentials`, {
-                    method: 'POST',
-                    headers: { ...headers, 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                      recipientIndex: index,
-                      label,
-                      mnemonic: newMnemonic,
-                      passphrase: newPassphrase,
-                      mnemonic_hash: mnemonicHashHex,
-                      evm_address: evmForRecipient,
-                      admin_factor_hex: adminFactorHex,
-                    }),
-                  });
-                } catch (_) {}
+                const credPersist = await persistPlanWriteOrQueue('path_credentials', {
+                  recipientIndex: index,
+                  label,
+                  mnemonic: newMnemonic,
+                  passphrase: newPassphrase,
+                  mnemonic_hash: mnemonicHashHex,
+                  evm_address: evmForRecipient,
+                  admin_factor_hex: adminFactorHex,
+                });
+                if (credPersist.queued) {
+                  _signProgress(i, recipients.length, label, 'waiting', 'credentials queued for retry');
+                }
                 if (mnemonicHashHex && adminFactorHex) {
                   state.planAdminFactors.push(adminFactorHex);
                   state.planMnemonicHashes.push(mnemonicHashHex);
@@ -3686,19 +4007,15 @@ function attachAppEvents() {
                   var releaseLink = baseUrl + '/api/authority/AdminFactor/release?recipient_id=' + encodeURIComponent(mnemonicHashHex);
                   var selectedFirms = state.planTriggerConfig.legalAuthority.selectedFirms || [];
                   var authorityId = (selectedFirms.length > 0 && selectedFirms[0].id) ? selectedFirms[0].id : (state.planAuthorityId || 'test-authority');
-                  try {
-                    const headers = await getAuthHeadersAsync();
-                    await apiFetch(`${API_BASE}/wallet-plan/send-release-link`, {
-                      method: 'POST',
-                      headers: { ...headers, 'Content-Type': 'application/json' },
-                      body: JSON.stringify({
-                        authority_id: authorityId,
-                        release_link: releaseLink,
-                        recipient_id: mnemonicHashHex,
-                        evm_address: evmForRecipient,
-                      }),
-                    });
-                  } catch (_) {}
+                  const linkPersist = await persistPlanWriteOrQueue('send_release_link', {
+                    authority_id: authorityId,
+                    release_link: releaseLink,
+                    recipient_id: mnemonicHashHex,
+                    evm_address: evmForRecipient,
+                  });
+                  if (linkPersist.queued) {
+                    _signProgress(i, recipients.length, label, 'waiting', 'release-link queued for retry');
+                  }
                   if (authorityProfile && authorityProfile.solana_address && authorityProfile.xidentity && window.YaultRwaSdk && typeof window.YaultRwaSdk.mintCredentialNft === 'function' && window.YAULT_RWA_CONFIG && window.YAULT_RWA_CONFIG.uploadAndMintApiUrl) {
                     try {
                       await window.YaultRwaSdk.mintCredentialNft(authorityProfile.solana_address, {
@@ -3770,7 +4087,7 @@ function attachAppEvents() {
                           if (existingToast) existingToast.remove();
                           var escrowToast = document.createElement('div');
                           escrowToast.className = 'toast toast-success';
-                          escrowToast.innerHTML = 'Escrow on chain (' + escrowExplorerName + '). <a href="' + escrowExplorerUrl + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:600;">View on block explorer</a>';
+                          escrowToast.innerHTML = 'Escrow on chain (' + esc(escrowExplorerName) + '). <a href="' + safeUrl(escrowExplorerUrl) + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:600;">View on block explorer</a>';
                           document.body.appendChild(escrowToast);
                           setTimeout(function () { return escrowToast.remove(); }, 10000);
                         }
@@ -3811,15 +4128,30 @@ function attachAppEvents() {
                 if (hintEl) hintEl.textContent = 'Signatures complete. Encrypting and uploading to Arweave...';
               })();
 
-              // Oracle-only: encrypt AdminFactor with recipient's xidentity, construct payload in the same format as RWA SDK NFT note, store without sending; after attestation triggers, the platform POSTs to upload-and-mint so the recipient can receive the NFT.
-              const isOracleOnly = planData.triggerTypes && planData.triggerTypes.oracle && !planData.triggerTypes.legal_authority;
+              // Persist credentials to Arweave for ALL trigger types (oracle, legal_authority, or both).
+              // Without this, legal-authority-only plans would lose credentials when the browser session ends.
+              // The platform delivers the encrypted NFT to the recipient after the trigger fires.
+              const hasOracleOrLegal = planData.triggerTypes && (planData.triggerTypes.oracle || planData.triggerTypes.legal_authority);
               const collected = state.planAdminFactors && state.planMnemonicHashes && state.planAdminFactors.length === recipients.length && state.planMnemonicHashes.length === recipients.length;
-              if (isOracleOnly && collected && recipients.length > 0) {
+              if (hasOracleOrLegal && collected && recipients.length > 0) {
                 try {
                   const authHeaders = await getAuthHeadersAsync();
-                  const oracleResp = await fetch(`${API_BASE}/release/oracle-authority`, { headers: authHeaders });
-                  if (oracleResp.ok) {
-                    const oracleAuthority = await oracleResp.json();
+                  // Resolve authority: prefer oracle authority for oracle triggers, fall back to selected legal firm
+                  let resolvedAuthority = null;
+                  const triggerType = planData.triggerTypes.oracle ? 'oracle' : 'legal_authority';
+                  if (planData.triggerTypes.oracle) {
+                    const oracleResp = await fetch(`${API_BASE}/release/oracle-authority`, { headers: authHeaders });
+                    if (oracleResp.ok) resolvedAuthority = await oracleResp.json();
+                  }
+                  if (!resolvedAuthority && planData.triggerTypes.legal_authority) {
+                    // Use the selected legal authority firm as the authority for Arweave storage
+                    const legalFirms = state.planTriggerConfig.legalAuthority.selectedFirms || [];
+                    if (legalFirms.length > 0) {
+                      resolvedAuthority = { id: legalFirms[0].id, name: legalFirms[0].name };
+                    }
+                  }
+                  if (resolvedAuthority) {
+                    const oracleAuthority = resolvedAuthority;
                     const walletId = (state.auth?.address && state.auth.address.startsWith('0x')) ? state.auth.address : ('0x' + (state.auth?.pubkey || ''));
                     const packagesPerPath = [];
                     const hasPrepare = window.YaultRwaSdk && typeof window.YaultRwaSdk.prepareCredentialNftPayload === 'function';
@@ -3843,7 +4175,6 @@ function attachAppEvents() {
                       if (hasPrepare && solanaAddress && xidentity) {
                         try {
                           const prepared = await window.YaultRwaSdk.prepareCredentialNftPayload(solanaAddress, {
-                            admin_factor: state.planAdminFactors[i],
                             mnemonic: state.planMnemonics[i],
                             passphrase: state.planPassphrases[i],
                             index: i + 1,
@@ -3881,42 +4212,69 @@ function attachAppEvents() {
                       const configureResp = await fetch(`${API_BASE}/release/configure`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json', ...authHeaders },
-                        body: JSON.stringify({ wallet_id: walletId, paths, trigger_type: 'oracle' }),
+                        body: JSON.stringify({ wallet_id: walletId, paths, trigger_type: triggerType }),
                       });
                       if (!configureResp.ok) {
                         const cfgErr = await configureResp.json().catch(() => ({}));
                         showToast('Failed to configure release paths: ' + (cfgErr.error || configureResp.statusText), 'error');
                       } else {
-                        const distHeaders = await getAuthHeadersAsync();
-                        const distResp = await fetch(`${API_BASE}/release/distribute`, {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json', ...distHeaders },
-                          body: JSON.stringify({
-                            wallet_id: walletId,
-                            authority_id: oracleAuthority.id,
-                            encrypted_packages: packagesPerPath,
-                          }),
-                        });
-                        if (distResp.ok) {
-                          showToast('Release paths and binding configured for Oracle (per-recipient credentials stored to Arweave).', 'success');
-                          // Clear sensitive credential data from memory after successful Arweave storage
-                          state.planMnemonics = [];
-                          state.planPassphrases = [];
-                        } else {
-                          const distErr = await distResp.json().catch(() => ({}));
-                          showToast('Failed to distribute packages: ' + (distErr.error || distResp.statusText), 'error');
+                        // Retry distribute up to 3 times with exponential backoff
+                        const MAX_DISTRIBUTE_RETRIES = 3;
+                        let distributeSuccess = false;
+                        for (let attempt = 1; attempt <= MAX_DISTRIBUTE_RETRIES; attempt++) {
+                          try {
+                            const distHeaders = await getAuthHeadersAsync();
+                            const distResp = await fetch(`${API_BASE}/release/distribute`, {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json', ...distHeaders },
+                              body: JSON.stringify({
+                                wallet_id: walletId,
+                                authority_id: oracleAuthority.id,
+                                encrypted_packages: packagesPerPath,
+                              }),
+                            });
+                            if (distResp.ok) {
+                              showToast('Release paths configured (per-recipient credentials stored to Arweave).', 'success');
+                              // Clear sensitive credential data from memory after successful Arweave storage
+                              state.planAdminFactors = [];
+                              state.planMnemonics = [];
+                              state.planPassphrases = [];
+                              distributeSuccess = true;
+                              break;
+                            } else {
+                              const distErr = await distResp.json().catch(() => ({}));
+                              if (attempt < MAX_DISTRIBUTE_RETRIES) {
+                                console.warn('[Plan] Distribute attempt ' + attempt + ' failed, retrying...', distErr.error);
+                                await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt - 1)));
+                              } else {
+                                showToast('Failed to distribute packages after ' + MAX_DISTRIBUTE_RETRIES + ' attempts: ' + (distErr.error || 'Unknown error') + '. Credentials are saved server-side and can be retried from the plan overview.', 'error');
+                              }
+                            }
+                          } catch (distNetErr) {
+                            if (attempt < MAX_DISTRIBUTE_RETRIES) {
+                              console.warn('[Plan] Distribute attempt ' + attempt + ' network error, retrying...', distNetErr.message);
+                              await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt - 1)));
+                            } else {
+                              showToast('Distribute network error after ' + MAX_DISTRIBUTE_RETRIES + ' attempts: ' + distNetErr.message, 'error');
+                            }
+                          }
                         }
                       }
                     }
                   } else {
-                    const oracleErr = await oracleResp.json().catch(() => ({}));
-                    showToast('Oracle authority not available: ' + (oracleErr.error || oracleResp.statusText), 'error');
+                    showToast('No authority available for credential storage. Credentials are stored server-side but not on Arweave.', 'warning');
                   }
                 } catch (oracleErr) {
                   console.warn('[Plan] Oracle configure+distribute failed:', oracleErr);
                   showToast('Oracle binding setup failed: ' + (oracleErr.message || 'Unknown error'), 'error');
                 }
               }
+
+              // Clear sensitive admin factor data from global state after use
+              state.adminFactorHex = null;
+              if (state.planAdminFactors) state.planAdminFactors = [];
+              if (state.planMnemonics) state.planMnemonics = [];
+              if (state.planPassphrases) state.planPassphrases = [];
 
               // Switch modal to "done" view — all signing + Arweave complete
               _showSignModalDone(mintResults);
@@ -3999,7 +4357,7 @@ function attachAppEvents() {
           if (existing) existing.remove();
           const toast = document.createElement('div');
           toast.className = 'toast toast-success';
-          toast.innerHTML = 'Attestation on chain (' + explorerName + '). <a href="' + explorerUrl + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:600;">View on block explorer</a>';
+          toast.innerHTML = 'Attestation on chain (' + esc(explorerName) + '). <a href="' + safeUrl(explorerUrl) + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:600;">View on block explorer</a>';
           document.body.appendChild(toast);
           setTimeout(function () { return toast.remove(); }, 10000);
         }
@@ -4704,7 +5062,7 @@ function attachAppEvents() {
           if (existing) existing.remove();
           const toast = document.createElement('div');
           toast.className = 'toast toast-success';
-          toast.innerHTML = 'Transaction submitted (' + explorerName + '). <a href="' + explorerUrl + '" target="_blank" rel="noopener">View on block explorer</a>';
+          toast.innerHTML = 'Transaction submitted (' + esc(explorerName) + '). <a href="' + safeUrl(explorerUrl) + '" target="_blank" rel="noopener">View on block explorer</a>';
           document.body.appendChild(toast);
           setTimeout(() => toast.remove(), 10000);
           state.vaultAmount = '';
@@ -4767,7 +5125,7 @@ function attachAppEvents() {
           if (existing) existing.remove();
           const toast = document.createElement('div');
           toast.className = 'toast toast-success';
-          toast.innerHTML = `Redeemed ${esc(amount)} shares → Wallet (${explorerName}). <a href="${explorerUrl}" target="_blank" rel="noopener">View on block explorer</a>`;
+          toast.innerHTML = `Redeemed ${esc(amount)} shares \u2192 Wallet (${esc(explorerName)}). <a href="${safeUrl(explorerUrl)}" target="_blank" rel="noopener">View on block explorer</a>`;
           document.body.appendChild(toast);
           setTimeout(() => toast.remove(), 10000);
           state.vaultAmount = '';
@@ -4826,7 +5184,7 @@ function attachAppEvents() {
           if (existing) existing.remove();
           const toast = document.createElement('div');
           toast.className = 'toast toast-success';
-          toast.innerHTML = 'Transaction submitted (' + explorerName + '). <a href="' + explorerUrl + '" target="_blank" rel="noopener">View on block explorer</a>';
+          toast.innerHTML = 'Transaction submitted (' + esc(explorerName) + '). <a href="' + safeUrl(explorerUrl) + '" target="_blank" rel="noopener">View on block explorer</a>';
           document.body.appendChild(toast);
           setTimeout(() => toast.remove(), 10000);
           reportActivity('harvest', txHash, null);
@@ -4968,7 +5326,7 @@ function attachAppEvents() {
             if (existingReclaimToast) existingReclaimToast.remove();
             var reclaimToast = document.createElement('div');
             reclaimToast.className = 'toast toast-success';
-            reclaimToast.innerHTML = 'Reclaim tx on chain (' + reclaimExplorerName + '). <a href="' + reclaimExplorerUrl + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:600;">View on block explorer</a>';
+            reclaimToast.innerHTML = 'Reclaim tx on chain (' + esc(reclaimExplorerName) + '). <a href="' + safeUrl(reclaimExplorerUrl) + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:600;">View on block explorer</a>';
             document.body.appendChild(reclaimToast);
             setTimeout(function () { return reclaimToast.remove(); }, 10000);
           }
@@ -5027,11 +5385,35 @@ function attachAppEvents() {
   // "Use" button for releases → fill AdminFactor field + set walletId/pathIndex
   document.querySelectorAll('.btn-use-release-af').forEach((btn) => {
     btn.addEventListener('click', () => {
+      const idxRaw = btn.getAttribute('data-release-idx');
+      if (idxRaw != null) {
+        const idx = parseInt(idxRaw, 10);
+        const walletId = (btn.getAttribute('data-wallet-id') || '').trim();
+        const pathIndexRaw = (btn.getAttribute('data-path-index') || '').trim();
+        const pathIndex = parseInt(pathIndexRaw, 10);
+        const rows = state.claimMeItems || [];
+        const selected = rows.find((it) => {
+          if (walletId && String(it.wallet_id || it.plan_wallet_id || '').trim() !== walletId) return false;
+          if (Number.isFinite(pathIndex) && pathIndex > 0) return Number(it.path_index || 0) === pathIndex;
+          return true;
+        }) || (Number.isFinite(idx) && idx >= 0 && idx < rows.length ? rows[idx] : null);
+        if (selected) {
+          if (selected && selected.wallet_id) state.walletId = selected.wallet_id;
+          if (selected && selected.path_index) state.pathIndex = selected.path_index;
+          state.selectedClaimItem = selected;
+          const pref = selected ? (selected.admin_factor_hex || selected.blob_hex || '') : '';
+          state.releaseKey = (isPlainClaimAdminFactor(pref) || isPlainClaimBlob(pref)) ? pref : '';
+          const afInput = document.getElementById('claimAdminFactor');
+          if (afInput) afInput.value = state.releaseKey || '';
+          render();
+          return;
+        }
+      }
       const af = btn.getAttribute('data-release-af') || '';
       if (af) {
         const afInput = document.getElementById('claimAdminFactor');
-        if (afInput) afInput.value = af;
-        state.releaseKey = af;
+        if (afInput) afInput.value = (isPlainClaimAdminFactor(af) || isPlainClaimBlob(af)) ? af : '';
+        state.releaseKey = (isPlainClaimAdminFactor(af) || isPlainClaimBlob(af)) ? af : '';
         // Find matching item from claimMeItems to set walletId/pathIndex
         const match = (state.claimMeItems || []).find(it =>
           (it.blob_hex === af || it.admin_factor_hex === af)
@@ -5043,6 +5425,57 @@ function attachAppEvents() {
       }
     });
   });
+  const claimDecryptedPayloadInput = document.getElementById('claimDecryptedPayload');
+  if (claimDecryptedPayloadInput) {
+    claimDecryptedPayloadInput.addEventListener('input', () => {
+      state.claimDecryptedPayloadText = claimDecryptedPayloadInput.value || '';
+    });
+  }
+  const btnClaimApplyDecryptedPayload = document.getElementById('btnClaimApplyDecryptedPayload');
+  if (btnClaimApplyDecryptedPayload) {
+    btnClaimApplyDecryptedPayload.addEventListener('click', () => {
+      state.error = null;
+      const rawText = (document.getElementById('claimDecryptedPayload')?.value || '').trim();
+      state.claimDecryptedPayloadText = rawText;
+      try {
+        const parsed = parseClaimDecryptedPayload(rawText);
+        applyClaimDecryptedPayloadToState(parsed);
+        render();
+        showToast('Decrypted payload applied to claim state.', 'success');
+      } catch (err) {
+        state.error = err.message || String(err);
+        render();
+        showToast(state.error, 'error');
+      }
+    });
+  }
+  const btnClaimDecryptWithYallet = document.getElementById('btnClaimDecryptWithYallet');
+  if (btnClaimDecryptWithYallet) {
+    btnClaimDecryptWithYallet.addEventListener('click', async () => {
+      state.error = null;
+      const payloadRaw = btnClaimDecryptWithYallet.getAttribute('data-encrypted') || '';
+      if (!payloadRaw) {
+        showToast('No encrypted payload found for selected release.', 'error');
+        return;
+      }
+      let payload = payloadRaw;
+      try { payload = JSON.parse(payloadRaw); } catch (_) {}
+      state.claimDecryptLoading = true;
+      render();
+      try {
+        const parsed = await decryptClaimPayloadWithYallet(payload);
+        applyClaimDecryptedPayloadToState(parsed);
+        state.claimDecryptedPayloadText = JSON.stringify(parsed, null, 2);
+        showToast('AdminFactor decrypted via Yallet and pre-filled.', 'success');
+      } catch (err) {
+        state.error = err.message || String(err);
+        showToast(state.error, 'error');
+      } finally {
+        state.claimDecryptLoading = false;
+        render();
+      }
+    });
+  }
   // Redeem tab: restore cached wallet from session (so chain change can fill From address)
   if (state.redeemWalletJson == null) {
     try {
@@ -5575,7 +6008,7 @@ function attachAppEvents() {
           if (existingClaimToast) existingClaimToast.remove();
           var claimToast = document.createElement('div');
           claimToast.className = 'toast toast-success';
-          claimToast.innerHTML = 'Claim tx on chain (' + claimExplorerName + '). <a href="' + claimExplorerUrl + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:600;">View on block explorer</a>';
+          claimToast.innerHTML = 'Claim tx on chain (' + esc(claimExplorerName) + '). <a href="' + safeUrl(claimExplorerUrl) + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:600;">View on block explorer</a>';
           document.body.appendChild(claimToast);
           setTimeout(function () { return claimToast.remove(); }, 10000);
         } else {
@@ -5754,6 +6187,16 @@ async function refreshWalletBalances(retries) {
 function esc(str) {
   if (!str) return '';
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+/** Validate and escape a URL for use in href attributes — only allow http(s). */
+function safeUrl(url) {
+  if (!url) return '#';
+  try {
+    var parsed = new URL(url);
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') return esc(url);
+    return '#';
+  } catch (e) { return '#'; }
 }
 
 /** Format vault number for display: use enough decimals so small values are visible (e.g. 0.0012 → "0.0012", 21.999 → "22"). */

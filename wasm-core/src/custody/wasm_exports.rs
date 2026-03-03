@@ -237,13 +237,14 @@ pub fn custody_shamir_split(secret_hex: &str, total: u8, threshold: u8) -> JsVal
     }
 }
 
-/// Reconstruct a secret from Shamir shares.
+/// Reconstruct a secret from Shamir shares with explicit threshold enforcement.
 /// Returns hex-encoded secret, or "error:...".
 ///
 /// # Arguments
 /// * `shares_json` - JSON array string: [{"index": 1, "data_hex": "..."}, ...]
+/// * `threshold` - Minimum number of shares required (must match the original split threshold)
 #[wasm_bindgen]
-pub fn custody_shamir_reconstruct(shares_json: &str) -> String {
+pub fn custody_shamir_reconstruct(shares_json: &str, threshold: u8) -> String {
     let share_inputs: Vec<ShareInput> = match serde_json::from_str(shares_json) {
         Ok(v) => v,
         Err(e) => return format!("error:invalid shares JSON: {}", e),
@@ -264,7 +265,7 @@ pub fn custody_shamir_reconstruct(shares_json: &str) -> String {
         Err(e) => return format!("error:invalid share data hex: {}", e),
     };
 
-    match shamir::reconstruct(&shares) {
+    match shamir::reconstruct_with_threshold(&shares, threshold) {
         Ok(secret) => hex::encode(secret),
         Err(e) => format!("error:{}", e),
     }

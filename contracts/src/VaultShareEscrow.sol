@@ -6,24 +6,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-
-/**
- * @title IReleaseAttestation
- * @notice Interface for reading release attestations (oracle / authority decision).
- */
-interface IReleaseAttestation {
-    function getAttestation(bytes32 walletIdHash, uint256 recipientIndex)
-        external
-        view
-        returns (
-            uint8 source,
-            uint8 decision,
-            bytes32 reasonCode,
-            bytes32 evidenceHash,
-            uint64 timestamp,
-            address submitter
-        );
-}
+import {IReleaseAttestation} from "./interfaces/IReleaseAttestation.sol";
 
 /**
  * @title VaultShareEscrow
@@ -51,6 +34,9 @@ interface IReleaseAttestation {
 contract VaultShareEscrow is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
+    // NOTE: DECISION_RELEASE = 0 matches the default uint8 value. This is safe because
+    // all code paths check `timestamp != 0` before trusting the decision field,
+    // ensuring uninitialized attestations cannot be confused with RELEASE decisions.
     uint8 public constant DECISION_RELEASE = 0;
 
     IERC4626 public immutable VAULT;
@@ -109,12 +95,17 @@ contract VaultShareEscrow is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Register msg.sender as owner for walletIdHash. One-time per wallet.
+     * @notice Register a wallet owner for walletIdHash. One-time per wallet.
+     * @dev H-01 FIX: Restricted to onlyOwner to prevent front-running attacks
+     *      where an attacker registers a walletIdHash before the legitimate owner.
+     * @param walletIdHash The wallet identifier hash.
+     * @param _walletOwner The address to register as owner for this wallet.
      */
-    function registerWallet(bytes32 walletIdHash) external {
+    function registerWallet(bytes32 walletIdHash, address _walletOwner) external onlyOwner {
+        if (_walletOwner == address(0)) revert ZeroAddress();
         if (walletOwner[walletIdHash] != address(0)) revert WalletAlreadyRegistered();
-        walletOwner[walletIdHash] = msg.sender;
-        emit WalletRegistered(walletIdHash, msg.sender);
+        walletOwner[walletIdHash] = _walletOwner;
+        emit WalletRegistered(walletIdHash, _walletOwner);
     }
 
     /**
@@ -181,6 +172,8 @@ contract VaultShareEscrow is Ownable, ReentrancyGuard {
         if (amount > remaining) revert ClaimExceedsRemaining();
 
         claimedShares[walletIdHash][recipientIndex] += amount;
+        // M-04 FIX: Decrement totalDeposited so accounting stays consistent.
+        totalDeposited[walletIdHash] -= amount;
 
         if (redeemToAsset) {
             VAULT.redeem(amount, to, address(this));

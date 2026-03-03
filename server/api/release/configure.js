@@ -28,6 +28,8 @@ const db = require('../../db');
 
 const router = Router();
 
+// Note: 'legal_authority' was removed — it was never created by any code path.
+// Existing stored configs referencing it won't break (read-only), but new configs cannot use it.
 const VALID_TRIGGER_TYPES = ['oracle', 'legal_event', 'activity_drand'];
 const VALID_TLOCK_MONTHS = [6, 12, 24, 36, 60];
 
@@ -61,7 +63,8 @@ router.get('/', async (req, res) => {
         detail: 'You can only view release config for your own wallet',
       });
     }
-    const id = crypto.createHash('sha256').update(wallet_id).digest('hex').slice(0, 32);
+    // Use full SHA-256 hash as record ID (not truncated) to prevent collision risk
+    const id = crypto.createHash('sha256').update(wallet_id).digest('hex');
     const record = await db.recipientPaths.findById(id);
     if (!record) {
       return res.json({ wallet_id, configured: false, paths: [], trigger_type: null, tlock_duration_months: null });
@@ -199,9 +202,31 @@ router.post('/', async (req, res) => {
     if (authority_id != null && typeof authority_id === 'string') record.authority_id = authority_id.trim();
     if (oracle_info != null && typeof oracle_info === 'object') record.oracle_info = oracle_info;
 
-    // Use wallet_id as the key (one config per wallet, upsert)
-    const id = crypto.createHash('sha256').update(wallet_id).digest('hex').slice(0, 32);
+    // Use wallet_id as the key (one config per wallet, upsert) — full SHA-256 to prevent collision
+    const id = crypto.createHash('sha256').update(wallet_id).digest('hex');
     await db.recipientPaths.create(id, record);
+
+    // Maintain reverse indexes for efficient recipient lookups (avoids findAll in /claim/me)
+    const walletIdNorm = normalizeAddr(wallet_id);
+    await db.recipientPathIndex.deleteByWalletId(walletIdNorm);
+    await db.mnemonicHashIndex.deleteByWalletId(walletIdNorm);
+    for (const p of record.paths) {
+      const recipAddr = p.recipient_evm_address ? normalizeAddr(p.recipient_evm_address) : '';
+      if (recipAddr) {
+        await db.recipientPathIndex.create(`${recipAddr}_${walletIdNorm}`, {
+          recipient_address: recipAddr,
+          wallet_id: walletIdNorm,
+        });
+      }
+      if (p.recipient_mnemonic_hash) {
+        await db.mnemonicHashIndex.create(`${p.recipient_mnemonic_hash}_${walletIdNorm}`, {
+          mnemonic_hash: p.recipient_mnemonic_hash,
+          wallet_id: walletIdNorm,
+          recipient_address: recipAddr,
+          path_index: p.index,
+        });
+      }
+    }
 
     const out = { wallet_id, paths_count: paths.length, total_weight: totalWeight };
     if (record.trigger_type) out.trigger_type = record.trigger_type;

@@ -77,6 +77,23 @@ Owner                  Chainlink Oracle         Authority              Recipient
 
 This provides trusted, externalized attestation input — separating event source, policy execution, and custody logic.
 
+## Files using Chainlink (Hackathon README)
+
+All code that uses Chainlink / CRE in this repo:
+
+| File | Role |
+|------|------|
+| [oracle/workflow/src/main.ts](oracle/workflow/src/main.ts) | CRE workflow — cron/HTTP triggers, 3 external data sources (drand, vault, compliance API), EVM write to `ReleaseAttestation` |
+| [oracle/workflow/workflow.yaml](oracle/workflow/workflow.yaml) | CRE workflow config |
+| [oracle/workflow/config.staging.json](oracle/workflow/config.staging.json) | Chain, contract, and external API config (template) |
+| [contracts/src/ReleaseAttestation.sol](contracts/src/ReleaseAttestation.sol) | On-chain attestation contract; `oracleSubmitter` receives attestations from CRE Forwarder |
+| [server/api/trigger/oracle.js](server/api/trigger/oracle.js) | Reads attestation events, creates triggers; `simulate-chainlink` for demo |
+| [server/api/compliance/screen.js](server/api/compliance/screen.js) | Compliance screening endpoint (Data Source C used by CRE workflow) |
+| [server/services/attestationGate.js](server/services/attestationGate.js) | Gates release on oracle vs fallback attestation source |
+| [server/services/attestationSubmitter.js](server/services/attestationSubmitter.js) | Submits oracle-source attestations (used by simulate-chainlink) |
+
+See [oracle/workflow/README.md](oracle/workflow/README.md) for CRE setup and simulation.
+
 ## Tech Stack
 
 | Component | Technology |

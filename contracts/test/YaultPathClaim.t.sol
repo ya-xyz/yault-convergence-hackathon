@@ -47,10 +47,9 @@ contract YaultPathClaimTest is Test {
     }
 
     function test_RegisterWallet_Deposit_RegisterPath() public {
+        pool.registerWallet(WALLET_HASH, walletOwnerAddr);
         vm.startPrank(walletOwnerAddr);
         token.approve(address(pool), type(uint256).max);
-
-        pool.registerWallet(WALLET_HASH);
         assertEq(pool.walletOwner(WALLET_HASH), walletOwnerAddr);
 
         pool.deposit(WALLET_HASH, PATH_TOTAL_AMOUNT);
@@ -66,9 +65,9 @@ contract YaultPathClaimTest is Test {
     }
 
     function test_ClaimFailsWithoutAttestation() public {
+        pool.registerWallet(WALLET_HASH, walletOwnerAddr);
         vm.startPrank(walletOwnerAddr);
         token.approve(address(pool), type(uint256).max);
-        pool.registerWallet(WALLET_HASH);
         pool.deposit(WALLET_HASH, PATH_TOTAL_AMOUNT);
         pool.registerPath(WALLET_HASH, PATH_INDEX, pathController, PATH_TOTAL_AMOUNT);
         vm.stopPrank();
@@ -79,9 +78,9 @@ contract YaultPathClaimTest is Test {
     }
 
     function test_ClaimFailsWhenAttestationNotRelease() public {
+        pool.registerWallet(WALLET_HASH, walletOwnerAddr);
         vm.startPrank(walletOwnerAddr);
         token.approve(address(pool), type(uint256).max);
-        pool.registerWallet(WALLET_HASH);
         pool.deposit(WALLET_HASH, PATH_TOTAL_AMOUNT);
         pool.registerPath(WALLET_HASH, PATH_INDEX, pathController, PATH_TOTAL_AMOUNT);
         vm.stopPrank();
@@ -104,9 +103,9 @@ contract YaultPathClaimTest is Test {
     }
 
     function test_ClaimFullAmount() public {
+        pool.registerWallet(WALLET_HASH, walletOwnerAddr);
         vm.startPrank(walletOwnerAddr);
         token.approve(address(pool), type(uint256).max);
-        pool.registerWallet(WALLET_HASH);
         pool.deposit(WALLET_HASH, PATH_TOTAL_AMOUNT);
         pool.registerPath(WALLET_HASH, PATH_INDEX, pathController, PATH_TOTAL_AMOUNT);
         vm.stopPrank();
@@ -123,9 +122,9 @@ contract YaultPathClaimTest is Test {
     }
 
     function test_ClaimPartial_MultipleTimes() public {
+        pool.registerWallet(WALLET_HASH, walletOwnerAddr);
         vm.startPrank(walletOwnerAddr);
         token.approve(address(pool), type(uint256).max);
-        pool.registerWallet(WALLET_HASH);
         pool.deposit(WALLET_HASH, PATH_TOTAL_AMOUNT);
         pool.registerPath(WALLET_HASH, PATH_INDEX, pathController, PATH_TOTAL_AMOUNT);
         vm.stopPrank();
@@ -160,9 +159,9 @@ contract YaultPathClaimTest is Test {
 
     /// Partial claim then second claim with signed amount > remaining → capped to remaining.
     function test_ClaimCapsAfterPartialClaim() public {
+        pool.registerWallet(WALLET_HASH, walletOwnerAddr);
         vm.startPrank(walletOwnerAddr);
         token.approve(address(pool), type(uint256).max);
-        pool.registerWallet(WALLET_HASH);
         pool.deposit(WALLET_HASH, PATH_TOTAL_AMOUNT);
         pool.registerPath(WALLET_HASH, PATH_INDEX, pathController, PATH_TOTAL_AMOUNT);
         vm.stopPrank();
@@ -187,9 +186,9 @@ contract YaultPathClaimTest is Test {
 
     /// After "claim up to" change: signed amount can exceed remaining; we transfer min(amount, remaining).
     function test_ClaimCapsToRemainingWhenSignedAmountExceeds() public {
+        pool.registerWallet(WALLET_HASH, walletOwnerAddr);
         vm.startPrank(walletOwnerAddr);
         token.approve(address(pool), type(uint256).max);
-        pool.registerWallet(WALLET_HASH);
         pool.deposit(WALLET_HASH, PATH_TOTAL_AMOUNT);
         pool.registerPath(WALLET_HASH, PATH_INDEX, pathController, PATH_TOTAL_AMOUNT);
         vm.stopPrank();
@@ -223,9 +222,9 @@ contract YaultPathClaimTest is Test {
     // -----------------------------------------------------------------------
 
     function test_ClaimRevertsOnZeroReceiver() public {
+        pool.registerWallet(WALLET_HASH, walletOwnerAddr);
         vm.startPrank(walletOwnerAddr);
         token.approve(address(pool), type(uint256).max);
-        pool.registerWallet(WALLET_HASH);
         pool.deposit(WALLET_HASH, PATH_TOTAL_AMOUNT);
         pool.registerPath(WALLET_HASH, PATH_INDEX, pathController, PATH_TOTAL_AMOUNT);
         vm.stopPrank();
@@ -255,9 +254,9 @@ contract YaultPathClaimTest is Test {
     // -----------------------------------------------------------------------
 
     function testThreat_SignatureReplay_SameSignatureFailsSecondTime() public {
+        pool.registerWallet(WALLET_HASH, walletOwnerAddr);
         vm.startPrank(walletOwnerAddr);
         token.approve(address(pool), type(uint256).max);
-        pool.registerWallet(WALLET_HASH);
         pool.deposit(WALLET_HASH, PATH_TOTAL_AMOUNT);
         pool.registerPath(WALLET_HASH, PATH_INDEX, pathController, PATH_TOTAL_AMOUNT);
         vm.stopPrank();
@@ -278,9 +277,9 @@ contract YaultPathClaimTest is Test {
     }
 
     function testThreat_Claim_DeadlineExpiredReverts() public {
+        pool.registerWallet(WALLET_HASH, walletOwnerAddr);
         vm.startPrank(walletOwnerAddr);
         token.approve(address(pool), type(uint256).max);
-        pool.registerWallet(WALLET_HASH);
         pool.deposit(WALLET_HASH, PATH_TOTAL_AMOUNT);
         pool.registerPath(WALLET_HASH, PATH_INDEX, pathController, PATH_TOTAL_AMOUNT);
         vm.stopPrank();
@@ -295,9 +294,9 @@ contract YaultPathClaimTest is Test {
     }
 
     function testThreat_Claim_WrongSignerReverts() public {
+        pool.registerWallet(WALLET_HASH, walletOwnerAddr);
         vm.startPrank(walletOwnerAddr);
         token.approve(address(pool), type(uint256).max);
-        pool.registerWallet(WALLET_HASH);
         pool.deposit(WALLET_HASH, PATH_TOTAL_AMOUNT);
         pool.registerPath(WALLET_HASH, PATH_INDEX, pathController, PATH_TOTAL_AMOUNT);
         vm.stopPrank();
