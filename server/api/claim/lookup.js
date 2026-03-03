@@ -16,6 +16,52 @@ const { Router } = require('express');
 const db = require('../../db');
 const config = require('../../config');
 const escrowContract = require('../../services/escrowContract');
+const { evaluateReleaseAttestationGate } = require('../../services/attestationGate');
+const { encryptAdminFactorForXidentity, normalizeAdminFactorHex } = require('../../services/xidentityAdminFactor');
+
+// ---------------------------------------------------------------------------
+// Decryption helper for admin_factor_hex at rest (shared module)
+// ---------------------------------------------------------------------------
+const { decryptAdminFactor } = require('../../services/adminFactorCrypto');
+
+function getEncryptedAdminPayload(record) {
+  if (!record || typeof record !== 'object') return null;
+  const direct = record.encrypted_admin_factor || record.admin_factor_encrypted || record.admin_factor_cipher || record.encrypted_payload;
+  if (!direct) return null;
+  if (typeof direct === 'object') return direct;
+  if (typeof direct === 'string') {
+    try {
+      const parsed = JSON.parse(direct);
+      if (parsed && typeof parsed === 'object') return parsed;
+    } catch (_) {}
+  }
+  return null;
+}
+
+async function getXidentityByEvm(evmAddress) {
+  const norm = normalizeAddr(evmAddress);
+  if (!norm) return '';
+  const rec = await db.walletAddresses.findById(norm);
+  if (!rec || !rec.xidentity) return '';
+  return String(rec.xidentity).trim();
+}
+
+async function ensureEncryptedAdminPayload(record, recipientXidentity, persistUpdater) {
+  const existing = getEncryptedAdminPayload(record);
+  if (existing) return existing;
+
+  const legacyRaw = record && record.admin_factor ? String(record.admin_factor).trim() : '';
+  if (!legacyRaw) return null;
+  if (!recipientXidentity) throw new Error('Recipient xidentity not found');
+
+  const encrypted = await encryptAdminFactorForXidentity(normalizeAdminFactorHex(legacyRaw), recipientXidentity);
+  if (typeof persistUpdater === 'function') {
+    await persistUpdater(encrypted).catch((err) => {
+      console.warn('[claim/lookup] Admin factor encrypt-on-read migration persist failed:', err.message);
+    });
+  }
+  return encrypted;
+}
 
 const router = Router();
 
@@ -82,12 +128,23 @@ router.post('/register-mnemonic-hash', async (req, res) => {
       return res.status(403).json({ error: 'Only the designated recipient for this path can register mnemonic hash' });
     }
 
-    const id = crypto.createHash('sha256').update(wallet_id).digest('hex').slice(0, 32);
+    // Use full SHA-256 hash as record ID (not truncated) to prevent collision risk
+    const id = crypto.createHash('sha256').update(wallet_id).digest('hex');
     const updatedPaths = paths.map(p => {
       if (p.index !== pathIndex) return p;
       return { ...p, recipient_mnemonic_hash: hashNorm };
     });
     await db.recipientPaths.update(id, { ...rec, paths: updatedPaths });
+
+    // Update mnemonic hash reverse index for efficient /by-mnemonic-hash lookups
+    const walletIdNorm = normalizeAddr(wallet_id);
+    const recipAddrNorm = normalizeAddr(recipientAddr);
+    await db.mnemonicHashIndex.create(`${hashNorm}_${walletIdNorm}`, {
+      mnemonic_hash: hashNorm,
+      wallet_id: walletIdNorm,
+      recipient_address: recipAddrNorm,
+      path_index: pathIndex,
+    });
 
     return res.json({ registered: true, wallet_id, path_index: pathIndex });
   } catch (err) {
@@ -99,8 +156,8 @@ router.post('/register-mnemonic-hash', async (req, res) => {
 /**
  * GET /api/claim/plan-releases
  *
- * Dev/test: query recipientMnemonicAdmin by current user's evm_address, return records where AdminFactor is not empty.
- * Returns: { items: [ { evm_address, mnemonic_hash, admin_factor, label, plan_wallet_id } ] }
+ * Dev/test: query recipientMnemonicAdmin by current user's evm_address, return records where encrypted AdminFactor is available.
+ * Returns: { items: [ { evm_address, mnemonic_hash, encrypted_admin_factor, label, plan_wallet_id } ] }
  */
 router.get('/plan-releases', async (req, res) => {
   try {
@@ -108,14 +165,35 @@ router.get('/plan-releases', async (req, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
     const callerNorm = normalizeAddr(req.auth.pubkey);
+    const callerXidentity = await getXidentityByEvm(callerNorm);
+    if (!callerXidentity) {
+      return res.status(409).json({ error: 'xidentity not found for caller wallet' });
+    }
     const rows = await db.recipientMnemonicAdmin.findByEvmAddressWithAdminFactor(callerNorm);
-    const items = rows.map((r) => ({
-      evm_address: r.evm_address,
-      mnemonic_hash: r.mnemonic_hash,
-      admin_factor: r.admin_factor,
-      label: r.label || 'Release',
-      plan_wallet_id: r.plan_wallet_id || null,
-    }));
+    const items = [];
+    for (const r of rows) {
+      const encrypted = await ensureEncryptedAdminPayload(
+        r,
+        callerXidentity,
+        async (payload) => {
+          const id = String(r.mnemonic_hash || '').trim().toLowerCase();
+          if (!isValidMnemonicHash(id)) return;
+          await db.recipientMnemonicAdmin.update(id, {
+            ...r,
+            admin_factor: null,
+            encrypted_admin_factor: payload,
+          });
+        }
+      );
+      if (!encrypted) continue;
+      items.push({
+        evm_address: r.evm_address,
+        mnemonic_hash: r.mnemonic_hash,
+        encrypted_admin_factor: encrypted,
+        label: r.label || 'Release',
+        plan_wallet_id: r.plan_wallet_id || null,
+      });
+    }
     return res.json({ items });
   } catch (err) {
     console.error('[claim/plan-releases] Error:', err);
@@ -135,7 +213,7 @@ router.post('/update-wallet-json', async (req, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
     const { evm_address, mnemonic_hash, wallet_json } = req.body || {};
-    const hashNorm = normalizeAddr(String(mnemonic_hash || '').replace(/^0x/i, '').trim().toLowerCase());
+    const hashNorm = String(mnemonic_hash || '').replace(/^0x/i, '').trim().toLowerCase();
     if (hashNorm.length !== 64 || !/^[0-9a-f]+$/.test(hashNorm)) {
       return res.status(400).json({ error: 'mnemonic_hash must be 64-char hex' });
     }
@@ -160,7 +238,7 @@ router.post('/update-wallet-json', async (req, res) => {
 /**
  * POST /api/claim/get-admin-factor
  *
- * Dev/test: look up by evm_address + mnemonic_hash, return admin_factor if matched (does not delete the server record).
+ * Dev/test: look up by evm_address + mnemonic_hash, return encrypted admin factor if matched (does not delete the server record).
  * Body: { evm_address, mnemonic_hash }
  */
 router.post('/get-admin-factor', async (req, res) => {
@@ -169,7 +247,7 @@ router.post('/get-admin-factor', async (req, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
     const { evm_address, mnemonic_hash } = req.body || {};
-    const hashNorm = normalizeAddr(String(mnemonic_hash || '').replace(/^0x/i, '').trim().toLowerCase());
+    const hashNorm = String(mnemonic_hash || '').replace(/^0x/i, '').trim().toLowerCase();
     if (hashNorm.length !== 64 || !/^[0-9a-f]+$/.test(hashNorm)) {
       return res.status(400).json({ error: 'mnemonic_hash must be 64-char hex' });
     }
@@ -182,10 +260,25 @@ router.post('/get-admin-factor', async (req, res) => {
     if (!record || normalizeAddr(record.evm_address) !== callerNorm) {
       return res.status(404).json({ error: 'No matching record for this mnemonic hash and wallet' });
     }
-    if (!record.admin_factor || !String(record.admin_factor).trim()) {
+    const callerXidentity = await getXidentityByEvm(callerNorm);
+    if (!callerXidentity) {
+      return res.status(409).json({ error: 'xidentity not found for caller wallet' });
+    }
+    const encrypted = await ensureEncryptedAdminPayload(
+      record,
+      callerXidentity,
+      async (payload) => {
+        await db.recipientMnemonicAdmin.update(hashNorm, {
+          ...record,
+          admin_factor: null,
+          encrypted_admin_factor: payload,
+        });
+      }
+    );
+    if (!encrypted) {
       return res.status(404).json({ error: 'AdminFactor not yet linked for this recipient' });
     }
-    return res.json({ admin_factor_hex: record.admin_factor });
+    return res.json({ encrypted_admin_factor: encrypted });
   } catch (err) {
     console.error('[claim/get-admin-factor] Error:', err);
     return res.status(500).json({ error: 'Internal server error' });
@@ -202,7 +295,7 @@ router.post('/get-admin-factor', async (req, res) => {
  * 1) Trigger flow: recipientPaths + triggers + releasedFactors (authority submitted release-factors).
  * 2) Plan flow: recipientMnemonicAdmin (authority linked AdminFactor via release link).
  *
- * Returns: { items: [ { wallet_id, path_index, label, admin_factor_hex, blob_hex?, recipient_mnemonic_hash?, source?: 'plan' } ] }
+ * Returns: { items: [ { wallet_id, path_index, label, encrypted_admin_factor, blob_hex?, recipient_mnemonic_hash?, source?: 'plan' } ] }
  */
 router.get('/me', async (req, res) => {
   try {
@@ -210,11 +303,20 @@ router.get('/me', async (req, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
     const callerNorm = normalizeAddr(req.auth.pubkey);
+    const callerXidentity = await getXidentityByEvm(callerNorm);
+    if (!callerXidentity) {
+      return res.status(409).json({ error: 'xidentity not found for caller wallet' });
+    }
     const myEntries = [];
 
-    // 1) Trigger flow: recipientPaths → triggers (released) → releasedFactors
-    const allPathConfigs = await db.recipientPaths.findAll();
-    for (const rec of allPathConfigs) {
+    // 1) Trigger flow: use recipientPathIndex for O(K) lookup instead of O(N) findAll
+    const indexEntries = await db.recipientPathIndex.findByRecipientAddress(callerNorm);
+    const myWalletIds = [...new Set(indexEntries.map(e => e.wallet_id))];
+
+    for (const walletIdNorm of myWalletIds) {
+      const pathConfigs = await db.recipientPaths.findByWallet(walletIdNorm);
+      if (pathConfigs.length === 0) continue;
+      const rec = pathConfigs[0];
       const walletId = rec.wallet_id;
       const paths = rec.paths || [];
       const myPaths = paths.filter(p => {
@@ -234,11 +336,18 @@ router.get('/me', async (req, res) => {
       for (const mp of myPaths) {
         const factor = latestRelease.factors.find(f => f.index === mp.index);
         if (!factor) continue;
+        let encrypted;
+        try {
+          const plainHex = decryptAdminFactor(factor.admin_factor_hex);
+          encrypted = await encryptAdminFactorForXidentity(plainHex, callerXidentity);
+        } catch (_) {
+          continue;
+        }
         myEntries.push({
           wallet_id: walletId,
           path_index: mp.index,
           label: mp.label || `Recipient #${mp.index}`,
-          admin_factor_hex: factor.admin_factor_hex,
+          encrypted_admin_factor: encrypted,
           blob_hex: factor.blob_hex || null,
           recipient_mnemonic_hash: mp.recipient_mnemonic_hash || null,
           created_at: latestRelease.created_at || releasedTrigger.decided_at || null,
@@ -258,13 +367,14 @@ router.get('/me', async (req, res) => {
       }
     }
     for (const r of planLatest.values()) {
-      // Look up the correct recipient index from recipientPaths
+      // Look up the correct recipient index from recipientPaths (by wallet_id, not full scan)
       let pathIndex = null;
       const planWalletNorm = normalizeAddr(r.plan_wallet_id || '');
       const recipientNorm = normalizeAddr(r.evm_address || '');
       if (planWalletNorm && recipientNorm) {
-        for (const pc of allPathConfigs) {
-          if (normalizeAddr(pc.wallet_id) === planWalletNorm && Array.isArray(pc.paths)) {
+        const planConfigs = await db.recipientPaths.findByWallet(planWalletNorm);
+        for (const pc of planConfigs) {
+          if (Array.isArray(pc.paths)) {
             const match = pc.paths.find(p =>
               p.recipient_evm_address && normalizeAddr(p.recipient_evm_address) === recipientNorm
             );
@@ -272,11 +382,25 @@ router.get('/me', async (req, res) => {
           }
         }
       }
+      const encrypted = await ensureEncryptedAdminPayload(
+        r,
+        callerXidentity,
+        async (payload) => {
+          const id = String(r.mnemonic_hash || '').trim().toLowerCase();
+          if (!isValidMnemonicHash(id)) return;
+          await db.recipientMnemonicAdmin.update(id, {
+            ...r,
+            admin_factor: null,
+            encrypted_admin_factor: payload,
+          });
+        }
+      );
+      if (!encrypted) continue;
       myEntries.push({
         wallet_id: r.plan_wallet_id || null,
         path_index: pathIndex,
         label: r.label || 'Release',
-        admin_factor_hex: r.admin_factor,
+        encrypted_admin_factor: encrypted,
         blob_hex: null,
         recipient_mnemonic_hash: r.mnemonic_hash || null,
         evm_address: r.evm_address || null,
@@ -376,22 +500,43 @@ router.get('/escrow-balance', async (req, res) => {
  *
  * Look up released blobs by recipient mnemonic hash (no login). So mnemonic-hash and blob are tied:
  * recipient registers hash; at release, blob is stored with that hash; recipient can fetch blob by sending hash(mnemonic).
- * Returns: { items: [ { wallet_id, path_index, label, admin_factor_hex, blob_hex? } ] }
+ * Returns: { items: [ { wallet_id, path_index, label, encrypted_admin_factor, blob_hex? } ] }
  */
 router.get('/by-mnemonic-hash', async (req, res) => {
   try {
+    if (!req.auth || !req.auth.pubkey) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+    const callerNorm = normalizeAddr(req.auth.pubkey);
+    const callerXidentity = await getXidentityByEvm(callerNorm);
+    if (!callerXidentity) {
+      return res.status(409).json({ error: 'xidentity not found for caller wallet' });
+    }
+
     const hashParam = (req.query.hash || req.query.mnemonic_hash || '').trim().replace(/^0x/i, '');
     if (!isValidMnemonicHash(hashParam)) {
       return res.status(400).json({ error: 'hash must be a 64-char hex string (mnemonic hash)' });
     }
     const hashNorm = hashParam.toLowerCase();
 
-    const allPathConfigs = await db.recipientPaths.findAll();
+    // Use mnemonicHashIndex for O(K) lookup instead of O(N) findAll
+    const hashIndexEntries = await db.mnemonicHashIndex.findByHash(hashNorm);
+    const matchedWalletIds = [...new Set(hashIndexEntries.map(e => e.wallet_id))];
+
     const myEntries = [];
-    for (const rec of allPathConfigs) {
+    for (const walletIdNorm of matchedWalletIds) {
+      const pathConfigs = await db.recipientPaths.findByWallet(walletIdNorm);
+      if (pathConfigs.length === 0) continue;
+      const rec = pathConfigs[0];
       const walletId = rec.wallet_id;
       const paths = rec.paths || [];
-      const matchingPaths = paths.filter(p => p.recipient_mnemonic_hash && p.recipient_mnemonic_hash === hashNorm);
+      // Security: hash lookup must still be bound to the logged-in recipient.
+      // Prevent other authenticated users from querying by hash only.
+      const matchingPaths = paths.filter((p) => {
+        if (!p.recipient_mnemonic_hash || p.recipient_mnemonic_hash !== hashNorm) return false;
+        const recipientAddr = p.recipient_evm_address;
+        return !!recipientAddr && normalizeAddr(recipientAddr) === callerNorm;
+      });
       if (matchingPaths.length === 0) continue;
 
       const triggers = await db.triggers.findByWallet(walletId);
@@ -405,11 +550,18 @@ router.get('/by-mnemonic-hash', async (req, res) => {
       for (const mp of matchingPaths) {
         const factor = latestRelease.factors.find(f => f.index === mp.index);
         if (!factor) continue;
+        let encrypted;
+        try {
+          const plainHex = decryptAdminFactor(factor.admin_factor_hex);
+          encrypted = await encryptAdminFactorForXidentity(plainHex, callerXidentity);
+        } catch (_) {
+          continue;
+        }
         myEntries.push({
           wallet_id: walletId,
           path_index: mp.index,
           label: mp.label || `Recipient #${mp.index}`,
-          admin_factor_hex: factor.admin_factor_hex,
+          encrypted_admin_factor: encrypted,
           blob_hex: factor.blob_hex || null,
         });
       }
@@ -441,6 +593,13 @@ router.get('/:wallet_id', async (req, res) => {
         detail: 'You can only view released factors for your own wallet or as an authorized recipient',
       });
     }
+    const callerNorm = normalizeAddr(req.auth.pubkey);
+    const ownerNorm = normalizeAddr(wallet_id);
+    const isOwnerCaller = callerNorm === ownerNorm;
+    const callerXidentity = await getXidentityByEvm(callerNorm);
+    if (!callerXidentity) {
+      return res.status(409).json({ error: 'xidentity not found for caller wallet' });
+    }
 
     // Check if there are released triggers for this wallet
     const triggers = await db.triggers.findByWallet(wallet_id);
@@ -453,6 +612,35 @@ router.get('/:wallet_id', async (req, res) => {
         message: 'No released triggers found for this wallet. Contact the managing authority.',
         factors: [],
       });
+    }
+
+    // Verify on-chain attestation before revealing admin factors (if oracle is configured).
+    // This ensures the claim flow can't bypass the attestation gate.
+    if (config.oracle && config.oracle.enabled) {
+      const recipientIndices = paths.map(p => p.index);
+      const recipientPath = paths.find(p => p.recipient_evm_address && normalizeAddr(p.recipient_evm_address) === callerNorm);
+      const checkIndex = recipientPath ? recipientPath.index : (recipientIndices[0] || 0);
+      try {
+        const gate = await evaluateReleaseAttestationGate({
+          walletId: wallet_id,
+          recipientIndex: checkIndex,
+          allowFallback: true, // allow fallback for claim (emergency recovery)
+        });
+        if (!gate.valid && gate.code !== 'ATTESTATION_MISSING') {
+          return res.json({
+            wallet_id,
+            released: true,
+            attestation_blocked: true,
+            attestation_code: gate.code,
+            message: gate.detail || 'Release blocked by attestation policy',
+            factors: [],
+          });
+        }
+      } catch (attestErr) {
+        console.warn('[claim/lookup] Attestation gate check failed (non-blocking):', attestErr.message);
+        // Non-blocking: if attestation check fails (e.g. RPC down), allow claim to proceed
+        // The on-chain escrow contract enforces attestation anyway
+      }
     }
 
     // Get released factors
@@ -471,21 +659,34 @@ router.get('/:wallet_id', async (req, res) => {
 
     // Merge released factors with path config (include blob_hex when stored)
     const latestRelease = releasedRecords[releasedRecords.length - 1];
-    const factors = latestRelease.factors.map(f => {
+    const factorsRaw = latestRelease.factors.map(f => {
       const pathInfo = paths.find(p => p.index === f.index);
+      // Security: recipient callers can only see their own path factor.
+      if (!isOwnerCaller) {
+        if (!pathInfo || !pathInfo.recipient_evm_address) return null;
+        if (normalizeAddr(pathInfo.recipient_evm_address) !== callerNorm) return null;
+      }
       const out = {
         index: f.index,
-        admin_factor_hex: f.admin_factor_hex,
+        encrypted_admin_factor: null,
         fingerprint: f.fingerprint,
         label: pathInfo ? pathInfo.label : `Recipient #${f.index}`,
         weight: pathInfo ? pathInfo.weight : 0,
         percentage: pathInfo ? pathInfo.percentage : '0.00',
         recipient_evm_address: pathInfo ? (pathInfo.recipient_evm_address || null) : null,
       };
-      if (f.blob_hex) out.blob_hex = f.blob_hex;
-      if (f.recipient_mnemonic_hash) out.recipient_mnemonic_hash = f.recipient_mnemonic_hash;
-      return out;
+      const plainHex = decryptAdminFactor(f.admin_factor_hex);
+      out.encrypted_admin_factor = null;
+      return encryptAdminFactorForXidentity(plainHex, callerXidentity)
+        .then((encrypted) => {
+          out.encrypted_admin_factor = encrypted;
+          if (f.blob_hex) out.blob_hex = f.blob_hex;
+          if (f.recipient_mnemonic_hash) out.recipient_mnemonic_hash = f.recipient_mnemonic_hash;
+          return out;
+        })
+        .catch(() => null);
     });
+    const factors = (await Promise.all(factorsRaw)).filter(Boolean);
 
     // Try to get vault value from config (optional, best-effort)
     let vaultValue = null;

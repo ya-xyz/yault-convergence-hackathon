@@ -17,7 +17,8 @@ use thiserror::Error;
 use super::admin_factor::{self, ContextTuple, ADMIN_FACTOR_SIZE};
 
 /// Number of words in the UserCred passphrase (custom word list, not BIP-39)
-const USER_CRED_WORD_COUNT: usize = 6;
+/// 256-word list → 8 bits per word → 8 words × 8 bits = 64 bits entropy.
+pub const USER_CRED_WORD_COUNT: usize = 8;
 
 #[derive(Error, Debug)]
 pub enum PathError {
@@ -77,8 +78,8 @@ pub enum PathStatus {
 }
 
 /// Word list for generating human-readable credentials.
-/// 256 unique words → 8 bits per word → 6 words × 8 bits = 48 bits entropy.
-/// (~281 trillion combinations — sufficient for a secondary credential.)
+/// 256 unique words → 8 bits per word → 8 words × 8 bits = 64 bits entropy.
+/// (~1.8 × 10^19 combinations — sufficient for a secondary credential.)
 const WORD_LIST: &[&str] = &[
     // Block 1 (64 words)
     "apple", "brave", "cloud", "dance", "eagle", "flame", "grace", "heart",
@@ -119,7 +120,8 @@ const WORD_LIST: &[&str] = &[
 ]; // 256 words total
 
 /// Generate a human-readable passphrase from random entropy.
-fn generate_passphrase(word_count: usize) -> (String, Vec<u8>) {
+/// Returns (passphrase_string, raw_entropy_bytes).
+pub fn generate_passphrase(word_count: usize) -> (String, Vec<u8>) {
     let mut entropy = vec![0u8; word_count * 2]; // 2 bytes per word = 16 bits of choice
     rand::thread_rng().fill_bytes(&mut entropy);
 

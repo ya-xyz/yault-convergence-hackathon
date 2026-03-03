@@ -181,19 +181,46 @@ describe('Wallet Plan Admin Factor', () => {
       .post('/api/wallet-plan/admin-factor')
       .set('X-Client-Session', sessionToken)
       .send({
-        recipientIndex: 0,
+        recipientIndex: 1,
         label: 'Alice',
         admin_factor_hex: 'a'.repeat(64),
       })
       .expect(200);
 
     expect(res.body.ok).toBe(true);
+    expect(res.body.fingerprint).toBeDefined();
+    expect(typeof res.body.fingerprint).toBe('string');
+    expect(res.body.fingerprint).toHaveLength(64);
+  });
+
+  test('rejects recipientIndex 0 (must be >= 1)', async () => {
+    await request
+      .post('/api/wallet-plan/admin-factor')
+      .set('X-Client-Session', sessionToken)
+      .send({
+        recipientIndex: 0,
+        label: 'Alice',
+        admin_factor_hex: 'a'.repeat(64),
+      })
+      .expect(400);
+  });
+
+  test('rejects invalid admin_factor_hex', async () => {
+    await request
+      .post('/api/wallet-plan/admin-factor')
+      .set('X-Client-Session', sessionToken)
+      .send({
+        recipientIndex: 1,
+        label: 'Alice',
+        admin_factor_hex: 'not-valid-hex',
+      })
+      .expect(400);
   });
 
   test('requires authentication', async () => {
     await request
       .post('/api/wallet-plan/admin-factor')
-      .send({ recipientIndex: 0, label: 'Alice', admin_factor_hex: 'a'.repeat(64) })
+      .send({ recipientIndex: 1, label: 'Alice', admin_factor_hex: 'a'.repeat(64) })
       .expect(401);
   });
 });

@@ -39,7 +39,7 @@ let _saveTimer = null;
 /** Whether there are unsaved changes */
 let _dirty = false;
 
-const TABLES = ['authorities', 'bindings', 'triggers', 'revenue', 'withdrawals', 'auditLog', 'vaultPositions', 'adminSessions', 'authoritySessions', 'insurancePolicies', 'subAccounts', 'allowances', 'trialApplications', 'recipientPaths', 'releasedFactors', 'kyc', 'accountInvites', 'walletPlans', 'walletAddresses', 'users', 'recipientMnemonicAdmin', 'authorityReleaseLinks', 'userCustomTokens', 'rwaReleaseRegistry', 'rwaDeliveryLog', 'campaigns', 'referrals', 'activities', 'adminApprovals'];
+const TABLES = ['authorities', 'bindings', 'triggers', 'revenue', 'withdrawals', 'auditLog', 'vaultPositions', 'adminSessions', 'authoritySessions', 'insurancePolicies', 'subAccounts', 'allowances', 'trialApplications', 'recipientPaths', 'releasedFactors', 'kyc', 'accountInvites', 'walletPlans', 'walletAddresses', 'users', 'recipientMnemonicAdmin', 'authorityReleaseLinks', 'userCustomTokens', 'rwaReleaseRegistry', 'rwaDeliveryLog', 'campaigns', 'referrals', 'activities', 'adminApprovals', 'walletAdminFactors', 'recipientPathIndex', 'mnemonicHashIndex'];
 
 /**
  * Initialise the database (async, called once).
@@ -109,12 +109,12 @@ async function ensureReady() {
 /**
  * Persist the database to disk.
  */
-function _saveToDisk() {
+async function _saveToDisk() {
   if (!_db) return;
   try {
     const data = _db.export();
     const buffer = Buffer.from(data);
-    fs.writeFileSync(DB_PATH, buffer);
+    await fs.promises.writeFile(DB_PATH, buffer);
     _dirty = false;
   } catch (err) {
     console.error('[db] Failed to save database:', err.message);
@@ -355,12 +355,17 @@ allowances.findByWallet = async function (walletId) {
 // Trial applications
 const trialApplications = createCollection('trialApplications');
 
-// Recipient path configurations (id = hash(wallet_id))
+// Recipient path configurations (id = SHA-256(wallet_id))
 const recipientPaths = createCollection('recipientPaths');
 recipientPaths.findByWallet = async function (walletId) {
   const crypto = require('crypto');
-  const id = crypto.createHash('sha256').update(String(walletId)).digest('hex').slice(0, 32);
-  const r = await this.findById(id);
+  const id = crypto.createHash('sha256').update(String(walletId)).digest('hex');
+  let r = await this.findById(id);
+  if (!r) {
+    // Backward compat: try legacy truncated key
+    const legacyId = id.slice(0, 32);
+    r = await this.findById(legacyId);
+  }
   return r ? [r] : [];
 };
 
@@ -398,7 +403,13 @@ recipientMnemonicAdmin.findByEvmAddress = async function (evmAddress) {
 };
 recipientMnemonicAdmin.findByEvmAddressWithAdminFactor = async function (evmAddress) {
   const rows = await this.findByEvmAddress(evmAddress);
-  return rows.filter((r) => r.admin_factor && String(r.admin_factor).trim());
+  return rows.filter((r) => {
+    if (r.encrypted_admin_factor && typeof r.encrypted_admin_factor === 'object') return true;
+    if (r.admin_factor_encrypted && typeof r.admin_factor_encrypted === 'object') return true;
+    if (r.admin_factor_cipher && typeof r.admin_factor_cipher === 'object') return true;
+    if (r.encrypted_payload && typeof r.encrypted_payload === 'object') return true;
+    return !!(r.admin_factor && String(r.admin_factor).trim());
+  });
 };
 
 // Authority release links (test): id = uuid, data = { authority_id, release_link, recipient_id, evm_address, created_at }
@@ -445,6 +456,41 @@ adminApprovals.findPending = async function () {
   return this.findByField('status', 'pending');
 };
 
+// Wallet AdminFactors: encrypted AdminFactors stored during plan creation for later authority retrieval.
+// id = `${walletId}_af_${recipientIndex}`, data = { wallet_id, recipient_index, label, admin_factor_hex (encrypted), fingerprint, created_at }
+const walletAdminFactors = createCollection('walletAdminFactors', { allowedJsonFields: ['wallet_id'] });
+walletAdminFactors.findByWallet = async function (walletId) {
+  return this.findByField('wallet_id', walletId);
+};
+
+// Reverse index: recipient_evm_address → wallet_id (for /claim/me, avoids full table scan)
+// id = `${normalizedRecipientAddress}_${normalizedWalletId}`, data = { recipient_address, wallet_id }
+const recipientPathIndex = createCollection('recipientPathIndex', { allowedJsonFields: ['recipient_address', 'wallet_id'] });
+recipientPathIndex.findByRecipientAddress = async function (address) {
+  return this.findByField('recipient_address', address);
+};
+recipientPathIndex.deleteByWalletId = async function (walletId) {
+  const entries = await this.findByField('wallet_id', walletId);
+  for (const entry of entries) {
+    const id = `${entry.recipient_address}_${walletId}`;
+    await this.delete(id);
+  }
+};
+
+// Reverse index: mnemonic_hash → wallet_id (for /claim/by-mnemonic-hash, avoids full table scan)
+// id = `${mnemonicHash}_${normalizedWalletId}`, data = { mnemonic_hash, wallet_id, recipient_address, path_index }
+const mnemonicHashIndex = createCollection('mnemonicHashIndex', { allowedJsonFields: ['mnemonic_hash', 'wallet_id'] });
+mnemonicHashIndex.findByHash = async function (hash) {
+  return this.findByField('mnemonic_hash', hash);
+};
+mnemonicHashIndex.deleteByWalletId = async function (walletId) {
+  const entries = await this.findByField('wallet_id', walletId);
+  for (const entry of entries) {
+    const id = `${entry.mnemonic_hash}_${walletId}`;
+    await this.delete(id);
+  }
+};
+
 // ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
@@ -479,18 +525,21 @@ module.exports = {
   referrals,
   activities,
   adminApprovals,
+  walletAdminFactors,
+  recipientPathIndex,
+  mnemonicHashIndex,
 
   /** Ensure database is initialised (call before first use). */
   ensureReady,
 
   /** Exposed for testing: close and release the database. */
-  _close() {
+  async _close() {
     if (_saveTimer) {
       clearInterval(_saveTimer);
       _saveTimer = null;
     }
     if (_db) {
-      _saveToDisk();
+      await _saveToDisk();
       _db.close();
       _db = null;
       _initPromise = null;

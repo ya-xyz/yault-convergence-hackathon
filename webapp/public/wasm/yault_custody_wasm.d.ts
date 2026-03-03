@@ -135,13 +135,14 @@ export function custody_pack_admin_factor_with_amount(admin_factor_hex: string, 
 export function custody_parse_admin_factor_with_amount(blob_hex: string): string;
 
 /**
- * Reconstruct a secret from Shamir shares.
+ * Reconstruct a secret from Shamir shares with explicit threshold enforcement.
  * Returns hex-encoded secret, or "error:...".
  *
  * # Arguments
  * * `shares_json` - JSON array string: [{"index": 1, "data_hex": "..."}, ...]
+ * * `threshold` - Minimum number of shares required (must match the original split threshold)
  */
-export function custody_shamir_reconstruct(shares_json: string): string;
+export function custody_shamir_reconstruct(shares_json: string, threshold: number): string;
 
 /**
  * Split a secret into N shares with threshold T.
@@ -173,7 +174,7 @@ export interface InitOutput {
     readonly custody_generate_path: (a: number, b: number, c: number) => any;
     readonly custody_pack_admin_factor_with_amount: (a: number, b: number, c: bigint) => [number, number];
     readonly custody_parse_admin_factor_with_amount: (a: number, b: number) => [number, number];
-    readonly custody_shamir_reconstruct: (a: number, b: number) => [number, number];
+    readonly custody_shamir_reconstruct: (a: number, b: number, c: number) => [number, number];
     readonly custody_shamir_split: (a: number, b: number, c: number, d: number) => any;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;

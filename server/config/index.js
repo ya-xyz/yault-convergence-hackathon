@@ -50,10 +50,15 @@ module.exports = {
     gateway: process.env.ARWEAVE_GATEWAY || 'https://arweave.net',
     appName: 'Yault',
   },
+  // Revenue split — MUST match YaultVault.sol constants (source of truth is on-chain).
+  // Contract: USER_SHARE=7500, PLATFORM_SHARE=2500, AUTHORITY_SHARE=500
+  // When authority is bound: 75% user, 20% platform, 5% authority
+  // When no authority:       75% user, 25% platform
   revenue: {
-    userShareBps: 8000,     // 80%
-    platformShareBps: 1500, // 15%
-    authorityShareBps: 500,   // 5%
+    userShareBps: 7500,       // 75% — matches YaultVault.USER_SHARE
+    platformShareBps: 2000,   // 20% — platform gets 25% minus 5% authority
+    authorityShareBps: 500,   // 5%  — matches YaultVault.AUTHORITY_SHARE
+    platformFullShareBps: 2500, // 25% — platform share when no authority bound
   },
   vault: {
     reserveRatioBps: parseInt(process.env.VAULT_RESERVE_RATIO_BPS, 10) || 2000, // 20% idle reserve
@@ -98,8 +103,12 @@ module.exports = {
     uploadAndMintApiUrl: process.env.RWA_UPLOAD_AND_MINT_API_URL || (isDev ? 'https://api-dev.yallet.xyz/api/v1/storage/rwa/upload-and-mint' : 'https://api.yallet.xyz/api/v1/storage/rwa/upload-and-mint'),
   },
 
-  // Note: heartbeat/activity-detection config removed.
-  // Triggers are now initiated by authorities via legal-event API.
+  // Inactivity monitor: background service detects wallets with trigger_type='activity_drand'
+  // whose tlock_duration_months threshold has been exceeded, then queues Oracle attestation requests.
+  inactivity: {
+    checkIntervalMs: parseInt(process.env.INACTIVITY_CHECK_INTERVAL_MS, 10) || 60000,
+    enabled: process.env.INACTIVITY_MONITOR_ENABLED !== 'false', // enabled by default
+  },
   cooldown: {
     // If set, cooldown = this many minutes (e.g. 10 for demo). Otherwise use defaultHours.
     defaultMinutes: (() => {

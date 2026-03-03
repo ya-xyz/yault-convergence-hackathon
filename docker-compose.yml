@@ -14,7 +14,6 @@ services:
     build: .
     ports:
       - "3001:3001"
-    env_file: .env
     environment:
       - NODE_ENV=development
       - PORT=3001
@@ -22,6 +21,25 @@ services:
       - EMAIL_PROVIDER=console
       # Use local ArLocal for Arweave testing
       - ARWEAVE_GATEWAY=http://arlocal:1984
+      # Authentication (generate with: openssl rand -hex 32)
+      - JWT_SECRET=${JWT_SECRET:-}
+      - CLIENT_SESSION_SECRET=${CLIENT_SESSION_SECRET:-}
+      # drand (public beacon)
+      - DRAND_CHAIN_HASH=${DRAND_CHAIN_HASH:-dbd506d6ef76e5f386f41c651dcb808c5bcbd75471cc4eafa3f4df7ad4e4c493}
+      # Vault & Chain
+      - VAULT_ADDRESS=${VAULT_ADDRESS:-}
+      - EVM_RPC_URL=${EVM_RPC_URL:-https://ethereum-sepolia-rpc.publicnode.com}
+      - VAULT_CHAIN_ID=${VAULT_CHAIN_ID:-11155111}
+      - VAULT_UNDERLYING_DECIMALS=${VAULT_UNDERLYING_DECIMALS:-6}
+      # Admin
+      - ADMIN_WALLETS=${ADMIN_WALLETS:-}
+      - ADMIN_TOKEN=${ADMIN_TOKEN:-}
+      # Oracle
+      - ORACLE_INTERNAL_API_KEY=${ORACLE_INTERNAL_API_KEY:-}
+      - ORACLE_ATTESTATION_ENABLED=${ORACLE_ATTESTATION_ENABLED:-}
+      - RELEASE_ATTESTATION_ADDRESS=${RELEASE_ATTESTATION_ADDRESS:-}
+      # Arweave wallet
+      - ARWEAVE_WALLET_JWK=${ARWEAVE_WALLET_JWK:-}
     depends_on:
       arlocal:
         condition: service_started

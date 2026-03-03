@@ -27,11 +27,32 @@ const { sendCooldownNotification } = require('../../services/email');
 
 const router = Router();
 
+// Lock map to prevent TOCTOU race in trigger creation
+const _triggerCreationLocks = new Map();
+function acquireTriggerLock(key) {
+  if (_triggerCreationLocks.has(key)) return false;
+  _triggerCreationLocks.set(key, Date.now());
+  return true;
+}
+function releaseTriggerLock(key) {
+  _triggerCreationLocks.delete(key);
+}
+// Clean stale locks every 60s (in case of crash mid-flow)
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, ts] of _triggerCreationLocks) {
+    if (now - ts > 30000) _triggerCreationLocks.delete(k);
+  }
+}, 60000).unref();
+
 function getDefaultCooldownMs() {
   const mins = config.cooldown && config.cooldown.defaultMinutes != null ? config.cooldown.defaultMinutes : null;
   if (mins != null) return mins * 60 * 1000;
   const h = config.cooldown && config.cooldown.defaultHours != null ? config.cooldown.defaultHours : 168;
-  return h * 60 * 60 * 1000;
+  // Enforce maxHours cap to prevent misconfiguration
+  const maxH = config.cooldown && config.cooldown.maxHours != null ? config.cooldown.maxHours : 168;
+  const capped = Math.min(h, maxH);
+  return capped * 60 * 60 * 1000;
 }
 
 /** When set, POST /from-oracle requires X-Oracle-Internal-Key header to match (for cron/CRE only). */
@@ -214,65 +235,79 @@ router.post('/from-oracle', async (req, res) => {
       });
     }
 
-    // Duplicate check: same wallet/recipient with pending or cooldown (use trimmed wallet_id)
-    const existing = await db.triggers.findByWallet(walletIdTrimmed);
-    const duplicate = existing?.find(
-      (t) =>
-        t.recipient_index === recipientIndex &&
-        (t.status === 'pending' || t.status === 'cooldown')
-    );
-    if (duplicate) {
+    // Acquire lock to prevent TOCTOU race condition on concurrent trigger creation
+    const lockKey = `${walletIdTrimmed}_${recipientIndex}`;
+    if (!acquireTriggerLock(lockKey)) {
       return res.status(409).json({
-        error: 'Duplicate trigger',
-        detail: 'An active trigger already exists for this recipient path.',
-        trigger_id: duplicate.trigger_id,
+        error: 'Concurrent request',
+        detail: 'Another trigger creation is in progress for this wallet/recipient. Please retry.',
       });
     }
 
-    const triggerId = crypto.randomBytes(16).toString('hex');
-    const now = Date.now();
-    const cooldownMs = getDefaultCooldownMs();
-    const effectiveAt = now + cooldownMs;
+    // Duplicate check: same wallet/recipient with pending or cooldown (use trimmed wallet_id)
+    let triggerId, cooldownMs, effectiveAt;
+    try {
+      const existing = await db.triggers.findByWallet(walletIdTrimmed);
+      const duplicate = existing?.find(
+        (t) =>
+          t.recipient_index === recipientIndex &&
+          (t.status === 'pending' || t.status === 'cooldown')
+      );
+      if (duplicate) {
+        return res.status(409).json({
+          error: 'Duplicate trigger',
+          detail: 'An active trigger already exists for this recipient path.',
+          trigger_id: duplicate.trigger_id,
+        });
+      }
 
-    const triggerValidation = TriggerEvent.validate({
-      wallet_id: walletIdTrimmed,
-      authority_id: ORACLE_AUTHORITY_ID,
-      recipient_index: recipientIndex,
-      tlock_round: undefined,
-      arweave_tx_id: null,
-      release_request: null,
-    });
-    if (!triggerValidation.valid) {
-      return res.status(400).json({
-        error: 'Internal validation failed',
-        details: triggerValidation.errors,
+      triggerId = crypto.randomBytes(16).toString('hex');
+      const now = Date.now();
+      cooldownMs = getDefaultCooldownMs();
+      effectiveAt = now + cooldownMs;
+
+      const triggerValidation = TriggerEvent.validate({
+        wallet_id: walletIdTrimmed,
+        authority_id: ORACLE_AUTHORITY_ID,
+        recipient_index: recipientIndex,
+        tlock_round: undefined,
+        arweave_tx_id: null,
+        release_request: null,
       });
+      if (!triggerValidation.valid) {
+        return res.status(400).json({
+          error: 'Internal validation failed',
+          details: triggerValidation.errors,
+        });
+      }
+
+      const record = {
+        ...triggerValidation.data,
+        trigger_id: triggerId,
+        trigger_type: 'oracle',
+        reason_code: 'authorized_request',
+        matter_id: null,
+        evidence_hash: attestation.evidenceHash,
+        initiation_signature: null,
+        initiated_by: 'oracle',
+        initiated_at: now,
+        notes: 'Created from Chainlink oracle attestation',
+        status: 'cooldown',
+        decision: 'release',
+        decision_reason: 'Oracle attestation',
+        decision_reason_code: 'authorized_request',
+        decision_evidence_hash: attestation.evidenceHash,
+        decision_signature: null,
+        cooldown_ms: cooldownMs,
+        decided_at: now,
+        effective_at: effectiveAt,
+        decided_by: 'oracle',
+      };
+
+      await db.triggers.create(triggerId, record);
+    } finally {
+      releaseTriggerLock(lockKey);
     }
-
-    const record = {
-      ...triggerValidation.data,
-      trigger_id: triggerId,
-      trigger_type: 'oracle',
-      reason_code: 'authorized_request',
-      matter_id: null,
-      evidence_hash: attestation.evidenceHash,
-      initiation_signature: null,
-      initiated_by: 'oracle',
-      initiated_at: now,
-      notes: 'Created from Chainlink oracle attestation',
-      status: 'cooldown',
-      decision: 'release',
-      decision_reason: 'Oracle attestation',
-      decision_reason_code: 'authorized_request',
-      decision_evidence_hash: attestation.evidenceHash,
-      decision_signature: null,
-      cooldown_ms: cooldownMs,
-      decided_at: now,
-      effective_at: effectiveAt,
-      decided_by: 'oracle',
-    };
-
-    await db.triggers.create(triggerId, record);
 
     try {
       await db.auditLog.create(`from_oracle_${triggerId}`, {
@@ -336,6 +371,10 @@ router.post('/from-oracle', async (req, res) => {
  */
 router.post('/simulate-chainlink', dualAuthMiddleware, async (req, res) => {
   try {
+    if (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') {
+      return res.status(403).json({ error: 'Simulate endpoints disabled in production/staging' });
+    }
+
     const oracleEnabled = config.oracle?.enabled && config.oracle?.releaseAttestationAddress;
     if (!oracleEnabled) {
       return res.status(503).json({ error: 'Oracle not configured' });
@@ -485,7 +524,7 @@ router.post('/simulate-chainlink', dualAuthMiddleware, async (req, res) => {
     });
   } catch (err) {
     console.error('[simulate-chainlink] Error:', err);
-    return res.status(500).json({ error: 'Internal server error', detail: err.message });
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -497,6 +536,7 @@ const oraclePendingRouter = new Router();
 
 // In-memory store for pending requests. In production, this would be a persistent DB table.
 const PENDING_ORACLE_REQUESTS = [];
+const MAX_ORACLE_QUEUE_SIZE = 1000;
 
 /**
  * POST /api/oracle/request-attestation
@@ -526,6 +566,10 @@ oraclePendingRouter.post('/request-attestation', oracleKeyGuard, (req, res) => {
   const validDecisions = ['release', 'hold', 'reject'];
   if (!validDecisions.includes(decision)) {
       return res.status(400).json({ error: `Invalid decision. Must be one of [${validDecisions.join(', ')}]` });
+  }
+
+  if (PENDING_ORACLE_REQUESTS.length >= MAX_ORACLE_QUEUE_SIZE) {
+    return res.status(429).json({ error: 'Oracle request queue full. Please retry later.' });
   }
 
   const request = {
@@ -568,3 +612,4 @@ oraclePendingRouter.get('/pending', oracleKeyGuard, (_req, res) => {
 
 module.exports = router;
 module.exports.oraclePendingRouter = oraclePendingRouter;
+module.exports._pendingOracleRequests = PENDING_ORACLE_REQUESTS;

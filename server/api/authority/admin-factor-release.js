@@ -12,6 +12,7 @@
 const { Router } = require('express');
 const { authorityAuthMiddleware } = require('../../middleware/auth');
 const db = require('../../db');
+const { encryptAdminFactorForXidentity } = require('../../services/xidentityAdminFactor');
 
 const router = Router();
 
@@ -22,6 +23,11 @@ function normalizeHash(h) {
 
 function isHex64(v) {
   return typeof v === 'string' && /^[0-9a-f]{64}$/.test(v);
+}
+
+function normalizeAddr(addr) {
+  if (!addr || typeof addr !== 'string') return '';
+  return addr.replace(/^0x/i, '').toLowerCase();
 }
 
 // Legacy UX entrypoint: show instructions only. No write via GET.
@@ -76,9 +82,21 @@ router.post('/release', authorityAuthMiddleware, async (req, res) => {
       return res.status(404).json({ error: 'No record for this recipient_id' });
     }
 
+    const recipientNorm = normalizeAddr(record.evm_address || '');
+    const recipientAddr = recipientNorm ? await db.walletAddresses.findById(recipientNorm) : null;
+    const recipientXidentity = recipientAddr && recipientAddr.xidentity ? String(recipientAddr.xidentity).trim() : '';
+    if (!recipientXidentity) {
+      return res.status(409).json({
+        error: 'Recipient xidentity not found',
+        detail: 'Recipient must save xidentity in profile before AdminFactor can be released',
+      });
+    }
+
+    const encryptedAdminFactor = await encryptAdminFactorForXidentity(adminFactor, recipientXidentity);
     const updated = {
       ...record,
-      admin_factor: adminFactor,
+      admin_factor: null,
+      encrypted_admin_factor: encryptedAdminFactor,
       linked_by_authority_id: authorityId,
       linked_at: new Date().toISOString(),
     };

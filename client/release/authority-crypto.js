@@ -91,12 +91,17 @@ export function splitAdminFactor(adminFactorHex, totalShares, threshold) {
  *
  * @param {Array<{ index: number, data_hex: string }>} shares
  *   Array of share objects, each with a 1-based index and hex-encoded data.
+ * @param {number} [threshold=2] - Minimum shares required (must match the original split threshold).
  * @returns {string} The reconstructed AdminFactor as a hex string.
  * @throws {Error} If reconstruction fails (e.g. insufficient or corrupted shares).
  */
-export function reconstructAdminFactor(shares) {
+export function reconstructAdminFactor(shares, threshold = 2) {
   if (!Array.isArray(shares) || shares.length < 2) {
     throw new Error('At least 2 shares are required for reconstruction');
+  }
+
+  if (!Number.isInteger(threshold) || threshold < 2) {
+    throw new Error('threshold must be an integer >= 2');
   }
 
   for (const share of shares) {
@@ -106,7 +111,7 @@ export function reconstructAdminFactor(shares) {
   }
 
   const sharesJson = JSON.stringify(shares);
-  const result = custody_shamir_reconstruct(sharesJson);
+  const result = custody_shamir_reconstruct(sharesJson, threshold);
   return _checkWasmResult(result);
 }
 

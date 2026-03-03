@@ -1,6 +1,29 @@
 /**
  * path-manager.js — Recipient Path Lifecycle Manager
  *
+ * ⚠️ DEPRECATED / ALTERNATE IMPLEMENTATION
+ *
+ * This module implements an ALTERNATE credential flow that is NOT compatible
+ * with the active client-portal.js flow used in the web application.
+ *
+ * KEY DIFFERENCES from client-portal.js (the active flow):
+ *   - Uses custody_generate_path() with word-list passphrase (vs random password in client-portal)
+ *   - Uses Shamir Secret Sharing to split AdminFactor across authorities
+ *   - Uses tlock (drand) for time-locked encryption
+ *   - Generates UserCred from 256-word list (vs generateRandomPassphrase(12) in client-portal)
+ *   - Does NOT use Yallet extension's yallet_changePassphraseWithAdmin()
+ *
+ * The ACTIVE flow in client-portal.js:
+ *   1. AdminFactor = custody_generate_admin_factor() (WASM, 256-bit random)
+ *   2. UserCred = generateRandomPassphrase(12) (random 12-char password)
+ *   3. Mnemonic = yallet_changePassphraseWithAdmin(UserCred, AdminFactor) (Yallet extension)
+ *   4. NFT = prepareCredentialNftPayload(mnemonic, passphrase) → Arweave
+ *   5. AdminFactor stored separately on platform
+ *
+ * This module is retained for potential future use cases (e.g., non-Yallet
+ * deployments, batch operations, or SDK-only integrations) but should NOT
+ * be mixed with the client-portal flow.
+ *
  * Orchestrates the full lifecycle of a recipient release path:
  *   create -> distribute -> renew -> revoke -> replace
  *
@@ -67,10 +90,19 @@ export async function initStorageKey(walletSignature) {
     false,
     ['deriveKey'],
   );
+  // Use a per-user random salt instead of a hardcoded one.
+  // Generate or retrieve salt from localStorage.
+  let saltHex = localStorage.getItem(STORAGE_KEY + ':salt');
+  if (!saltHex) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    saltHex = Array.from(salt).map(b => b.toString(16).padStart(2, '0')).join('');
+    localStorage.setItem(STORAGE_KEY + ':salt', saltHex);
+  }
+  const salt = new Uint8Array(saltHex.match(/.{2}/g).map(b => parseInt(b, 16)));
   _storageKey = await crypto.subtle.deriveKey(
     {
       name: 'PBKDF2',
-      salt: enc.encode('yault-path-manager-v1'),
+      salt,
       iterations: 100000,
       hash: 'SHA-256',
     },
@@ -166,19 +198,23 @@ async function _loadPaths() {
         const decrypted = await _decrypt(raw);
         return JSON.parse(decrypted);
       } catch {
-        // Fall through to plaintext parse (migration from unencrypted)
+        // Decryption failed — attempt one-time migration from plaintext
+        try {
+          const paths = JSON.parse(raw);
+          if (Array.isArray(paths)) {
+            // Re-save encrypted (migration)
+            await _savePaths(paths);
+            return paths;
+          }
+        } catch {
+          // Not valid JSON either — corrupted data
+        }
       }
     }
 
-    // Fallback: parse as plaintext JSON (legacy / no key yet)
-    const paths = JSON.parse(raw);
-
-    // If we have a storage key, re-save encrypted (migration)
-    if (_storageKey && Array.isArray(paths)) {
-      await _savePaths(paths);
-    }
-
-    return paths;
+    // No storage key — cannot decrypt; return empty to avoid exposing plaintext
+    console.warn('[path-manager] Cannot load paths: storage key not initialized');
+    return [];
   } catch {
     return [];
   }
@@ -195,7 +231,8 @@ async function _savePaths(paths) {
     const encrypted = await _encrypt(json);
     localStorage.setItem(STORAGE_KEY, encrypted);
   } else {
-    localStorage.setItem(STORAGE_KEY, json);
+    console.warn('[path-manager] Cannot save paths: storage key not initialized');
+    // Do NOT store plaintext - skip save
   }
 }
 
@@ -419,7 +456,7 @@ export async function listRecipientPaths() {
  * }>}
  */
 export async function getRecipientPathStatus(recipientIndex) {
-  const { path } = _findPathByIndex(recipientIndex);
+  const { path } = await _findPathByIndex(recipientIndex);
 
   if (!path) {
     throw new Error(`Recipient path ${recipientIndex} not found`);
@@ -480,7 +517,7 @@ export async function getRecipientPathStatus(recipientIndex) {
  * @returns {Promise<{ newAdminFactorFingerprint: string, newTriggerNftTxId: string }>}
  */
 export async function revokeRecipientPath(recipientIndex, revHex, authorities, walletId, arweaveWallet) {
-  const { path, pathIndex } = _findPathByIndex(recipientIndex);
+  const { path, pathIndex } = await _findPathByIndex(recipientIndex);
   if (!path) {
     throw new Error(`Recipient path ${recipientIndex} not found`);
   }
@@ -587,7 +624,7 @@ export async function revokeRecipientPath(recipientIndex, revHex, authorities, w
  * @returns {Promise<{ newAdminFactorFingerprint: string }>}
  */
 export async function replaceAuthority(recipientIndex, oldAuthorityId, newAuthority, revHex, walletId, allAuthorities, arweaveWallet) {
-  const { path } = _findPathByIndex(recipientIndex);
+  const { path } = await _findPathByIndex(recipientIndex);
   if (!path) {
     throw new Error(`Recipient path ${recipientIndex} not found`);
   }
@@ -612,7 +649,7 @@ export async function replaceAuthority(recipientIndex, oldAuthorityId, newAuthor
  * @returns {Promise<{ format: string, data: string|object }>}
  */
 export async function exportCredentials(recipientIndex, format = 'text') {
-  const { path } = _findPathByIndex(recipientIndex);
+  const { path } = await _findPathByIndex(recipientIndex);
   if (!path) {
     throw new Error(`Recipient path ${recipientIndex} not found`);
   }

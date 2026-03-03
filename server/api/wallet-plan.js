@@ -12,10 +12,17 @@
 'use strict';
 
 const { Router } = require('express');
+const crypto = require('crypto');
 const { dualAuthMiddleware } = require('../middleware/auth');
 const db = require('../db');
+const { encryptAdminFactorForXidentity } = require('../services/xidentityAdminFactor');
 
 const router = Router();
+
+// ---------------------------------------------------------------------------
+// Encryption helper for admin_factor_hex at rest (shared module)
+// ---------------------------------------------------------------------------
+const { encryptAdminFactor } = require('../services/adminFactorCrypto');
 
 function normalizeAddr(addr) {
   if (!addr || typeof addr !== 'string') return '';
@@ -144,19 +151,44 @@ router.put('/', dualAuthMiddleware, async (req, res) => {
   }
 });
 
-/** POST /admin-factor — Receive AdminFactor, currently logs to console (will later encrypt and send to authority) */
+/** POST /admin-factor — Receive AdminFactor, encrypt and persist for later authority retrieval */
 router.post('/admin-factor', dualAuthMiddleware, async (req, res) => {
   try {
     const walletId = normalizeAddr(req.auth.pubkey);
     if (!walletId) return res.status(401).json({ error: 'Authentication required' });
     const { recipientIndex, label, admin_factor_hex } = req.body || {};
-    console.log('[wallet-plan] AdminFactor (for authority):', {
+
+    if (!admin_factor_hex || typeof admin_factor_hex !== 'string' || !/^[0-9a-fA-F]{64}$/.test(admin_factor_hex)) {
+      return res.status(400).json({ error: 'admin_factor_hex must be a 64-char hex string (32 bytes)' });
+    }
+    if (!Number.isInteger(recipientIndex) || recipientIndex < 1) {
+      return res.status(400).json({ error: 'recipientIndex must be a positive integer' });
+    }
+
+    console.log('[wallet-plan] AdminFactor stored (for authority):', {
       walletId,
       recipientIndex,
       label,
-      admin_factor_hex: admin_factor_hex ? `${admin_factor_hex.slice(0, 16)}...` : '',
+      admin_factor_hex: '[REDACTED]',
     });
-    return res.json({ ok: true });
+
+    // Compute fingerprint for verification
+    const fingerprint = crypto.createHash('sha256')
+      .update(Buffer.from(admin_factor_hex, 'hex'))
+      .digest('hex');
+
+    // Store encrypted AdminFactor keyed by walletId + recipientIndex
+    const storageKey = `${walletId}_af_${recipientIndex}`;
+    await db.walletAdminFactors.create(storageKey, {
+      wallet_id: walletId,
+      recipient_index: recipientIndex,
+      label: label || `Recipient ${recipientIndex}`,
+      admin_factor_hex: encryptAdminFactor(admin_factor_hex.toLowerCase()),
+      fingerprint,
+      created_at: new Date().toISOString(),
+    });
+
+    return res.json({ ok: true, fingerprint });
   } catch (err) {
     console.error('[wallet-plan] admin-factor error:', err);
     return res.status(500).json({ error: 'Internal server error' });
@@ -173,16 +205,30 @@ router.post('/path-credentials', dualAuthMiddleware, async (req, res) => {
       walletId,
       recipientIndex,
       label,
-      mnemonic: mnemonic ? `${String(mnemonic).slice(0, 20)}...` : '',
-      passphrase: passphrase ? `${String(passphrase).slice(0, 4)}***` : '',
+      mnemonic: '[REDACTED]',
+      passphrase: '[REDACTED]',
     });
     if (mnemonicHash && evmAddress) {
       const hashNorm = String(mnemonicHash).replace(/^0x/i, '').trim().toLowerCase();
       if (hashNorm.length === 64 && /^[0-9a-f]+$/.test(hashNorm)) {
+        const recipientNorm = normalizeAddr(evmAddress);
+        const recipientAddr = recipientNorm ? await db.walletAddresses.findById(recipientNorm) : null;
+        const recipientXidentity = recipientAddr && recipientAddr.xidentity ? String(recipientAddr.xidentity).trim() : '';
+        let encryptedAdminFactor = null;
+        if (adminFactorHex && /^[0-9a-fA-F]{64}$/.test(adminFactorHex)) {
+          if (!recipientXidentity) {
+            return res.status(409).json({
+              error: 'Recipient xidentity not found',
+              detail: 'Recipient must save xidentity in profile before storing path credentials',
+            });
+          }
+          encryptedAdminFactor = await encryptAdminFactorForXidentity(adminFactorHex, recipientXidentity);
+        }
         await db.recipientMnemonicAdmin.create(hashNorm, {
           evm_address: evmAddress.startsWith('0x') ? evmAddress : '0x' + evmAddress,
           mnemonic_hash: hashNorm,
-          admin_factor: (adminFactorHex && /^[0-9a-fA-F]{64}$/.test(adminFactorHex)) ? adminFactorHex : null,
+          admin_factor: null,
+          encrypted_admin_factor: encryptedAdminFactor,
           label: label || `Recipient ${recipientIndex}`,
           plan_wallet_id: walletId,
           created_at: new Date().toISOString(),

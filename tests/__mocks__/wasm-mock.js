@@ -22,7 +22,7 @@ module.exports = {
     }
     return shares;
   },
-  custody_shamir_reconstruct: () => 'a'.repeat(64),
+  custody_shamir_reconstruct: (_sharesJson, _threshold) => 'a'.repeat(64),
   custody_encrypt_for_authority: () => ({
     package_hex: 'f'.repeat(128),
     ephemeral_pubkey_hex: 'g'.repeat(64),

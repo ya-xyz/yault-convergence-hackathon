@@ -120,6 +120,16 @@ contract YaultVault is ERC4626, Ownable, Pausable, ReentrancyGuard, IYaultVault 
     address public aToken;
 
     // -----------------------------------------------------------------------
+    //  H-03 FIX: Minimum harvest interval
+    // -----------------------------------------------------------------------
+
+    /// @notice Tracks the last harvest timestamp per user.
+    mapping(address => uint256) public lastHarvestTime;
+
+    /// @notice Minimum interval between harvests for the same user (1 day).
+    uint256 public constant MIN_HARVEST_INTERVAL = 1 days;
+
+    // -----------------------------------------------------------------------
     //  Errors
     // -----------------------------------------------------------------------
 
@@ -163,8 +173,15 @@ contract YaultVault is ERC4626, Ownable, Pausable, ReentrancyGuard, IYaultVault 
     /// @dev Thrown when balanceOf(asset()) reverts (e.g. some proxies when caller is a contract).
     error SweepBalanceCheckFailed();
 
+    /// @dev H-03: Thrown when harvest is called too soon after the last harvest.
+    error HarvestTooFrequent();
+
     /// @dev Thrown when setMinHarvestYield is below MIN_HARVEST_YIELD_FLOOR.
     error MinYieldBelowFloor();
+    /// @dev L-05: Thrown when investToStrategy is called with zero amount.
+    error ZeroAmount();
+    /// @dev Thrown when setStrategy is called while old strategy has funds.
+    error StrategyHasFunds();
     /// @dev Thrown when refreshPlatformAddress is called with no revenue config.
     error NoRevenueConfig();
     /// @dev Thrown when setAuthorityAddress is called with self.
@@ -188,6 +205,12 @@ contract YaultVault is ERC4626, Ownable, Pausable, ReentrancyGuard, IYaultVault 
 
     /// @notice Emitted when a transfer exemption is set or revoked.
     event TransferExemptSet(address indexed account, bool exempt);
+
+    /// @notice M-02: Emitted when the minimum harvest yield threshold is updated.
+    event MinHarvestYieldUpdated(uint256 oldValue, uint256 newValue);
+
+    /// @notice M-03: Emitted when the strategy token approval is set.
+    event StrategyTokenApproved(address indexed aToken, address indexed aavePool, uint256 amount);
 
     // -----------------------------------------------------------------------
     //  Constructor
@@ -232,7 +255,9 @@ contract YaultVault is ERC4626, Ownable, Pausable, ReentrancyGuard, IYaultVault 
     /// @param newMinYield The new minimum yield in asset units (must be >= MIN_HARVEST_YIELD_FLOOR).
     function setMinHarvestYield(uint256 newMinYield) external onlyOwner {
         if (newMinYield < MIN_HARVEST_YIELD_FLOOR) revert MinYieldBelowFloor();
+        uint256 oldValue = minHarvestYield;
         minHarvestYield = newMinYield;
+        emit MinHarvestYieldUpdated(oldValue, newMinYield);
     }
 
     /// @notice #14 FIX: Allow user to adopt the latest platformFeeRecipient into their cached config.
@@ -281,7 +306,11 @@ contract YaultVault is ERC4626, Ownable, Pausable, ReentrancyGuard, IYaultVault 
         } catch {
             revert SweepBalanceCheckFailed();
         }
-        if (amount > bal) revert InsufficientSweepBalance();
+        // H-02 FIX: Only allow sweeping excess balance (tokens not backing shares).
+        // Protect escrowed authority revenue from being swept.
+        uint256 protectedBalance = totalAssets() + totalEscrowedAuthorityRevenue;
+        uint256 excess = bal > protectedBalance ? bal - protectedBalance : 0;
+        if (amount > excess) revert InsufficientSweepBalance();
         IERC20(asset()).safeTransfer(to, amount);
     }
 
@@ -304,6 +333,11 @@ contract YaultVault is ERC4626, Ownable, Pausable, ReentrancyGuard, IYaultVault 
     /// @inheritdoc IYaultVault
     function setStrategy(address _aavePool, address _aToken) external override onlyOwner {
         if (_aavePool == address(0) || _aToken == address(0)) revert ZeroAddress();
+        // Prevent stranding funds in old strategy
+        if (aToken != address(0)) {
+            uint256 strategyBalance = IERC20(aToken).balanceOf(address(this));
+            if (strategyBalance > 0) revert StrategyHasFunds();
+        }
         aavePool = _aavePool;
         aToken = _aToken;
         emit StrategySet(_aavePool, _aToken);
@@ -311,18 +345,21 @@ contract YaultVault is ERC4626, Ownable, Pausable, ReentrancyGuard, IYaultVault 
 
     /// @inheritdoc IYaultVault
     function investToStrategy(uint256 amount) external override onlyOwner nonReentrant {
+        // L-05 FIX: Prevent investing zero amount.
+        if (amount == 0) revert ZeroAmount();
         if (aavePool == address(0)) revert StrategyNotSet();
         // Only invest idle balance (exclude escrowed authority revenue)
         uint256 idle = IERC20(asset()).balanceOf(address(this)) - totalEscrowedAuthorityRevenue;
         if (amount > idle) revert InsufficientIdleBalance();
 
-        IERC20(asset()).approve(aavePool, amount);
+        IERC20(asset()).forceApprove(aavePool, amount);
         IAavePool(aavePool).supply(asset(), amount, address(this), 0);
         emit InvestedToStrategy(amount);
     }
 
     /// @inheritdoc IYaultVault
     function withdrawFromStrategy(uint256 amount) external override onlyOwner nonReentrant {
+        if (amount == 0) revert ZeroAmount();
         if (aavePool == address(0)) revert StrategyNotSet();
         IAavePool(aavePool).withdraw(asset(), amount, address(this));
         emit WithdrawnFromStrategy(amount);
@@ -330,9 +367,12 @@ contract YaultVault is ERC4626, Ownable, Pausable, ReentrancyGuard, IYaultVault 
 
     /// @notice Approve aToken to the strategy pool (needed for Mock/strategies that pull aTokens on withdraw).
     ///         Real Aave often handles this via callback; call once after setStrategy when using a mock.
-    function approveStrategyToken() external onlyOwner {
+    /// @dev H-04 FIX: Accept a bounded amount parameter instead of unlimited approve.
+    /// @param amount The amount to approve for the strategy pool.
+    function approveStrategyToken(uint256 amount) external onlyOwner {
         if (aToken == address(0)) revert StrategyNotSet();
-        IERC20(aToken).approve(aavePool, type(uint256).max);
+        IERC20(aToken).approve(aavePool, amount);
+        emit StrategyTokenApproved(aToken, aavePool, amount);
     }
 
     // -----------------------------------------------------------------------
@@ -398,7 +438,26 @@ contract YaultVault is ERC4626, Ownable, Pausable, ReentrancyGuard, IYaultVault 
 
     /// @inheritdoc IYaultVault
     function harvest() external override nonReentrant {
-        address user = msg.sender;
+        _harvestInternal(msg.sender);
+    }
+
+    /// @notice Harvest yield on behalf of a user (onlyOwner). Use for periodic settlement so platform
+    ///         and authority receive their share even if the user never calls harvest().
+    function harvestFor(address user) external override onlyOwner nonReentrant {
+        _harvestInternal(user);
+    }
+
+    /**
+     * @dev Shared harvest logic for harvest() and harvestFor(). Eliminates code duplication
+     *      to prevent divergence bugs when patching one function but not the other.
+     *      Follows checks-effects-interactions: all state updates happen before external transfers.
+     */
+    function _harvestInternal(address user) private {
+        // H-03 FIX: Enforce minimum interval between harvests (skip if first harvest).
+        if (lastHarvestTime[user] != 0 && block.timestamp < lastHarvestTime[user] + MIN_HARVEST_INTERVAL) {
+            revert HarvestTooFrequent();
+        }
+
         uint256 shares = balanceOf(user);
         uint256 currentValue = convertToAssets(shares);
         uint256 principal = userPrincipal[user];
@@ -428,15 +487,27 @@ contract YaultVault is ERC4626, Ownable, Pausable, ReentrancyGuard, IYaultVault 
             platformAmount = yieldAmount - userAmount; // remainder to platform
         }
 
-        // Burn shares equivalent to the total yield being distributed.
-        // Convert yield back to shares for burning.
-        uint256 sharesToBurn = convertToShares(yieldAmount);
+        // --- Effects (state updates before external interactions) ---
+
+        // C-02 FIX: Only burn shares for the amount that actually leaves the vault
+        // (platform + authority). The user's 75 % stays in the vault and compounds.
+        uint256 sharesToBurn = convertToShares(platformAmount + authorityAmount);
         _burn(user, sharesToBurn);
 
         // User 75 % stays in vault (compounds); only platform + authority are paid out.
         uint256 newPrincipal = principal + userAmount;
         userPrincipal[user] = newPrincipal;
+
+        // Escrow authority share (carved from platform's 25 %; zero when no authority).
+        if (authorityAmount > 0) {
+            pendingAuthorityRevenue[authority] += authorityAmount;
+            totalEscrowedAuthorityRevenue += authorityAmount;
+        }
+        lastHarvestTime[user] = block.timestamp;
+
         emit YieldCompounded(user, userAmount, newPrincipal);
+
+        // --- Interactions (external calls after all state updates) ---
 
         IERC20 underlying = IERC20(asset());
 
@@ -454,75 +525,11 @@ contract YaultVault is ERC4626, Ownable, Pausable, ReentrancyGuard, IYaultVault 
             IAavePool(aavePool).withdraw(asset(), shortfall, address(this));
         }
 
-        // User 75 % is not transferred; it stays in the vault and compounds (principal already updated above).
-
         // #14 FIX: Use cached platformAddress from RevenueConfig for atomicity.
         // Fallback to global platformFeeRecipient if cached value is zero (legacy configs).
         address cachedPlatform = _revenueConfigs[user].platformAddress;
         address platformTarget = cachedPlatform != address(0) ? cachedPlatform : platformFeeRecipient;
         underlying.safeTransfer(platformTarget, platformAmount);
-
-        // Escrow authority share (carved from platform's 25 %; zero when no authority).
-        if (authorityAmount > 0) {
-            pendingAuthorityRevenue[authority] += authorityAmount;
-            totalEscrowedAuthorityRevenue += authorityAmount;
-        }
-
-        emit YieldHarvested(msg.sender, user, userAmount, platformAmount, authorityAmount);
-    }
-
-    /// @notice Harvest yield on behalf of a user (onlyOwner). Use for periodic settlement so platform
-    ///         and authority receive their share even if the user never calls harvest().
-    function harvestFor(address user) external override onlyOwner nonReentrant {
-        uint256 shares = balanceOf(user);
-        uint256 currentValue = convertToAssets(shares);
-        uint256 principal = userPrincipal[user];
-
-        if (currentValue <= principal) revert NoYieldToHarvest();
-
-        uint256 yieldAmount = currentValue - principal;
-        if (yieldAmount < minHarvestYield) revert YieldBelowMinimum();
-
-        uint256 userAmount = (yieldAmount * USER_SHARE) / BPS_DENOMINATOR;
-        address authority = _revenueConfigs[user].authorityAddress;
-
-        uint256 authorityAmount;
-        uint256 platformAmount;
-        if (authority != address(0)) {
-            authorityAmount = (yieldAmount * AUTHORITY_SHARE) / BPS_DENOMINATOR;
-            platformAmount = yieldAmount - userAmount - authorityAmount;
-        } else {
-            authorityAmount = 0;
-            platformAmount = yieldAmount - userAmount;
-        }
-
-        uint256 sharesToBurn = convertToShares(yieldAmount);
-        _burn(user, sharesToBurn);
-        uint256 newPrincipal = principal + userAmount;
-        userPrincipal[user] = newPrincipal;
-        emit YieldCompounded(user, userAmount, newPrincipal);
-
-        IERC20 underlying = IERC20(asset());
-        uint256 totalDistribution = platformAmount + authorityAmount;
-        uint256 idle;
-        try underlying.balanceOf(address(this)) returns (uint256 b) {
-            idle = b;
-        } catch {
-            idle = 0;
-        }
-        if (idle < totalDistribution && aavePool != address(0)) {
-            uint256 shortfall = totalDistribution - idle;
-            IAavePool(aavePool).withdraw(asset(), shortfall, address(this));
-        }
-
-        // User 75 % stays in vault (compounds)
-        address cachedPlatform = _revenueConfigs[user].platformAddress;
-        address platformTarget = cachedPlatform != address(0) ? cachedPlatform : platformFeeRecipient;
-        underlying.safeTransfer(platformTarget, platformAmount);
-        if (authorityAmount > 0) {
-            pendingAuthorityRevenue[authority] += authorityAmount;
-            totalEscrowedAuthorityRevenue += authorityAmount;
-        }
 
         emit YieldHarvested(msg.sender, user, userAmount, platformAmount, authorityAmount);
     }
@@ -584,6 +591,8 @@ contract YaultVault is ERC4626, Ownable, Pausable, ReentrancyGuard, IYaultVault 
         uint256 shares
     ) internal virtual override whenNotPaused {
         super._deposit(caller, receiver, assets, shares);
+        // NOTE: Fee-on-transfer tokens are NOT supported. The actual received amount must equal `assets`.
+        // If fee-on-transfer token support is needed, measure balance before/after transfer.
         userPrincipal[receiver] += assets;
 
         // Lazily initialise the revenue config for first-time depositors.
@@ -632,6 +641,18 @@ contract YaultVault is ERC4626, Ownable, Pausable, ReentrancyGuard, IYaultVault 
         }
 
         super._withdraw(caller, receiver, owner_, assets, shares);
+    }
+
+    // -----------------------------------------------------------------------
+    //  M-01 FIX: ERC-4626 inflation attack mitigation via virtual shares
+    // -----------------------------------------------------------------------
+
+    /// @dev Adds a virtual offset to share decimals to mitigate the ERC-4626
+    ///      inflation / donation attack vector. With 6 extra decimals the
+    ///      attacker needs to donate 10^6 times more to steal a meaningful
+    ///      fraction of the first depositor's shares.
+    function _decimalsOffset() internal pure override returns (uint8) {
+        return 6;
     }
 
     // -----------------------------------------------------------------------

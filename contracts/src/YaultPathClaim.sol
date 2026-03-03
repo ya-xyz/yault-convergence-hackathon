@@ -5,24 +5,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-
-/**
- * @title IReleaseAttestation
- * @notice Interface for reading release attestations (oracle / authority decision).
- */
-interface IReleaseAttestation {
-    function getAttestation(bytes32 walletIdHash, uint256 recipientIndex)
-        external
-        view
-        returns (
-            uint8 source,
-            uint8 decision,
-            bytes32 reasonCode,
-            bytes32 evidenceHash,
-            uint64 timestamp,
-            address submitter
-        );
-}
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {IReleaseAttestation} from "./interfaces/IReleaseAttestation.sol";
 
 /**
  * @title YaultPathClaim
@@ -75,7 +59,10 @@ contract YaultPathClaim is Ownable, ReentrancyGuard {
     bytes32 public constant CLAIM_TYPEHASH = keccak256(
         "Claim(bytes32 walletIdHash,uint256 pathIndex,uint256 amount,address to,uint256 nonce,uint256 deadline)"
     );
-    bytes32 public immutable DOMAIN_SEPARATOR;
+
+    /// @dev M-06 FIX: Store initial chain ID and domain separator for fork detection.
+    uint256 private immutable _CHAIN_ID;
+    bytes32 private immutable _DOMAIN_SEPARATOR;
 
     event WalletRegistered(bytes32 indexed walletIdHash, address indexed owner);
     event Deposited(bytes32 indexed walletIdHash, address indexed from, uint256 amount);
@@ -91,6 +78,7 @@ contract YaultPathClaim is Ownable, ReentrancyGuard {
         address indexed to,
         uint256 amount
     );
+    event Reclaimed(bytes32 indexed walletIdHash, address indexed to, uint256 amount);
 
     error ZeroAddress();
     error WalletAlreadyRegistered();
@@ -105,6 +93,8 @@ contract YaultPathClaim is Ownable, ReentrancyGuard {
     error ClaimAmountZero();
     error ZeroReceiver();
     error DeadlineExpired();
+    error InsufficientBalance();
+    error AttestationIsRelease();
 
     constructor(address initialOwner, IERC20 _asset, address _attestation)
         Ownable(initialOwner)
@@ -112,7 +102,19 @@ contract YaultPathClaim is Ownable, ReentrancyGuard {
         if (address(_asset) == address(0) || _attestation == address(0)) revert ZeroAddress();
         asset = _asset;
         attestation = IReleaseAttestation(_attestation);
-        DOMAIN_SEPARATOR = keccak256(
+        _CHAIN_ID = block.chainid;
+        _DOMAIN_SEPARATOR = _computeDomainSeparator();
+    }
+
+    /// @notice M-06 FIX: Returns the domain separator, recomputing if chain ID has changed (fork safety).
+    function DOMAIN_SEPARATOR() public view returns (bytes32) {
+        if (block.chainid == _CHAIN_ID) return _DOMAIN_SEPARATOR;
+        return _computeDomainSeparator();
+    }
+
+    /// @dev Computes the EIP-712 domain separator for the current chain.
+    function _computeDomainSeparator() private view returns (bytes32) {
+        return keccak256(
             abi.encode(
                 keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
                 keccak256("YaultPathClaim"),
@@ -124,12 +126,17 @@ contract YaultPathClaim is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Register msg.sender as owner for walletIdHash. One-time per wallet.
+     * @notice Register a wallet owner for walletIdHash. One-time per wallet.
+     * @dev H-01 FIX: Restricted to onlyOwner to prevent front-running attacks
+     *      where an attacker registers a walletIdHash before the legitimate owner.
+     * @param walletIdHash The wallet identifier hash.
+     * @param _walletOwner The address to register as owner for this wallet.
      */
-    function registerWallet(bytes32 walletIdHash) external {
+    function registerWallet(bytes32 walletIdHash, address _walletOwner) external onlyOwner {
+        if (_walletOwner == address(0)) revert ZeroAddress();
         if (walletOwner[walletIdHash] != address(0)) revert WalletAlreadyRegistered();
-        walletOwner[walletIdHash] = msg.sender;
-        emit WalletRegistered(walletIdHash, msg.sender);
+        walletOwner[walletIdHash] = _walletOwner;
+        emit WalletRegistered(walletIdHash, _walletOwner);
     }
 
     /**
@@ -182,7 +189,7 @@ contract YaultPathClaim is Ownable, ReentrancyGuard {
         return keccak256(
             abi.encodePacked(
                 "\x19\x01",
-                DOMAIN_SEPARATOR,
+                DOMAIN_SEPARATOR(),
                 keccak256(
                     abi.encode(
                         CLAIM_TYPEHASH,
@@ -224,6 +231,8 @@ contract YaultPathClaim is Ownable, ReentrancyGuard {
 
         PathInfo storage p = pathInfo[walletIdHash][pathIndex];
         if (p.pathController == address(0)) revert PathNotRegistered();
+        // Only wallet owner can execute claims (prevents front-running griefing)
+        if (walletOwner[walletIdHash] != msg.sender) revert NotWalletOwner();
 
         uint256 remaining = p.totalAmount - p.claimedAmount;
         uint256 actualTransfer = amount > remaining ? remaining : amount;
@@ -231,7 +240,7 @@ contract YaultPathClaim is Ownable, ReentrancyGuard {
 
         uint256 nonce = claimNonce[walletIdHash][pathIndex];
         bytes32 digest = getClaimHash(walletIdHash, pathIndex, amount, to, nonce, deadline);
-        address signer = ecrecover(digest, v, r, s);
+        address signer = ECDSA.recover(digest, v, r, s);
         if (signer != p.pathController) revert InvalidSignature();
 
         claimNonce[walletIdHash][pathIndex] = nonce + 1;
@@ -239,6 +248,59 @@ contract YaultPathClaim is Ownable, ReentrancyGuard {
 
         asset.safeTransfer(to, actualTransfer);
         emit Claimed(walletIdHash, pathIndex, to, actualTransfer);
+    }
+
+    /**
+     * @notice M-05 FIX: Reclaim unallocated funds from the wallet pool.
+     * @dev Only the wallet owner can reclaim. Only the portion of deposits
+     *      not yet allocated to paths can be reclaimed.
+     * @param walletIdHash The wallet identifier hash.
+     * @param amount Amount of tokens to reclaim.
+     * @param to Address to send the reclaimed tokens to.
+     */
+    function reclaim(bytes32 walletIdHash, uint256 amount, address to) external nonReentrant {
+        if (walletOwner[walletIdHash] != msg.sender) revert NotWalletOwner();
+        if (to == address(0)) revert ZeroAddress();
+        if (amount == 0) return;
+        // Only allow reclaim of funds not allocated to active paths.
+        uint256 available = totalDeposited[walletIdHash] - totalAllocated[walletIdHash];
+        if (amount > available) revert InsufficientBalance();
+        totalDeposited[walletIdHash] -= amount;
+        asset.safeTransfer(to, amount);
+        emit Reclaimed(walletIdHash, to, amount);
+    }
+
+    /**
+     * @notice Reclaim allocated funds for a path when attestation is HOLD or REJECT.
+     * @dev Only wallet owner can reclaim. Requires attestation with non-RELEASE decision.
+     *      Prevents funds from being permanently locked when release is denied.
+     * @param walletIdHash The wallet identifier hash.
+     * @param pathIndex The path index.
+     * @param to Address to send reclaimed tokens to.
+     */
+    function reclaimAllocated(bytes32 walletIdHash, uint256 pathIndex, address to) external nonReentrant {
+        if (walletOwner[walletIdHash] != msg.sender) revert NotWalletOwner();
+        if (to == address(0)) revert ZeroAddress();
+
+        (, uint8 decision,,, uint64 timestamp,) = attestation.getAttestation(walletIdHash, pathIndex);
+        // Require attestation exists and is NOT release
+        if (timestamp == 0) revert NoAttestation();
+        if (decision == DECISION_RELEASE) revert AttestationIsRelease();
+
+        PathInfo storage p = pathInfo[walletIdHash][pathIndex];
+        if (p.pathController == address(0)) revert PathNotRegistered();
+
+        uint256 reclaimable = p.totalAmount - p.claimedAmount;
+        if (reclaimable == 0) revert InsufficientBalance();
+
+        // Zero out path allocation and reduce both totalAllocated and totalDeposited
+        // to maintain invariant: available_for_reclaim = totalDeposited - totalAllocated
+        totalAllocated[walletIdHash] -= reclaimable;
+        totalDeposited[walletIdHash] -= reclaimable;
+        p.totalAmount = p.claimedAmount; // effectively zero remaining
+
+        asset.safeTransfer(to, reclaimable);
+        emit Reclaimed(walletIdHash, to, reclaimable);
     }
 
     /**

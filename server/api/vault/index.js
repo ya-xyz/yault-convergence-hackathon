@@ -237,8 +237,8 @@ router.get('/balances/:address', dualAuthMiddleware, async (req, res) => {
   }
   const address = normalizeAddr(rawAddr);
 
-  // C-01 FIX: Verify caller owns this address
-  if (req.auth.pubkey !== address) {
+  // C-01 FIX: Verify caller owns this address (normalize pubkey for consistent comparison)
+  if (normalizeAddr(req.auth.pubkey) !== address) {
     return res.status(403).json({
       error: 'Forbidden',
       detail: 'You can only view your own balances',
@@ -303,8 +303,8 @@ router.post('/deposit', dualAuthMiddleware, async (req, res) => {
 
   const normalizedAddr = normalizeAddr(address);
 
-  // C-01 FIX: Verify caller owns this address
-  if (req.auth.pubkey !== normalizedAddr) {
+  // C-01 FIX: Verify caller owns this address (normalize pubkey for consistent comparison)
+  if (normalizeAddr(req.auth.pubkey) !== normalizedAddr) {
     return res.status(403).json({
       error: 'Forbidden',
       detail: 'You can only deposit into your own vault',
@@ -373,7 +373,7 @@ router.post('/redeem', dualAuthMiddleware, async (req, res) => {
   const normalizedAddr = normalizeAddr(address);
 
   // C-01 FIX: Verify caller owns this address
-  if (req.auth.pubkey !== normalizedAddr) {
+  if (normalizeAddr(req.auth.pubkey) !== normalizedAddr) {
     return res.status(403).json({
       error: 'Forbidden',
       detail: 'You can only redeem from your own vault',
@@ -458,7 +458,7 @@ router.post('/harvest', dualAuthMiddleware, async (req, res) => {
   const normalizedAddr = normalizeAddr(address);
 
   // C-01 FIX: Verify caller owns this address
-  if (req.auth.pubkey !== normalizedAddr) {
+  if (normalizeAddr(req.auth.pubkey) !== normalizedAddr) {
     return res.status(403).json({
       error: 'Forbidden',
       detail: 'You can only harvest from your own vault',
@@ -505,8 +505,8 @@ router.post('/transfer', dualAuthMiddleware, async (req, res) => {
     return res.status(400).json({ error: 'Invalid address format' });
   }
 
-  // Verify caller is the sender (use normalized address for comparison)
-  if (req.auth.pubkey !== normalizedFrom) {
+  // Verify caller is the sender (normalize pubkey for consistent comparison)
+  if (normalizeAddr(req.auth.pubkey) !== normalizedFrom) {
     return res.status(403).json({ error: 'Cannot transfer from a different address' });
   }
 
@@ -585,13 +585,17 @@ router.post('/transfer', dualAuthMiddleware, async (req, res) => {
 // ─── POST /simulate-yield (dev/demo: inject WETH into vault to simulate yield) ───
 
 router.post('/simulate-yield', dualAuthMiddleware, async (req, res) => {
+  if (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') {
+    return res.status(403).json({ error: 'Simulate endpoints disabled in production/staging' });
+  }
+
   const { address, amount } = req.body || {};
   if (!address || !isValidAddress(address)) {
     return res.status(400).json({ error: 'Valid address is required' });
   }
 
   const normalizedAddr = normalizeAddr(address);
-  if (req.auth.pubkey !== normalizedAddr) {
+  if (normalizeAddr(req.auth.pubkey) !== normalizedAddr) {
     return res.status(403).json({ error: 'Forbidden', detail: 'You can only simulate yield for your own vault' });
   }
 
@@ -652,7 +656,8 @@ router.post('/simulate-yield', dualAuthMiddleware, async (req, res) => {
     });
   } catch (err) {
     console.error('[simulate-yield] Error:', err.message);
-    res.status(500).json({ error: 'Simulation failed: ' + err.message });
+    console.error('[vault/simulate-yield] Simulation failed:', err.message);
+    res.status(500).json({ error: 'Simulation failed' });
   }
 });
 
@@ -668,7 +673,7 @@ router.get('/reserve/:address', dualAuthMiddleware, async (req, res) => {
     return res.status(400).json({ error: 'Invalid address format' });
   }
   // Security: caller can only view own reserve status
-  if (req.auth.pubkey !== normalizedAddr) {
+  if (normalizeAddr(req.auth.pubkey) !== normalizedAddr) {
     return res.status(403).json({
       error: 'Forbidden',
       detail: 'You can only view your own vault reserve status',

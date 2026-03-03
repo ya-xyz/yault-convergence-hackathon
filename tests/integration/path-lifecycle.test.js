@@ -43,7 +43,7 @@ jest.mock('../../wasm-core/pkg/yault_custody_wasm', () => ({
     }
     return shares;
   },
-  custody_shamir_reconstruct: (sharesJson) =>
+  custody_shamir_reconstruct: (sharesJson, _threshold) =>
     'a'.repeat(64),
   custody_encrypt_for_authority: (msgHex, pkHex) => ({
     package_hex: 'f'.repeat(128),

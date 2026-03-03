@@ -62,7 +62,7 @@ router.put('/', dualAuthMiddleware, async (req, res) => {
     };
     if (data.evm_address && !data.evm_address.startsWith('0x')) data.evm_address = '0x' + data.evm_address;
 
-    console.log('[me/addresses] PUT received address data:', JSON.stringify(data, null, 2));
+    console.log('[me/addresses] PUT saved addresses for wallet:', walletId);
 
     await db.walletAddresses.create(walletId, data);
     return res.json({ ok: true, addresses: data });

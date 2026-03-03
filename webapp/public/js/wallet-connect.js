@@ -20,6 +20,12 @@ function report(msg) {
   if (typeof console !== 'undefined' && console.log) console.log('[WalletConnector]', msg);
 }
 
+function _esc(s) {
+  var d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
 function hexToBytes(hex) {
   const bytes = new Uint8Array(hex.length / 2);
   for (let i = 0; i < hex.length; i += 2) {
@@ -342,9 +348,9 @@ class WalletConnector {
 
     return `
       <div class="wallet-login">
-        <h2 style="text-align:center;margin-bottom:8px;">${title}</h2>
+        <h2 style="text-align:center;margin-bottom:8px;">${_esc(title)}</h2>
         <p style="text-align:center;color:var(--text-secondary);margin-bottom:24px;font-size:14px;">
-          ${subtitle}
+          ${_esc(subtitle)}
         </p>
 
         <div class="wallet-options">

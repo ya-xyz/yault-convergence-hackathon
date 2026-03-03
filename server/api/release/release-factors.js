@@ -22,6 +22,11 @@ const { Router } = require('express');
 const crypto = require('crypto');
 const db = require('../../db');
 
+// ---------------------------------------------------------------------------
+// Encryption helpers for admin_factor_hex at rest (shared module)
+// ---------------------------------------------------------------------------
+const { encryptAdminFactor } = require('../../services/adminFactorCrypto');
+
 const router = Router();
 
 router.post('/', async (req, res) => {
@@ -75,12 +80,32 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'Trigger wallet_id mismatch' });
     }
 
-    // Security: only the authority who made the release decision can submit admin_factors
+    // Security: only the authority who made the release decision can submit admin_factors.
+    // Exception: for oracle-created triggers (trigger_type === 'oracle'), the bound entity
+    // authority is allowed to submit, since the oracle itself doesn't hold AdminFactors —
+    // it only triggers the release; the entity authority holds and submits the factors.
     const callerAuthorityId = req.auth?.authority_id;
-    if (!callerAuthorityId || callerAuthorityId !== trigger.authority_id) {
+    let isAllowed = callerAuthorityId && callerAuthorityId === trigger.authority_id;
+
+    if (!isAllowed && trigger.trigger_type === 'oracle' && callerAuthorityId) {
+      // Look up the wallet's bound entity authority from path config
+      let walletPaths = await db.recipientPaths.findByWallet(wallet_id);
+      if (walletPaths.length === 0) {
+        // Also try lowercase
+        walletPaths = await db.recipientPaths.findByWallet(wallet_id.toLowerCase());
+      }
+      if (walletPaths.length > 0) {
+        const boundAuthorityId = walletPaths[0].authority_id;
+        if (boundAuthorityId && callerAuthorityId === boundAuthorityId) {
+          isAllowed = true;
+        }
+      }
+    }
+
+    if (!isAllowed) {
       return res.status(403).json({
         error: 'Forbidden',
-        detail: 'Only the authority who made the release decision can submit admin factors',
+        detail: 'Only the authority who made the release decision (or bound entity authority for oracle triggers) can submit admin factors',
       });
     }
 
@@ -116,7 +141,7 @@ router.post('/', async (req, res) => {
         const pathEntry = storedPaths.find(sp => sp.index === af.index);
         const out = {
           index: af.index,
-          admin_factor_hex: af.admin_factor_hex.toLowerCase(),
+          admin_factor_hex: encryptAdminFactor(af.admin_factor_hex.toLowerCase()),
           fingerprint,
         };
         if (af.blob_hex != null) {

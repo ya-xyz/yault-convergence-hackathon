@@ -8,6 +8,7 @@
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use zeroize::Zeroize;
 
 #[derive(Error, Debug)]
 pub enum ShamirError {
@@ -39,41 +40,64 @@ pub struct ShamirShare {
     pub data: Vec<u8>,
 }
 
-// ─── GF(256) arithmetic ───
+// ─── GF(256) arithmetic (constant-time via log/exp lookup tables) ───
 // Irreducible polynomial: x^8 + x^4 + x^3 + x + 1 = 0x11B (AES field)
 
-/// GF(256) multiplication using Russian-peasant algorithm
-fn gf256_mul(mut a: u8, mut b: u8) -> u8 {
-    let mut result: u8 = 0;
-    while b > 0 {
-        if b & 1 != 0 {
-            result ^= a;
-        }
-        let carry = a & 0x80;
-        a <<= 1;
-        if carry != 0 {
-            a ^= 0x1B; // reduce by x^8 + x^4 + x^3 + x + 1
-        }
-        b >>= 1;
-    }
-    result
+/// Precomputed GF(256) log table (generator 3, polynomial 0x11B).
+/// LOG[0] is 0 (sentinel; callers must handle 0 separately).
+const GF256_LOG: [u8; 256] = precompute_log_table();
+const GF256_EXP: [u16; 512] = precompute_exp_table();
+
+/// Multiply by 3 in GF(256): v*3 = v*2 XOR v (generator 3 is a primitive root for 0x11B).
+const fn gf256_mul_by3(v: u16) -> u16 {
+    let mut v2 = v << 1;
+    if v2 & 0x100 != 0 { v2 ^= 0x11B; }
+    v2 ^ v
 }
 
-/// GF(256) multiplicative inverse via extended Euclidean or Fermat's little theorem.
-/// a^(-1) = a^(254) in GF(256) since |GF(256)*| = 255.
+const fn precompute_log_table() -> [u8; 256] {
+    let mut log = [0u8; 256];
+    let mut v: u16 = 1;
+    let mut i: u16 = 0;
+    while i < 255 {
+        log[v as usize] = i as u8;
+        v = gf256_mul_by3(v);
+        i += 1;
+    }
+    log
+}
+
+const fn precompute_exp_table() -> [u16; 512] {
+    let mut exp = [0u16; 512];
+    let mut v: u16 = 1;
+    let mut i: usize = 0;
+    while i < 255 {
+        exp[i] = v;
+        v = gf256_mul_by3(v);
+        i += 1;
+    }
+    // Duplicate for easy modular indexing
+    let mut j: usize = 0;
+    while j < 256 {
+        exp[255 + j] = exp[j];
+        j += 1;
+    }
+    exp
+}
+
+/// Constant-time GF(256) multiply using log/exp tables.
+fn gf256_mul(a: u8, b: u8) -> u8 {
+    if a == 0 || b == 0 { return 0; }
+    let log_sum = GF256_LOG[a as usize] as u16 + GF256_LOG[b as usize] as u16;
+    GF256_EXP[log_sum as usize] as u8
+}
+
+/// Constant-time GF(256) multiplicative inverse using log/exp tables.
 fn gf256_inv(a: u8) -> u8 {
     if a == 0 {
-        return 0; // 0 has no inverse; caller must avoid
+        panic!("gf256_inv: zero has no multiplicative inverse in GF(256)");
     }
-    // a^254 = a^(128+64+32+16+8+4+2) via repeated squaring
-    let mut result = a;
-    for _ in 0..6 {
-        result = gf256_mul(result, result); // square
-        result = gf256_mul(result, a);       // multiply by a
-    }
-    // one more square to get a^254
-    result = gf256_mul(result, result);
-    result
+    GF256_EXP[255u16.wrapping_sub(GF256_LOG[a as usize] as u16) as usize] as u8
 }
 
 /// Evaluate a polynomial at x in GF(256) using Horner's method.
@@ -130,6 +154,7 @@ pub fn split(secret: &[u8], total: u8, threshold: u8) -> Result<Vec<ShamirShare>
         let mut random_bytes = vec![0u8; coeff_count - 1];
         rng.fill_bytes(&mut random_bytes);
         coefficients[1..].copy_from_slice(&random_bytes);
+        random_bytes.zeroize();
 
         // Evaluate polynomial at x = share.index for each share
         for share in shares.iter_mut() {
@@ -138,7 +163,6 @@ pub fn split(secret: &[u8], total: u8, threshold: u8) -> Result<Vec<ShamirShare>
     }
 
     // C-08 FIX: Use zeroize crate for compiler-safe memory clearing
-    use zeroize::Zeroize;
     coefficients.zeroize();
 
     Ok(shares)
@@ -153,8 +177,8 @@ pub fn split(secret: &[u8], total: u8, threshold: u8) -> Result<Vec<ShamirShare>
 /// # Returns
 /// The reconstructed secret bytes.
 pub fn reconstruct(shares: &[ShamirShare]) -> Result<Vec<u8>, ShamirError> {
-    if shares.is_empty() {
-        return Err(ShamirError::NotEnoughShares { needed: 2, got: 0 });
+    if shares.len() < 2 {
+        return Err(ShamirError::NotEnoughShares { needed: 2, got: shares.len() });
     }
 
     // Validate: all shares must have same length

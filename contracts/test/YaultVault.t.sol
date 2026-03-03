@@ -122,8 +122,9 @@ contract YaultVaultTest is Test {
         token = new MockERC20("Mock USDC", "mUSDC", 6);
 
         // Deploy creator, then factory.
-        YaultVaultCreator creator = new YaultVaultCreator();
+        YaultVaultCreator creator = new YaultVaultCreator(address(this));
         factory = new YaultVaultFactory(owner, platform, address(creator));
+        creator.transferOwnership(address(factory));
 
         // Create vault through factory.
         vm.prank(owner);

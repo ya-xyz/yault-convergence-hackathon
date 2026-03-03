@@ -61,7 +61,7 @@ contract Deploy is Script {
         vm.startBroadcast(deployerKey);
 
         // 1. Deploy the vault creator (holds YaultVault creation bytecode; keeps factory under 24 KiB).
-        YaultVaultCreator creator = new YaultVaultCreator();
+        YaultVaultCreator creator = new YaultVaultCreator(deployer);
         console2.log("Creator deployed at:   ", address(creator));
 
         // 2. Deploy the factory (uses creator for createVault).
@@ -71,6 +71,9 @@ contract Deploy is Script {
             address(creator)
         );
         console2.log("Factory deployed at:   ", address(factory));
+
+        // L-03: Transfer creator ownership to factory so only factory can create vaults.
+        creator.transferOwnership(address(factory));
 
         // 3. Deploy the default WETH vault through the factory.
         address vaultAddress = factory.createVault(

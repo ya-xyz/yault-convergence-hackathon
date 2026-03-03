@@ -396,6 +396,55 @@
   }
 
   /**
+   * Execute a claim (full or partial) from escrow for a recipient.
+   *
+   * @param {object} provider - EVM-compatible provider with request() support
+   * @param {object} cfg - { escrowAddress, vaultAddress, chainId, rpcUrl }
+   * @param {string} callerAddress - Wallet executing the claim (must be walletOwner)
+   * @param {string} ownerWalletId - Original owner's wallet ID (for hashing)
+   * @param {number} recipientIndex - Recipient index to claim for
+   * @param {string} toAddress - Address to receive claimed assets
+   * @param {string|null} amountWei - Share amount to claim (null = claim all remaining)
+   * @param {boolean} redeemToAsset - true = receive underlying; false = receive vault shares
+   * @param {function} [onProgress] - Optional callback: (step, total, detail) => void
+   * @returns {Promise<{ success: boolean, txHash?: string, claimed: string, remaining: string, error?: string }>}
+   */
+  async function claimFromEscrow(provider, cfg, callerAddress, ownerWalletId, recipientIndex, toAddress, amountWei, redeemToAsset, onProgress) {
+    var ethers = _ethers();
+    var progress = onProgress || function () {};
+    try {
+      var wHash = walletIdHash(ownerWalletId);
+      progress(1, 3, 'Querying remaining shares...');
+
+      // Query remaining claimable shares
+      var remaining = await getRemaining(cfg.rpcUrl, cfg.escrowAddress, wHash, recipientIndex);
+      if (remaining === '0' || !remaining) {
+        return { success: false, claimed: '0', remaining: '0', error: 'No remaining shares to claim for this recipient' };
+      }
+
+      // Determine claim amount: full (all remaining) or partial
+      var claimAmount = amountWei || remaining;
+      if (BigInt(claimAmount) > BigInt(remaining)) {
+        return { success: false, claimed: '0', remaining: remaining, error: 'Claim amount (' + claimAmount + ') exceeds remaining (' + remaining + ')' };
+      }
+
+      progress(2, 3, 'Submitting claim transaction...');
+      var tx = buildClaimTx(cfg.escrowAddress, wHash, recipientIndex, toAddress, claimAmount, redeemToAsset, cfg.chainId);
+      tx.from = callerAddress;
+      var txHash = await provider.request({ method: 'eth_sendTransaction', params: [tx] });
+      await _waitForTx(cfg.rpcUrl, txHash);
+
+      // Query updated remaining
+      var newRemaining = await getRemaining(cfg.rpcUrl, cfg.escrowAddress, wHash, recipientIndex);
+
+      progress(3, 3, 'Claim complete!');
+      return { success: true, txHash: txHash, claimed: claimAmount, remaining: newRemaining };
+    } catch (err) {
+      return { success: false, claimed: '0', remaining: '0', error: err.message || String(err) };
+    }
+  }
+
+  /**
    * Wait for a transaction to be mined.
    */
   async function _waitForTx(rpcUrl, txHash, timeoutMs) {
@@ -440,6 +489,7 @@
     // High-level
     depositAllToEscrow,
     reclaimAllFromEscrow,
+    claimFromEscrow,
   };
 
   if (typeof module !== 'undefined' && module.exports) {
