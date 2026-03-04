@@ -97,6 +97,7 @@ router.post('/release', authorityAuthMiddleware, async (req, res) => {
       ...record,
       admin_factor: null,
       encrypted_admin_factor: encryptedAdminFactor,
+      encrypted_for_xidentity: recipientXidentity,
       linked_by_authority_id: authorityId,
       linked_at: new Date().toISOString(),
     };

@@ -33,11 +33,14 @@ async function recordDelivery(walletId, authorityId, recipientIndex, result) {
   const now = Date.now();
   const existing = await db.rwaDeliveryLog.findById(id);
   const attempts = (existing?.attempts || 0) + 1;
+  const nonRetryable = !!(result && result.nonRetryable);
   const record = {
     wallet_id: walletId,
     authority_id: authorityId,
     recipient_index: recipientIndex,
-    status: result.delivered ? 'delivered' : (attempts >= MAX_RETRY_ATTEMPTS ? 'failed' : 'pending'),
+    status: result.delivered
+      ? 'delivered'
+      : ((nonRetryable || attempts >= MAX_RETRY_ATTEMPTS) ? 'failed' : 'pending'),
     txId: result.txId || existing?.txId || null,
     error: result.error || null,
     attempts,
@@ -151,6 +154,8 @@ async function deliverRwaPackageForRecipient(binding, recipientIndex, opts = {})
 
     if (!response.ok) {
       const errorMsg = body?.error || response.statusText || 'Upload-and-mint failed';
+      const nonRetryableMintCapacity =
+        /InsufficientMintCapacity|not enough unapproved mints left|Error Number:\s*6017/i.test(String(errorMsg || ''));
       // If the cNFT mint service is unavailable (no Merkle tree) but the data is already on Arweave,
       // treat delivery as successful — the recipient's credential is permanently stored on Arweave.
       const isMintServiceUnavailable = response.status === 503 && /[Mm]erkle tree|not initialized/i.test(errorMsg);
@@ -158,7 +163,11 @@ async function deliverRwaPackageForRecipient(binding, recipientIndex, opts = {})
         console.warn('[deliverRwaRelease] cNFT mint unavailable (%s), marking delivered with Arweave tx %s', errorMsg, payloadArweaveTxId);
         result = { delivered: true, txId: `arweave:${payloadArweaveTxId}` };
       } else {
-        result = { delivered: false, error: errorMsg };
+        result = {
+          delivered: false,
+          error: errorMsg,
+          nonRetryable: nonRetryableMintCapacity,
+        };
       }
     } else {
       result = { delivered: true, txId: signature };

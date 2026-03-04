@@ -18,6 +18,7 @@ const config = require('../../config');
 const escrowContract = require('../../services/escrowContract');
 const { evaluateReleaseAttestationGate } = require('../../services/attestationGate');
 const { encryptAdminFactorForXidentity, normalizeAdminFactorHex } = require('../../services/xidentityAdminFactor');
+const { fetchFromArweave, manifestKey } = require('../../services/arweaveReleaseStorage');
 
 // ---------------------------------------------------------------------------
 // Decryption helper for admin_factor_hex at rest (shared module)
@@ -38,6 +39,179 @@ function getEncryptedAdminPayload(record) {
   return null;
 }
 
+function normalizeEncryptedPayloadShape(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  if (payload.encrypted && typeof payload.encrypted === 'object') return payload.encrypted;
+  const hasRawFields = (
+    typeof payload.ephemeral_pub === 'string' &&
+    typeof payload.encrypted_aes_key === 'string' &&
+    typeof payload.iv === 'string' &&
+    typeof payload.encrypted_data === 'string'
+  );
+  return hasRawFields ? payload : null;
+}
+
+const _manifestCache = new Map(); // key: `${manifestTxId}` => manifest json object|null
+const _payloadCache = new Map();  // key: `${payloadTxId}` => encrypted object|null
+
+async function loadManifestJson(manifestTxId) {
+  const key = String(manifestTxId || '').trim();
+  if (!key) return null;
+  if (_manifestCache.has(key)) return _manifestCache.get(key);
+  try {
+    const text = await fetchFromArweave(key);
+    if (!text) {
+      _manifestCache.set(key, null);
+      return null;
+    }
+    const parsed = JSON.parse(text);
+    const out = parsed && typeof parsed === 'object' ? parsed : null;
+    _manifestCache.set(key, out);
+    return out;
+  } catch (_) {
+    _manifestCache.set(key, null);
+    return null;
+  }
+}
+
+async function loadEncryptedPayloadFromTx(payloadTxId) {
+  const key = String(payloadTxId || '').trim();
+  if (!key) return null;
+  if (_payloadCache.has(key)) return _payloadCache.get(key);
+  try {
+    const text = await fetchFromArweave(key);
+    if (!text) {
+      _payloadCache.set(key, null);
+      return null;
+    }
+    const body = JSON.parse(text);
+    if (!body || typeof body !== 'object') {
+      _payloadCache.set(key, null);
+      return null;
+    }
+    // RWA payload shape: { data: base64(jsonString), ... }
+    if (typeof body.data === 'string' && body.data.trim()) {
+      const decoded = Buffer.from(body.data, 'base64').toString('utf8');
+      const inner = JSON.parse(decoded);
+      const encrypted = normalizeEncryptedPayloadShape(inner);
+      _payloadCache.set(key, encrypted);
+      return encrypted;
+    }
+    const encrypted = normalizeEncryptedPayloadShape(body);
+    _payloadCache.set(key, encrypted);
+    return encrypted;
+  } catch (_) {
+    _payloadCache.set(key, null);
+    return null;
+  }
+}
+
+async function getEncryptedPayloadFromBindingManifest(walletId, authorityId, recipientIndex) {
+  const w = String(walletId || '').trim();
+  const wNorm = normalizeAddr(w);
+  const a = String(authorityId || '').trim();
+  const idx = Number(recipientIndex);
+  if (!w || !Number.isFinite(idx) || idx < 1) return null;
+  const walletCandidates = [...new Set([
+    w,
+    wNorm,
+    wNorm ? ('0x' + wNorm) : '',
+  ].filter(Boolean))];
+  const bindingSets = await Promise.all(walletCandidates.map((wk) => db.bindings.findByWallet(wk)));
+  const bindingMap = new Map();
+  for (const set of bindingSets) {
+    for (const b of set || []) {
+      const id = String(b.binding_id || '').trim() || JSON.stringify([b.wallet_id, b.authority_id, b.created_at]);
+      if (!bindingMap.has(id)) bindingMap.set(id, b);
+    }
+  }
+  const bindings = [...bindingMap.values()];
+  const activeWithManifest = bindings.filter((b) => b && b.manifest_arweave_tx_id && (b.status || '') === 'active');
+  const withManifest = bindings.filter((b) => b && b.manifest_arweave_tx_id);
+  let target = null;
+  if (a) {
+    target = activeWithManifest.find((b) => String(b.authority_id || '').trim() === a)
+      || withManifest.find((b) => String(b.authority_id || '').trim() === a);
+  }
+  if (!target) {
+    // Plan flow may not carry authority_id; choose the most recent active binding with manifest.
+    const sorted = activeWithManifest.length > 0 ? activeWithManifest : withManifest;
+    target = sorted.sort((x, y) => Number(y.created_at || 0) - Number(x.created_at || 0))[0] || null;
+  }
+  if (!target || !target.manifest_arweave_tx_id) return null;
+
+  const manifest = await loadManifestJson(target.manifest_arweave_tx_id);
+  if (!manifest) return null;
+  const key = manifestKey(String(target.wallet_id || w), String(target.authority_id || '').trim(), idx);
+  const payloadTxId = manifest[key];
+  if (!payloadTxId) return null;
+  return loadEncryptedPayloadFromTx(payloadTxId);
+}
+
+async function findRecipientPathIndex(planWalletId, recipientEvmAddress) {
+  const walletRaw = String(planWalletId || '').trim();
+  const walletNorm = normalizeAddr(planWalletId);
+  const recipientNorm = normalizeAddr(recipientEvmAddress);
+  if ((!walletRaw && !walletNorm) || !recipientNorm) return null;
+  const walletCandidates = [...new Set([
+    walletRaw,
+    walletNorm,
+    walletNorm ? ('0x' + walletNorm) : '',
+  ].filter(Boolean))];
+  for (const walletKey of walletCandidates) {
+    const configs = await db.recipientPaths.findByWallet(walletKey);
+    for (const cfg of configs) {
+      const paths = Array.isArray(cfg.paths) ? cfg.paths : [];
+      const match = paths.find((p) => p && p.recipient_evm_address && normalizeAddr(p.recipient_evm_address) === recipientNorm);
+      if (match && Number.isFinite(Number(match.index))) return Number(match.index);
+    }
+  }
+  return null;
+}
+
+async function resolveAdminFactorHexForPlanRow(record) {
+  if (!record || typeof record !== 'object') return null;
+  const legacyRaw = record.admin_factor ? String(record.admin_factor).trim() : '';
+  if (legacyRaw) {
+    try {
+      return normalizeAdminFactorHex(legacyRaw);
+    } catch (_) {}
+  }
+
+  const planWalletId = record.plan_wallet_id || '';
+  const recipientEvm = record.evm_address || '';
+  const recipientIndex = await findRecipientPathIndex(planWalletId, recipientEvm);
+  if (!Number.isFinite(recipientIndex) || recipientIndex < 1) return null;
+
+  const factors = await db.walletAdminFactors.findByWallet(normalizeAddr(planWalletId));
+  const row = factors.find((f) => Number(f.recipient_index) === Number(recipientIndex));
+  if (!row || !row.admin_factor_hex) return null;
+  try {
+    return decryptAdminFactor(row.admin_factor_hex);
+  } catch (_) {
+    return null;
+  }
+}
+
+async function refreshPlanRowEncryptionForCurrentXidentity(record, recipientXidentity) {
+  const plainHex = await resolveAdminFactorHexForPlanRow(record);
+  if (!plainHex || !recipientXidentity) return null;
+  const encrypted = await encryptAdminFactorForXidentity(plainHex, recipientXidentity);
+  const id = String(record.mnemonic_hash || '').trim().toLowerCase();
+  if (isValidMnemonicHash(id)) {
+    await db.recipientMnemonicAdmin.update(id, {
+      ...record,
+      admin_factor: null,
+      encrypted_admin_factor: encrypted,
+      encrypted_for_xidentity: String(recipientXidentity).trim(),
+      updated_at: new Date().toISOString(),
+    }).catch((err) => {
+      console.warn('[claim/lookup] Failed to persist refreshed plan encrypted_admin_factor:', err.message);
+    });
+  }
+  return encrypted;
+}
+
 async function getXidentityByEvm(evmAddress) {
   const norm = normalizeAddr(evmAddress);
   if (!norm) return '';
@@ -47,6 +221,13 @@ async function getXidentityByEvm(evmAddress) {
 }
 
 async function ensureEncryptedAdminPayload(record, recipientXidentity, persistUpdater) {
+  // For plan rows, always prefer refreshing encryption with current recipient xidentity
+  // from walletAdminFactors. This prevents stale ciphertext after xidentity rotation.
+  if (record && record.plan_wallet_id && record.evm_address) {
+    const refreshed = await refreshPlanRowEncryptionForCurrentXidentity(record, recipientXidentity);
+    if (refreshed) return refreshed;
+  }
+
   const existing = getEncryptedAdminPayload(record);
   if (existing) return existing;
 
@@ -182,6 +363,8 @@ router.get('/plan-releases', async (req, res) => {
             ...r,
             admin_factor: null,
             encrypted_admin_factor: payload,
+            encrypted_for_xidentity: callerXidentity,
+            updated_at: new Date().toISOString(),
           });
         }
       );
@@ -272,6 +455,8 @@ router.post('/get-admin-factor', async (req, res) => {
           ...record,
           admin_factor: null,
           encrypted_admin_factor: payload,
+          encrypted_for_xidentity: callerXidentity,
+          updated_at: new Date().toISOString(),
         });
       }
     );
@@ -336,10 +521,16 @@ router.get('/me', async (req, res) => {
       for (const mp of myPaths) {
         const factor = latestRelease.factors.find(f => f.index === mp.index);
         if (!factor) continue;
-        let encrypted;
+        let encrypted = await getEncryptedPayloadFromBindingManifest(
+          walletId,
+          releasedTrigger.authority_id || '',
+          mp.index
+        );
         try {
-          const plainHex = decryptAdminFactor(factor.admin_factor_hex);
-          encrypted = await encryptAdminFactorForXidentity(plainHex, callerXidentity);
+          if (!encrypted) {
+            const plainHex = decryptAdminFactor(factor.admin_factor_hex);
+            encrypted = await encryptAdminFactorForXidentity(plainHex, callerXidentity);
+          }
         } catch (_) {
           continue;
         }
@@ -367,22 +558,19 @@ router.get('/me', async (req, res) => {
       }
     }
     for (const r of planLatest.values()) {
-      // Look up the correct recipient index from recipientPaths (by wallet_id, not full scan)
-      let pathIndex = null;
-      const planWalletNorm = normalizeAddr(r.plan_wallet_id || '');
-      const recipientNorm = normalizeAddr(r.evm_address || '');
-      if (planWalletNorm && recipientNorm) {
-        const planConfigs = await db.recipientPaths.findByWallet(planWalletNorm);
-        for (const pc of planConfigs) {
-          if (Array.isArray(pc.paths)) {
-            const match = pc.paths.find(p =>
-              p.recipient_evm_address && normalizeAddr(p.recipient_evm_address) === recipientNorm
-            );
-            if (match) { pathIndex = match.index; break; }
-          }
-        }
+      // Look up recipient index using wallet id variants (raw / normalized / 0x-prefixed).
+      const pathIndex = await findRecipientPathIndex(r.plan_wallet_id || '', r.evm_address || '');
+      let encrypted = null;
+      if (r.plan_wallet_id && Number.isFinite(Number(pathIndex)) && Number(pathIndex) > 0) {
+        // Prefer the exact encrypted credential payload that was stored for this recipient path.
+        encrypted = await getEncryptedPayloadFromBindingManifest(
+          r.plan_wallet_id,
+          '',
+          Number(pathIndex)
+        );
       }
-      const encrypted = await ensureEncryptedAdminPayload(
+      if (!encrypted) {
+        encrypted = await ensureEncryptedAdminPayload(
         r,
         callerXidentity,
         async (payload) => {
@@ -392,9 +580,12 @@ router.get('/me', async (req, res) => {
             ...r,
             admin_factor: null,
             encrypted_admin_factor: payload,
+            encrypted_for_xidentity: callerXidentity,
+            updated_at: new Date().toISOString(),
           });
         }
-      );
+        );
+      }
       if (!encrypted) continue;
       myEntries.push({
         wallet_id: r.plan_wallet_id || null,
@@ -456,10 +647,20 @@ router.get('/escrow-balance', async (req, res) => {
     if (isNaN(recipientIndex) || recipientIndex < 0) {
       return res.status(400).json({ error: 'recipientIndex must be a non-negative integer' });
     }
-    // Resolve path config for auth (try with and without 0x)
-    let pathConfigs = await db.recipientPaths.findByWallet(walletId);
-    if (pathConfigs.length === 0) {
-      pathConfigs = await db.recipientPaths.findByWallet(normalizeAddr(walletId));
+    // Resolve path config for auth (raw / no-0x / 0x forms), since DB key is hash(wallet_id string).
+    const walletNorm = normalizeAddr(walletId);
+    const walletCandidates = [...new Set([
+      walletId,
+      walletNorm,
+      walletNorm ? `0x${walletNorm}` : '',
+    ].filter(Boolean))];
+    let pathConfigs = [];
+    for (const walletKey of walletCandidates) {
+      pathConfigs = await db.recipientPaths.findByWallet(walletKey);
+      if (pathConfigs.length > 0) break;
+    }
+    if (pathConfigs.length > 0 && pathConfigs[0]?.wallet_id) {
+      walletId = String(pathConfigs[0].wallet_id).trim();
     }
     const paths = pathConfigs.length > 0 ? pathConfigs[0].paths || [] : [];
     if (!isAuthorized(req.auth.pubkey, walletId, paths)) {

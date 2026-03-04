@@ -47,7 +47,7 @@ module.exports = {
     urls: ['https://api.drand.sh', 'https://drand.cloudflare.com'],
   },
   arweave: {
-    gateway: process.env.ARWEAVE_GATEWAY || 'https://arweave.net',
+    gateway: process.env.ARWEAVE_GATEWAY || 'https://turbo-gateway.com',
     appName: 'Yault',
   },
   // Revenue split — MUST match YaultVault.sol constants (source of truth is on-chain).
