@@ -1025,12 +1025,22 @@ function isRawEciesCipherObject(value) {
 
 function buildCredentialPayloadStrict(input, contextLabel) {
   const src = input || {};
-  const adminFactorHex = String(src.admin_factor_hex || '').trim();
-  if (!/^[0-9a-fA-F]{64}$/.test(adminFactorHex)) {
-    throw new Error((contextLabel || 'Credential payload') + ' missing valid admin_factor_hex (64 hex).');
+  const mnemonic = String(src.mnemonic || '').trim();
+  const passphrase = String(src.passphrase || '').trim();
+  const index = Number(src.index);
+  const label = String(src.label || '').trim();
+  const memo = src.memo;
+  if (!mnemonic || !passphrase || !label || !Number.isInteger(index) || index < 1) {
+    throw new Error((contextLabel || 'Credential payload') + ' missing required mnemonic/passphrase/index/label.');
   }
-  // AF encrypted note content must include release key only.
-  return { releaseKey: adminFactorHex.toLowerCase() };
+  const out = {
+    mnemonic,
+    passphrase,
+    index,
+    label,
+  };
+  if (memo != null && String(memo).trim() !== '') out.memo = String(memo).trim();
+  return out;
 }
 
 async function decryptClaimPayloadWithYallet(encryptedPayload) {
@@ -3399,7 +3409,6 @@ async function handleFixEncryptionClick(e) {
     const strictPayload = buildCredentialPayloadStrict({
       mnemonic: newMnemonic,
       passphrase: newPassphrase,
-      admin_factor_hex: adminFactorHex,
       index: recipientIndex,
       label: label,
     }, 'Re-generate payload');
@@ -4472,7 +4481,6 @@ function attachAppEvents() {
                           const strictPayload = buildCredentialPayloadStrict({
                             mnemonic: state.planMnemonics[i],
                             passphrase: state.planPassphrases[i],
-                            admin_factor_hex: state.planAdminFactors[i],
                             index: i + 1,
                             label: label,
                             memo: (state.planMemo && state.planMemo.trim()) ? state.planMemo.trim() : undefined,
