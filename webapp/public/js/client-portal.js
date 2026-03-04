@@ -1072,9 +1072,23 @@ function buildCredentialPayloadStrict(input, contextLabel) {
   return out;
 }
 
+function isClaimDecryptDebugEnabled() {
+  try {
+    if (typeof window !== 'undefined' && window.__YAULT_CLAIM_DECRYPT_DEBUG__ === true) return true;
+    if (typeof localStorage !== 'undefined') {
+      const v = String(localStorage.getItem('YAULT_CLAIM_DECRYPT_DEBUG') || '').trim().toLowerCase();
+      return v === '1' || v === 'true' || v === 'yes';
+    }
+  } catch (_) {}
+  return false;
+}
+
 async function decryptClaimPayloadWithYallet(encryptedPayload) {
   if (typeof window !== 'undefined' && typeof window.YAULT_CLAIM_DECRYPTOR === 'function') {
     const out = await window.YAULT_CLAIM_DECRYPTOR(encryptedPayload);
+    if (isClaimDecryptDebugEnabled()) {
+      try { console.warn('[Claim][DecryptDebug] response from custom decryptor:', out); } catch (_) {}
+    }
     return parseDecryptResultToClaimPayload(out);
   }
   const provider = (window && (window.yallet || window.ethereum)) || null;
@@ -1096,6 +1110,9 @@ async function decryptClaimPayloadWithYallet(encryptedPayload) {
     }
   }
   const out = await provider.request({ method: 'yallet_decryptWithXidentity', params: [candidate] });
+  if (isClaimDecryptDebugEnabled()) {
+    try { console.warn('[Claim][DecryptDebug] response from provider:', out); } catch (_) {}
+  }
   return parseDecryptResultToClaimPayload(out);
 }
 
