@@ -6820,33 +6820,31 @@ async function sendTransactionInWallet(transaction, fromAddress) {
   const from = fromAddress ? normalizeHex(fromAddress.startsWith('0x') ? fromAddress : '0x' + fromAddress) : undefined;
   const value = toEvenHex(transaction.value ?? 0);
   const chainIdHex = transaction.chainId ? toEvenHex(Number(transaction.chainId)) : undefined;
+  // Proactively switch to the correct chain BEFORE sending the transaction.
+  // This prevents the wallet from signing on the wrong chain and returning a hash
+  // that doesn't exist on the target network.
+  if (chainIdHex) {
+    try {
+      await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: chainIdHex }] });
+    } catch (e) {
+      // 4902 = chain not added; other errors are non-fatal (wallet may already be on correct chain)
+      if (e?.code !== 4902) console.warn('[sendTx] chain switch warning:', e?.message);
+    }
+  }
   const txParams = {
     from,
     to: transaction.to ? normalizeHex(transaction.to) : undefined,
     data: transaction.data ? normalizeHex(transaction.data) : undefined,
     value,
+    chainId: chainIdHex || undefined,
   };
   if (transaction.gasLimit != null) {
     txParams.gas = normalizeHex(transaction.gasLimit);
   }
-  // Call eth_sendTransaction first so the browser user gesture is still valid for the wallet popup.
-  // If Yallet returns wrong-network error, switch chain and retry once.
-  try {
-    return await provider.request({
-      method: 'eth_sendTransaction',
-      params: [txParams],
-    });
-  } catch (e) {
-    const needSwitch = chainIdHex && (e?.code === 4902 || e?.message?.includes('chain') || e?.message?.includes('network'));
-    if (needSwitch) {
-      await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: chainIdHex }] });
-      return await provider.request({
-        method: 'eth_sendTransaction',
-        params: [txParams],
-      });
-    }
-    throw e;
-  }
+  return await provider.request({
+    method: 'eth_sendTransaction',
+    params: [txParams],
+  });
 }
 
 // ─── Init (unified app: register for main.js) ───
