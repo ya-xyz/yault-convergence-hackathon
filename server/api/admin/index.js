@@ -553,6 +553,7 @@ router.get('/release/redeliver-candidates', async (_req, res) => {
     }
 
     const planMap = new Map();
+    const recipientSeen = new Set();
     for (const trigger of released) {
       const walletId = trigger.wallet_id;
       if (!walletId) continue;
@@ -574,6 +575,9 @@ router.get('/release/redeliver-candidates', async (_req, res) => {
       for (const ri of binding.recipient_indices) {
         const idx = Number(ri);
         if (Number.isNaN(idx) || idx < 0) continue;
+        const recipientKey = `${planKey}_${idx}`;
+        if (recipientSeen.has(recipientKey)) continue;
+        recipientSeen.add(recipientKey);
         const logId = deliveryLogId(walletId, authorityId, idx);
         const log = await db.rwaDeliveryLog.findById(logId).catch(() => null);
         const name = await getRecipientLabel(walletId, idx);

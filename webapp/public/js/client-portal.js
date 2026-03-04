@@ -729,6 +729,32 @@ async function fetchWalletAddressesFromExtension() {
   }
 }
 
+async function syncWalletAddressesFromExtensionForClaim() {
+  if (!wallet || !wallet.connected || wallet.walletType !== 'yallet') return { synced: false, changed: false };
+  const provider = window.yallet;
+  if (!provider) return { synced: false, changed: false };
+  try {
+    const addresses = await (typeof WalletConnector !== 'undefined' && WalletConnector.getYalletAllAddresses
+      ? WalletConnector.getYalletAllAddresses(provider)
+      : Promise.resolve(null));
+    if (!addresses || !addresses.xidentity) return { synced: false, changed: false };
+    const prevXidentity = String((state.walletAddresses && state.walletAddresses.xidentity) || '').trim();
+    const nextXidentity = String(addresses.xidentity || '').trim();
+    const changed = !!nextXidentity && prevXidentity !== nextXidentity;
+    state.walletAddresses = addresses;
+    setDefaultWalletSelection();
+    const headers = await getAuthHeadersAsync().catch(() => ({}));
+    await fetch(`${API_BASE}/me/addresses`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify({ addresses }),
+    });
+    return { synced: true, changed, xidentity: nextXidentity };
+  } catch (_) {
+    return { synced: false, changed: false };
+  }
+}
+
 /** Set walletSelectedChain / walletSelectedAddress from first non-empty in walletAddresses. */
 function setDefaultWalletSelection() {
   const a = state.walletAddresses;
@@ -843,24 +869,62 @@ function parseClaimDecryptedPayload(rawText) {
     throw new Error('Invalid JSON format.');
   }
 
-  // Some decrypt outputs wrap payload JSON in content/body/data string.
+  const tryParseJson = (v) => {
+    try { return JSON.parse(String(v || '').trim()); } catch (_) { return null; }
+  };
+  const tryDecodeBase64Utf8 = (v) => {
+    const s = String(v || '').trim();
+    if (!s || s.length % 4 !== 0) return null;
+    if (!/^[A-Za-z0-9+/=]+$/.test(s)) return null;
+    try {
+      const bin = atob(s);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new TextDecoder().decode(bytes);
+    } catch (_) {
+      return null;
+    }
+  };
+
+  const pickObj = (source, keys) => {
+    if (!source || typeof source !== 'object') return null;
+    for (const key of keys) {
+      const v = source[key];
+      if (v && typeof v === 'object' && !Array.isArray(v)) return v;
+    }
+    return null;
+  };
+
+  // Some decrypt outputs wrap payload JSON in different envelope shapes.
+  // Unwrap recursively from content/body/data/payload/note/asset/message.
   let payload = parsed;
-  if (payload && typeof payload === 'object') {
-    const wrapped = pickFirstNonEmpty(payload, ['content', 'body', 'data', 'payload']);
-    if (wrapped && (wrapped.startsWith('{') || wrapped.startsWith('['))) {
-      try {
-        payload = JSON.parse(wrapped);
-      } catch (_) {
-        // Keep original payload if nested JSON parse fails.
+  for (let i = 0; i < 6; i++) {
+    if (!payload || typeof payload !== 'object') break;
+    const wrappedObj = pickObj(payload, ['data', 'payload', 'note', 'asset', 'credential_payload', 'decrypted', 'release', 'credentials']);
+    if (wrappedObj) { payload = wrappedObj; continue; }
+    const wrapped = pickFirstNonEmpty(payload, ['content', 'body', 'data', 'payload', 'message']);
+    if (wrapped) {
+      const asJson = tryParseJson(wrapped);
+      if (asJson && typeof asJson === 'object') { payload = asJson; continue; }
+      const decoded = tryDecodeBase64Utf8(wrapped);
+      if (decoded) {
+        const decJson = tryParseJson(decoded);
+        if (decJson && typeof decJson === 'object') { payload = decJson; continue; }
       }
     }
+    break;
   }
   if (!payload || typeof payload !== 'object') throw new Error('Decrypted payload must be a JSON object.');
+  if (isRawEciesCipherObject(payload) || (payload.encrypted && isRawEciesCipherObject(payload.encrypted))) {
+    throw new Error('Decrypt returned encrypted payload (still cipher object). Please verify extension decrypt path.');
+  }
 
   const nestedCred = payload.credential && typeof payload.credential === 'object' ? payload.credential : null;
   const nestedMeta = payload.meta && typeof payload.meta === 'object' ? payload.meta : null;
   const nestedWallet = payload.wallet && typeof payload.wallet === 'object' ? payload.wallet : null;
-  const ctx = [payload, nestedCred, nestedMeta, nestedWallet].filter(Boolean);
+  const nestedRelease = payload.release && typeof payload.release === 'object' ? payload.release : null;
+  const nestedCredentials = payload.credentials && typeof payload.credentials === 'object' ? payload.credentials : null;
+  const ctx = [payload, nestedCred, nestedMeta, nestedWallet, nestedRelease, nestedCredentials].filter(Boolean);
   const pickAny = (keys) => {
     for (const c of ctx) {
       const v = pickFirstNonEmpty(c, keys);
@@ -869,12 +933,19 @@ function parseClaimDecryptedPayload(rawText) {
     return '';
   };
 
-  const mnemonic = pickAny(['mnemonic', 'new_mnemonic', 'recipient_mnemonic']);
-  const passphrase = pickAny(['passphrase', 'user_cred', 'userCred', 'recipient_passphrase']);
-  const releaseKey = pickAny(['admin_factor_hex', 'adminFactor', 'admin_factor', 'secondaryPassphrase', 'secondary_passphrase', 'blob_hex']);
+  const mnemonic = pickAny(['mnemonic', 'new_mnemonic', 'newMnemonic', 'recipient_mnemonic', 'seed_phrase', 'seedPhrase']);
+  const passphrase = pickAny(['passphrase', 'new_passphrase', 'newPassphrase', 'user_cred', 'userCred', 'recipient_passphrase', 'recipientPassphrase']);
+  const releaseKey = pickAny(['admin_factor_hex', 'adminFactorHex', 'adminFactor', 'admin_factor', 'secondaryPassphrase', 'secondary_passphrase', 'blob_hex', 'releaseKey', 'release_key']);
   const walletId = pickAny(['wallet_id', 'walletId', 'plan_wallet_id']);
-  const rawPathIndex = pickAny(['path_index', 'pathIndex', 'recipient_index', 'recipientIndex']);
+  const rawPathIndex = pickAny(['path_index', 'pathIndex', 'recipient_index', 'recipientIndex', 'index']);
   const pathIndexNum = rawPathIndex ? parseInt(rawPathIndex, 10) : NaN;
+
+  if (!mnemonic && !passphrase && !releaseKey) {
+    throw new Error('Decrypted payload parsed but no credential fields found. Please paste full decrypted JSON.');
+  }
+  if ((mnemonic || passphrase) && !releaseKey) {
+    throw new Error('Decrypted payload found mnemonic/passphrase but missing admin_factor_hex. Regenerated payload likely omitted AdminFactor.');
+  }
 
   return {
     mnemonic,
@@ -933,6 +1004,51 @@ function parseDecryptResultToClaimPayload(result) {
   throw new Error('Unsupported decrypt result type.');
 }
 
+function parseClaimEncryptedPayloadInput(rawText) {
+  const text = String(rawText || '').trim();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch (_) {
+    return text;
+  }
+}
+
+function isRawEciesCipherObject(value) {
+  if (!value || typeof value !== 'object') return false;
+  return !!(
+    typeof value.ephemeral_pub === 'string' &&
+    typeof value.encrypted_aes_key === 'string' &&
+    typeof value.iv === 'string' &&
+    typeof value.encrypted_data === 'string'
+  );
+}
+
+function buildCredentialPayloadStrict(input, contextLabel) {
+  const src = input || {};
+  const mnemonic = String(src.mnemonic || '').trim();
+  const passphrase = String(src.passphrase || '').trim();
+  const adminFactorHex = String(src.admin_factor_hex || '').trim();
+  const index = Number(src.index);
+  const label = String(src.label || '').trim();
+  const memo = src.memo;
+  if (!mnemonic || !passphrase || !label || !Number.isInteger(index) || index < 1) {
+    throw new Error((contextLabel || 'Credential payload') + ' missing required mnemonic/passphrase/index/label.');
+  }
+  if (!/^[0-9a-fA-F]{64}$/.test(adminFactorHex)) {
+    throw new Error((contextLabel || 'Credential payload') + ' missing valid admin_factor_hex (64 hex).');
+  }
+  const out = {
+    mnemonic,
+    passphrase,
+    admin_factor_hex: adminFactorHex.toLowerCase(),
+    index,
+    label,
+  };
+  if (memo != null && String(memo).trim() !== '') out.memo = String(memo).trim();
+  return out;
+}
+
 async function decryptClaimPayloadWithYallet(encryptedPayload) {
   if (typeof window !== 'undefined' && typeof window.YAULT_CLAIM_DECRYPTOR === 'function') {
     const out = await window.YAULT_CLAIM_DECRYPTOR(encryptedPayload);
@@ -942,7 +1058,21 @@ async function decryptClaimPayloadWithYallet(encryptedPayload) {
   if (!provider || typeof provider.request !== 'function') {
     throw new Error('Yallet provider not found.');
   }
-  const out = await provider.request({ method: 'yallet_decryptWithXidentity', params: [encryptedPayload] });
+  let candidate = encryptedPayload;
+  if (typeof encryptedPayload === 'string') {
+    try {
+      const parsed = JSON.parse(encryptedPayload);
+      candidate = parsed;
+    } catch (_) {}
+  }
+  if (candidate && typeof candidate === 'object') {
+    if (candidate.encrypted && typeof candidate.encrypted === 'object') {
+      candidate = candidate.encrypted;
+    } else if (isRawEciesCipherObject(candidate)) {
+      candidate = candidate;
+    }
+  }
+  const out = await provider.request({ method: 'yallet_decryptWithXidentity', params: [candidate] });
   return parseDecryptResultToClaimPayload(out);
 }
 
@@ -978,6 +1108,25 @@ async function loadClaimMe() {
     const items = Array.isArray(data.items) ? data.items : [];
     state.claimMeItems = items;
     state.error = null;
+    const pickLatestItem = (arr) => {
+      if (!Array.isArray(arr) || arr.length === 0) return null;
+      const toTs = (it) => {
+        const v = it && it.created_at != null ? it.created_at : null;
+        if (v == null) return -1;
+        const n = typeof v === 'number' ? v : Date.parse(v);
+        return Number.isFinite(n) ? n : -1;
+      };
+      let best = arr[0];
+      let bestTs = toTs(best);
+      for (let i = 1; i < arr.length; i++) {
+        const ts = toTs(arr[i]);
+        if (ts > bestTs) {
+          best = arr[i];
+          bestTs = ts;
+        }
+      }
+      return best;
+    };
     if (items.length === 1) {
       state.selectedClaimItem = items[0];
       state.walletId = items[0].wallet_id;
@@ -985,10 +1134,11 @@ async function loadClaimMe() {
       const pref = items[0].admin_factor_hex || items[0].blob_hex || '';
       state.releaseKey = (isPlainClaimAdminFactor(pref) || isPlainClaimBlob(pref)) ? pref : '';
     } else if (items.length > 1) {
-      state.selectedClaimItem = items[0];
-      state.walletId = items[0].wallet_id;
-      state.pathIndex = items[0].path_index;
-      const pref = items[0].admin_factor_hex || items[0].blob_hex || '';
+      const latest = pickLatestItem(items) || items[0];
+      state.selectedClaimItem = latest;
+      state.walletId = latest.wallet_id;
+      state.pathIndex = latest.path_index;
+      const pref = latest.admin_factor_hex || latest.blob_hex || '';
       state.releaseKey = (isPlainClaimAdminFactor(pref) || isPlainClaimBlob(pref)) ? pref : '';
     } else {
       state.selectedClaimItem = null;
@@ -1165,7 +1315,7 @@ function renderProtectionOverview() {
                 <td style="padding:8px;border-bottom:1px solid var(--border);">${esc(r.label || r.name || '')}</td>
                 <td style="padding:8px;border-bottom:1px solid var(--border);text-align:right;">${r.percentage}%</td>
                 ${!isBalanceZero ? `<td style="padding:8px;border-bottom:1px solid var(--border);text-align:right;">
-                  <button type="button" class="btn btn-secondary btn-sm" data-fix-enc-index="${i + 1}" title="Regenerate credentials for this recipient (fix wrong x25519 encryption)">Resend</button>
+                  <button type="button" class="btn btn-secondary btn-sm" data-fix-enc-index="${i + 1}" title="Regenerate credentials for this recipient (fix wrong x25519 encryption)">Re-Generate Credential</button>
                 </td>` : ''}
               </tr>
             `).join('')}
@@ -2464,29 +2614,37 @@ function renderClaimStepIndicator() {
 function renderClaimStep1() {
   // Use claimMeItems as sole source — /api/claim/me merges trigger + plan releases.
   // Deduplicate by factor/payload key (same release may appear from multiple sources).
-  const rawItems = (state.claimMeItems || []).filter(it => it.admin_factor_hex || it.blob_hex || getEncryptedAdminPayloadFromItem(it));
+  const rawItems = (state.claimMeItems || [])
+    .map((it, sourceIdx) => ({ it, sourceIdx }))
+    .filter(({ it }) => it.admin_factor_hex || it.blob_hex || getEncryptedAdminPayloadFromItem(it));
   const seenAF = new Set();
   const meItems = [];
-  for (const item of rawItems) {
+  for (const entry of rawItems) {
+    const item = entry.it;
     const enc = getEncryptedAdminPayloadFromItem(item);
     const afKey = item.admin_factor_hex || item.blob_hex || (enc ? (typeof enc === 'string' ? enc : JSON.stringify(enc)) : '');
     if (afKey && seenAF.has(afKey)) continue;
     if (afKey) seenAF.add(afKey);
-    meItems.push(item);
+    meItems.push({
+      item,
+      sourceIdx: entry.sourceIdx,
+    });
   }
-  const merged = meItems.map((item, i) => ({
-    label: item.label || ('Release #' + (item.path_index || '')),
-    walletId: item.wallet_id || item.plan_wallet_id || '',
-    pathIndex: item.path_index || '',
-    af: item.admin_factor_hex || item.blob_hex || '',
-    hasEncryptedPayload: !!getEncryptedAdminPayloadFromItem(item),
-    created_at: item.created_at || null,
-    _meIdx: i,
+  const merged = meItems.map((entry, i) => ({
+    item: entry.item,
+    sourceIdx: entry.sourceIdx,
+    label: entry.item.label || ('Release #' + (entry.item.path_index || '')),
+    walletId: entry.item.wallet_id || entry.item.plan_wallet_id || '',
+    pathIndex: entry.item.path_index || '',
+    af: entry.item.admin_factor_hex || entry.item.blob_hex || '',
+    hasEncryptedPayload: !!getEncryptedAdminPayloadFromItem(entry.item),
+    created_at: entry.item.created_at || null,
+    _mergedIdx: i,
   }));
   const hasReleases = merged.length > 0;
   // Pre-fill admin_factor from selected release if available
   const prefilledAF = (isPlainClaimAdminFactor(state.releaseKey) || isPlainClaimBlob(state.releaseKey)) ? state.releaseKey : '';
-  const selectedRelease = state.selectedClaimItem || meItems[0] || null;
+  const selectedRelease = state.selectedClaimItem || (meItems[0] ? meItems[0].item : null) || null;
   const selectedEncryptedPayload = getEncryptedAdminPayloadFromItem(selectedRelease);
   const canPromptDecrypt = !!selectedEncryptedPayload && !isPlainClaimAdminFactor(state.releaseKey) && !isPlainClaimBlob(state.releaseKey);
   const selectedEncryptedPayloadText = selectedEncryptedPayload
@@ -2501,7 +2659,10 @@ function renderClaimStep1() {
       </p>
       ${hasReleases ? `
         <div style="margin-bottom:20px;padding:12px;background:var(--surface);border-radius:8px;border:1px solid var(--border);">
-          <div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:8px;text-transform:uppercase;">Your Releases</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;">
+            <div style="font-size:12px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;">Your Releases</div>
+            <button type="button" class="btn btn-secondary" id="btnClaimLoadMe" style="font-size:11px;padding:2px 8px;">Refresh Releases</button>
+          </div>
           ${merged.map((item, i) => `
             <div style="padding:6px 0;${i > 0 ? 'border-top:1px solid var(--border);' : ''}">
               <span style="font-weight:500;">${esc(item.label || 'Release')}</span>
@@ -2509,7 +2670,7 @@ function renderClaimStep1() {
               ${item.created_at ? '<span style="font-size:10px;color:var(--text-muted);margin-left:8px;">' + esc(new Date(typeof item.created_at === 'number' ? item.created_at : item.created_at).toLocaleString()) + '</span>' : ''}
               ${!item.af && !item.hasEncryptedPayload ? '<span style="font-size:11px;color:var(--text-muted);margin-left:8px;">Pending</span>' : ''}
               ${item.hasEncryptedPayload ? '<span style="font-size:11px;color:var(--warning);margin-left:8px;">Encrypted (decrypt required)</span>' : ''}
-              <button type="button" class="btn btn-secondary btn-use-release-af" data-release-idx="${item._meIdx}" data-release-af="${esc(item.af || '')}" data-wallet-id="${esc(item.walletId || '')}" data-path-index="${esc(String(item.pathIndex || ''))}" style="margin-left:8px;font-size:11px;padding:2px 8px;">Use</button>
+              <button type="button" class="btn btn-secondary btn-use-release-af" data-release-idx="${item._mergedIdx}" data-release-source-idx="${item.sourceIdx}" data-release-af="${esc(item.af || '')}" data-wallet-id="${esc(item.walletId || '')}" data-path-index="${esc(String(item.pathIndex || ''))}" style="margin-left:8px;font-size:11px;padding:2px 8px;">Use</button>
             </div>
           `).join('')}
         </div>
@@ -3251,12 +3412,14 @@ async function handleFixEncryptionClick(e) {
       showToast('RWA SDK prepareCredentialNftPayload not available', 'error');
       return;
     }
-    const prepared = await window.YaultRwaSdk.prepareCredentialNftPayload(solanaAddress, {
+    const strictPayload = buildCredentialPayloadStrict({
       mnemonic: newMnemonic,
       passphrase: newPassphrase,
+      admin_factor_hex: adminFactorHex,
       index: recipientIndex,
       label: label,
-    }, { xidentity: xidentity });
+    }, 'Re-generate payload');
+    const prepared = await window.YaultRwaSdk.prepareCredentialNftPayload(solanaAddress, strictPayload, { xidentity: xidentity });
     const fingerprintBytes = new Uint8Array(adminFactorHex.match(/.{2}/g).map(b => parseInt(b, 16)));
     const fingerprintBuf = await crypto.subtle.digest('SHA-256', fingerprintBytes);
     const adminFactorFingerprint = Array.from(new Uint8Array(fingerprintBuf)).map(b => b.toString(16).padStart(2, '0')).join('');
@@ -3277,10 +3440,51 @@ async function handleFixEncryptionClick(e) {
       showToast(errBody.error || replaceResp.statusText || 'Replace failed', 'error');
       return;
     }
-    showToast('Payload replaced. You can redeliver to this recipient from the authority/oracle side.', 'success');
+    // Keep persistence semantics aligned with initial Asset Plan creation:
+    // save new AdminFactor (encrypted at rest) + path credential linkage.
+    const persistWarnings = [];
+    const adminPersist = await persistPlanWriteOrQueue('admin_factor', {
+      recipientIndex: recipientIndex,
+      label: label,
+      admin_factor_hex: adminFactorHex,
+    });
+    if (!adminPersist.ok) {
+      persistWarnings.push(adminPersist.queued
+        ? 'AdminFactor save queued for retry'
+        : 'AdminFactor save failed');
+    }
+
+    let mnemonicHashHex = '';
+    try {
+      mnemonicHashHex = await hashMnemonic(newMnemonic);
+    } catch (_) {}
+    if (mnemonicHashHex) {
+      const credPersist = await persistPlanWriteOrQueue('path_credentials', {
+        recipientIndex: recipientIndex,
+        label: label,
+        mnemonic: newMnemonic,
+        passphrase: newPassphrase,
+        mnemonic_hash: mnemonicHashHex,
+        evm_address: recipientEvm,
+        admin_factor_hex: adminFactorHex,
+      });
+      if (!credPersist.ok) {
+        persistWarnings.push(credPersist.queued
+          ? 'Credential mapping save queued for retry'
+          : 'Credential mapping save failed');
+      }
+    } else {
+      persistWarnings.push('Could not compute mnemonic hash for credential mapping');
+    }
+
+    if (persistWarnings.length > 0) {
+      showToast('Payload replaced, but persistence needs attention: ' + persistWarnings.join('; ') + '.', 'warning');
+    } else {
+      showToast('Payload replaced and new AdminFactor/credential mapping saved. You can redeliver from authority/oracle side.', 'success');
+    }
     render();
   } catch (err) {
-    showToast(err.message || 'Resend failed', 'error');
+    showToast(err.message || 'Re-Generate Credential failed', 'error');
   } finally {
     fixBtn.disabled = false;
   }
@@ -3557,7 +3761,7 @@ function attachAppEvents() {
     });
   });
 
-  // Resend: only bind once (attachAppEvents runs on every render; duplicate handlers would run for all recipients)
+  // Re-Generate Credential: only bind once (attachAppEvents runs on every render; duplicate handlers would run for all recipients)
   if (!app.dataset.fixEncClickBound) {
     app.dataset.fixEncClickBound = '1';
     app.addEventListener('click', handleFixEncryptionClick);
@@ -4281,13 +4485,15 @@ function attachAppEvents() {
                       }
                       if (hasPrepare && solanaAddress && xidentity) {
                         try {
-                          const prepared = await window.YaultRwaSdk.prepareCredentialNftPayload(solanaAddress, {
+                          const strictPayload = buildCredentialPayloadStrict({
                             mnemonic: state.planMnemonics[i],
                             passphrase: state.planPassphrases[i],
+                            admin_factor_hex: state.planAdminFactors[i],
                             index: i + 1,
                             label: label,
                             memo: (state.planMemo && state.planMemo.trim()) ? state.planMemo.trim() : undefined,
-                          }, { xidentity: xidentity });
+                          }, 'Plan payload #' + (i + 1));
+                          const prepared = await window.YaultRwaSdk.prepareCredentialNftPayload(solanaAddress, strictPayload, { xidentity: xidentity });
                           packagesPerPath.push({
                             index: i + 1,
                             recipient_solana_address: prepared.recipientSolanaAddress,
@@ -5528,26 +5734,44 @@ function attachAppEvents() {
   // "Use" button for releases → fill AdminFactor field + set walletId/pathIndex
   document.querySelectorAll('.btn-use-release-af').forEach((btn) => {
     btn.addEventListener('click', () => {
+      const rows = state.claimMeItems || [];
       const idxRaw = btn.getAttribute('data-release-idx');
+      const sourceIdxRaw = btn.getAttribute('data-release-source-idx');
       if (idxRaw != null) {
         const idx = parseInt(idxRaw, 10);
+        const sourceIdx = parseInt(sourceIdxRaw, 10);
         const walletId = (btn.getAttribute('data-wallet-id') || '').trim();
         const pathIndexRaw = (btn.getAttribute('data-path-index') || '').trim();
         const pathIndex = parseInt(pathIndexRaw, 10);
-        const rows = state.claimMeItems || [];
-        const selected = rows.find((it) => {
-          if (walletId && String(it.wallet_id || it.plan_wallet_id || '').trim() !== walletId) return false;
-          if (Number.isFinite(pathIndex) && pathIndex > 0) return Number(it.path_index || 0) === pathIndex;
-          return true;
-        }) || (Number.isFinite(idx) && idx >= 0 && idx < rows.length ? rows[idx] : null);
-        if (selected) {
+        let selected = Number.isFinite(sourceIdx) && sourceIdx >= 0 && sourceIdx < rows.length
+          ? rows[sourceIdx]
+          : null;
+        if (!selected) {
+          selected = rows.find((it) => {
+            if (walletId && String(it.wallet_id || it.plan_wallet_id || '').trim() !== walletId) return false;
+            if (Number.isFinite(pathIndex) && pathIndex >= 0) return Number(it.path_index || 0) === pathIndex;
+            return true;
+          }) || (Number.isFinite(idx) && idx >= 0 && idx < rows.length ? rows[idx] : null);
+        }
+      if (selected) {
           if (selected && selected.wallet_id) state.walletId = selected.wallet_id;
-          if (selected && selected.path_index) state.pathIndex = selected.path_index;
+          if (selected && selected.path_index != null) state.pathIndex = selected.path_index;
           state.selectedClaimItem = selected;
           const pref = selected ? (selected.admin_factor_hex || selected.blob_hex || '') : '';
           state.releaseKey = (isPlainClaimAdminFactor(pref) || isPlainClaimBlob(pref)) ? pref : '';
           const afInput = document.getElementById('claimAdminFactor');
           if (afInput) afInput.value = state.releaseKey || '';
+          const encrypted = getEncryptedAdminPayloadFromItem(selected);
+          if (encrypted) {
+            state.claimDecryptedPayloadText = (typeof encrypted === 'string')
+              ? encrypted
+              : JSON.stringify(encrypted, null, 2);
+            const payloadInput = document.getElementById('claimDecryptedPayload');
+            if (payloadInput) payloadInput.value = state.claimDecryptedPayloadText;
+          }
+          if (encrypted && !state.releaseKey) {
+            showToast('Release selected. Please click "Decrypt via Yallet" to fill AdminFactor.', 'info');
+          }
           render();
           return;
         }
@@ -5558,13 +5782,16 @@ function attachAppEvents() {
         if (afInput) afInput.value = (isPlainClaimAdminFactor(af) || isPlainClaimBlob(af)) ? af : '';
         state.releaseKey = (isPlainClaimAdminFactor(af) || isPlainClaimBlob(af)) ? af : '';
         // Find matching item from claimMeItems to set walletId/pathIndex
-        const match = (state.claimMeItems || []).find(it =>
+        const match = rows.find(it =>
           (it.blob_hex === af || it.admin_factor_hex === af)
         );
         if (match) {
           state.walletId = match.wallet_id || '';
           state.pathIndex = match.path_index || 1;
         }
+      } else {
+        // No plain AF in the button payload and no selectable row found.
+        showToast('Release not found. Please refresh releases and try again.', 'error');
       }
     });
   });
@@ -5595,14 +5822,44 @@ function attachAppEvents() {
   const btnClaimDecryptWithYallet = document.getElementById('btnClaimDecryptWithYallet');
   if (btnClaimDecryptWithYallet) {
     btnClaimDecryptWithYallet.addEventListener('click', async () => {
+      if (state.claimDecryptLoading) return;
+      const now = Date.now();
+      if (state._lastClaimDecryptAt && (now - state._lastClaimDecryptAt) < 1200) return;
+      state._lastClaimDecryptAt = now;
       state.error = null;
-      const payloadRaw = btnClaimDecryptWithYallet.getAttribute('data-encrypted') || '';
+      // Ensure decrypt uses current recipient xidentity from extension; stale xidentity is a common
+      // cause of "Decryption failed or incorrect passphrase" after extension/account resets.
+      let syncedIdentity = null;
+      try {
+        syncedIdentity = await syncWalletAddressesFromExtensionForClaim();
+        if (syncedIdentity && syncedIdentity.changed) {
+          const prev = state.selectedClaimItem || null;
+          await loadClaimMe();
+          if (prev) {
+            const matched = (state.claimMeItems || []).find((it) => {
+              const sameWallet = String(it.wallet_id || '').trim() === String(prev.wallet_id || '').trim();
+              const samePath = Number(it.path_index || 0) === Number(prev.path_index || 0);
+              const sameHash = String(it.recipient_mnemonic_hash || '').trim() === String(prev.recipient_mnemonic_hash || '').trim();
+              return (sameWallet && samePath) || (sameWallet && sameHash);
+            });
+            if (matched) state.selectedClaimItem = matched;
+          }
+          const refreshedEncrypted = getEncryptedAdminPayloadFromItem(state.selectedClaimItem);
+          if (refreshedEncrypted) {
+            state.claimDecryptedPayloadText = (typeof refreshedEncrypted === 'string')
+              ? refreshedEncrypted
+              : JSON.stringify(refreshedEncrypted, null, 2);
+          }
+          showToast('Detected xidentity change and refreshed claim payload before decrypt.', 'info');
+        }
+      } catch (_) {}
+      const payloadInputRaw = (document.getElementById('claimDecryptedPayload')?.value || '').trim();
+      const payloadRaw = payloadInputRaw || (btnClaimDecryptWithYallet.getAttribute('data-encrypted') || '');
       if (!payloadRaw) {
         showToast('No encrypted payload found for selected release.', 'error');
         return;
       }
-      let payload = payloadRaw;
-      try { payload = JSON.parse(payloadRaw); } catch (_) {}
+      let payload = parseClaimEncryptedPayloadInput(payloadRaw);
       state.claimDecryptLoading = true;
       render();
       try {
@@ -5611,8 +5868,27 @@ function attachAppEvents() {
         state.claimDecryptedPayloadText = JSON.stringify(parsed, null, 2);
         showToast('AdminFactor decrypted via Yallet and pre-filled.', 'success');
       } catch (err) {
-        state.error = err.message || String(err);
-        showToast(state.error, 'error');
+        // Recovery path: refresh xidentity/addresses and reload claim payloads.
+        // Do NOT auto-retry decrypt here to avoid repeated approval popups.
+        try {
+          const prev = state.selectedClaimItem || null;
+          await fetchWalletAddressesFromExtension();
+          await loadClaimMe();
+          if (prev) {
+            const matched = (state.claimMeItems || []).find((it) => {
+              const sameWallet = String(it.wallet_id || '').trim() === String(prev.wallet_id || '').trim();
+              const samePath = Number(it.path_index || 0) === Number(prev.path_index || 0);
+              const sameHash = String(it.recipient_mnemonic_hash || '').trim() === String(prev.recipient_mnemonic_hash || '').trim();
+              return (sameWallet && samePath) || (sameWallet && sameHash);
+            });
+            if (matched) state.selectedClaimItem = matched;
+          }
+          state.error = err.message || String(err);
+          showToast(state.error + ' (identity refreshed; please click Decrypt once more).', 'error');
+        } catch (retryErr) {
+          state.error = retryErr.message || err.message || String(retryErr || err);
+          showToast(state.error, 'error');
+        }
       } finally {
         state.claimDecryptLoading = false;
         render();

@@ -30,16 +30,95 @@ const fs = require('fs');
 
 const DB_PATH = process.env.DATABASE_PATH
   || path.join(__dirname, '..', 'data', 'yault.db');
+const DB_EXTERNAL_SYNC_ENABLED = String(process.env.DB_EXTERNAL_SYNC_ENABLED || '1') !== '0';
+const DB_SYNC_MIN_INTERVAL_MS = Number(process.env.DB_SYNC_MIN_INTERVAL_MS || 800);
+const DB_CONFLICT_POLICY = (process.env.DB_CONFLICT_POLICY || 'prefer_disk').toLowerCase(); // prefer_disk | prefer_memory
 
 let _db = null;
 let _initPromise = null;
+let _SQL = null;
 
 /** Auto-save interval handle */
 let _saveTimer = null;
 /** Whether there are unsaved changes */
 let _dirty = false;
+/** Last known on-disk DB fingerprint (mtime + size) */
+let _lastDiskVersion = null;
+/** Throttle disk sync checks */
+let _lastSyncCheckAt = 0;
+/** Serialize save operations to avoid tmp-file rename races */
+let _saveInFlight = null;
 
 const TABLES = ['authorities', 'bindings', 'triggers', 'revenue', 'withdrawals', 'auditLog', 'vaultPositions', 'adminSessions', 'authoritySessions', 'insurancePolicies', 'subAccounts', 'allowances', 'trialApplications', 'recipientPaths', 'releasedFactors', 'kyc', 'accountInvites', 'walletPlans', 'walletAddresses', 'users', 'recipientMnemonicAdmin', 'authorityReleaseLinks', 'userCustomTokens', 'rwaReleaseRegistry', 'rwaDeliveryLog', 'campaigns', 'referrals', 'activities', 'adminApprovals', 'walletAdminFactors', 'recipientPathIndex', 'mnemonicHashIndex'];
+
+function _ensureTables(db) {
+  for (const table of TABLES) {
+    db.run(`
+      CREATE TABLE IF NOT EXISTS "${table}" (
+        id   TEXT PRIMARY KEY,
+        data TEXT NOT NULL
+      )
+    `);
+  }
+}
+
+async function _getDiskVersion() {
+  try {
+    const s = await fs.promises.stat(DB_PATH);
+    return `${s.mtimeMs}:${s.ctimeMs}:${s.size}`;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function _reloadFromDisk(reason = 'external change') {
+  if (!_SQL) return false;
+  try {
+    if (!fs.existsSync(DB_PATH)) return false;
+    const fileBuffer = fs.readFileSync(DB_PATH);
+    if (!fileBuffer || fileBuffer.length === 0) return false;
+
+    const newDb = new _SQL.Database(fileBuffer);
+    _ensureTables(newDb);
+    const oldDb = _db;
+    _db = newDb;
+    _dirty = false;
+    _lastDiskVersion = await _getDiskVersion();
+
+    if (oldDb && oldDb !== newDb) {
+      try { oldDb.close(); } catch (_) {}
+    }
+    console.warn(`[db] Reloaded database from disk (${reason})`);
+    return true;
+  } catch (err) {
+    console.error('[db] Failed to reload database from disk:', err.message);
+    return false;
+  }
+}
+
+async function _maybeSyncFromDisk(force = false) {
+  if (!DB_EXTERNAL_SYNC_ENABLED || !_db) return;
+  const now = Date.now();
+  if (!force && (now - _lastSyncCheckAt) < DB_SYNC_MIN_INTERVAL_MS) return;
+  _lastSyncCheckAt = now;
+
+  const diskVersion = await _getDiskVersion();
+  if (!diskVersion) return;
+
+  // First observation baseline
+  if (!_lastDiskVersion) {
+    _lastDiskVersion = diskVersion;
+    return;
+  }
+
+  if (diskVersion !== _lastDiskVersion) {
+    if (_dirty) {
+      // Unsaved local mutations exist; resolve at save boundary according to conflict policy.
+      return;
+    }
+    await _reloadFromDisk('detected external writer');
+  }
+}
 
 /**
  * Initialise the database (async, called once).
@@ -50,6 +129,7 @@ async function initDb() {
 
   const initSqlJs = require('sql.js');
   const SQL = await initSqlJs();
+  _SQL = SQL;
 
   const dir = path.dirname(DB_PATH);
   if (!fs.existsSync(dir)) {
@@ -69,19 +149,16 @@ async function initDb() {
   }
 
   // Create tables
-  for (const table of TABLES) {
-    _db.run(`
-      CREATE TABLE IF NOT EXISTS "${table}" (
-        id   TEXT PRIMARY KEY,
-        data TEXT NOT NULL
-      )
-    `);
-  }
+  _ensureTables(_db);
 
-  _saveToDisk(); // initial save to create file if new
+  await _saveToDisk(); // initial save to create file if new
+  _lastDiskVersion = await _getDiskVersion();
 
   // Auto-save every 5 seconds if there are changes
   _saveTimer = setInterval(() => {
+    _maybeSyncFromDisk().catch((err) => {
+      console.warn('[db] External sync check failed:', err.message);
+    });
     if (_dirty) _saveToDisk();
   }, 5000);
   if (_saveTimer.unref) _saveTimer.unref();
@@ -104,11 +181,16 @@ function getDb() {
  * Ensure the database is ready (call at server startup or before first use).
  */
 async function ensureReady() {
-  if (_db) return _db;
+  if (_db) {
+    await _maybeSyncFromDisk();
+    return _db;
+  }
   if (!_initPromise) {
     _initPromise = initDb();
   }
-  return _initPromise;
+  const db = await _initPromise;
+  await _maybeSyncFromDisk();
+  return db;
 }
 
 /**
@@ -116,7 +198,25 @@ async function ensureReady() {
  */
 async function _saveToDisk() {
   if (!_db) return;
+  if (_saveInFlight) {
+    await _saveInFlight;
+  }
+  let done;
+  _saveInFlight = new Promise((resolve) => { done = resolve; });
   try {
+    if (!_dirty) {
+      _lastDiskVersion = await _getDiskVersion();
+      return;
+    }
+
+    const diskVersionBeforeWrite = await _getDiskVersion();
+    const hasExternalWrite = !!(_lastDiskVersion && diskVersionBeforeWrite && diskVersionBeforeWrite !== _lastDiskVersion);
+    if (hasExternalWrite && DB_CONFLICT_POLICY !== 'prefer_memory') {
+      console.warn('[db] External DB update detected while local changes pending; preferring disk and reloading.');
+      await _reloadFromDisk('save conflict (prefer_disk)');
+      return;
+    }
+
     const data = _db.export();
     const buffer = Buffer.from(data);
     // Atomic write: write to temp file first, then rename to prevent
@@ -125,8 +225,12 @@ async function _saveToDisk() {
     await fs.promises.writeFile(tmpPath, buffer);
     await fs.promises.rename(tmpPath, DB_PATH);
     _dirty = false;
+    _lastDiskVersion = await _getDiskVersion();
   } catch (err) {
     console.error('[db] Failed to save database:', err.message);
+  } finally {
+    done();
+    _saveInFlight = null;
   }
 }
 

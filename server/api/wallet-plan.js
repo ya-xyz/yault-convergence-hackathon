@@ -268,6 +268,7 @@ router.post('/path-credentials', dualAuthMiddleware, async (req, res) => {
           mnemonic_hash: hashNorm,
           admin_factor: null,
           encrypted_admin_factor: encryptedAdminFactor,
+          encrypted_for_xidentity: recipientXidentity || null,
           label: label || `Recipient ${recipientIndex}`,
           plan_wallet_id: walletId,
           created_at: new Date().toISOString(),

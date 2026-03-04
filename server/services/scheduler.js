@@ -213,10 +213,15 @@ async function processDueAllowances() {
     // ── Retry failed RWA deliveries ──
     try {
       let pendingDeliveries = await db.rwaDeliveryLog.findAll();
-      // Reset entries that failed due to now-handled errors (e.g. Merkle tree unavailable, Arweave fetch)
+      // Reset entries that failed due to now-handled errors
+      // (e.g. Merkle tree unavailable, Arweave fetch, or Bubblegum tree mint capacity increased).
       let didReset = false;
       for (const d of pendingDeliveries) {
-        if (d.status === 'failed' && (d.attempts || 0) >= 5 && /[Mm]erkle tree|fetch manifest|fetch payload/i.test(d.error || '')) {
+        if (
+          d.status === 'failed' &&
+          (d.attempts || 0) >= 5 &&
+          /[Mm]erkle tree|fetch manifest|fetch payload|InsufficientMintCapacity|not enough unapproved mints left|Error Number:\s*6017/i.test(d.error || '')
+        ) {
           const resetId = `${String(d.wallet_id).trim().toLowerCase()}_${String(d.authority_id).trim()}_${d.recipient_index}`;
           await db.rwaDeliveryLog.create(resetId, { ...d, status: 'pending', attempts: 0, updated_at: Date.now() }).catch(() => {});
           console.log(`[scheduler] Reset failed delivery ${resetId} for retry (was: ${d.error})`);

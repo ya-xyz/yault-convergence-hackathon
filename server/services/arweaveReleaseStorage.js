@@ -174,7 +174,29 @@ async function uploadToArweave(dataStr, options = {}) {
  * @returns {Promise<string|null>} Response body text or null
  */
 const ARWEAVE_FETCH_TIMEOUT_MS = 15000; // 15s per-gateway timeout
-const ARWEAVE_FALLBACK_GATEWAYS = ['https://arweave.net', 'https://ar-io.net', 'https://arweave.developerdao.com'];
+const ARWEAVE_FALLBACK_GATEWAYS = ['https://arweave.net', 'https://ar-io.net', 'https://arweave.developerdao.com', 'https://turbo-gateway.com'];
+const ARWEAVE_TX_ID_RE = /^[a-zA-Z0-9_-]{43}$/;
+
+function normalizeArweaveTxId(input) {
+  const raw = String(input || '').trim();
+  if (!raw) return null;
+  if (ARWEAVE_TX_ID_RE.test(raw)) return raw;
+  if (raw.startsWith('ar://')) {
+    const tx = raw.slice(5).split('/')[0] || '';
+    return ARWEAVE_TX_ID_RE.test(tx) ? tx : null;
+  }
+  try {
+    const u = new URL(raw);
+    const [pathFirst = '', pathSecond = ''] = u.pathname.replace(/^\/+/, '').split('/');
+    if (ARWEAVE_TX_ID_RE.test(pathFirst)) return pathFirst;
+    if (ARWEAVE_TX_ID_RE.test(pathSecond)) return pathSecond;
+    const hostMatch = u.hostname.toLowerCase().match(/^([a-z0-9_-]{43})\.arweave\.net$/i);
+    if (hostMatch && ARWEAVE_TX_ID_RE.test(hostMatch[1])) return hostMatch[1];
+  } catch (_) {
+    return null;
+  }
+  return null;
+}
 
 async function fetchFromArweaveOnce(url, timeoutMs = ARWEAVE_FETCH_TIMEOUT_MS) {
   const controller = new AbortController();
@@ -189,23 +211,24 @@ async function fetchFromArweaveOnce(url, timeoutMs = ARWEAVE_FETCH_TIMEOUT_MS) {
 }
 
 async function fetchFromArweave(txId, { skipExtendedRetry = false } = {}) {
-  if (!txId || typeof txId !== 'string' || !/^[a-zA-Z0-9_-]{43}$/.test(txId)) {
+  const normalizedTxId = normalizeArweaveTxId(txId);
+  if (!normalizedTxId) {
     return null;
   }
   // Check in-memory cache first (recently uploaded data — avoids gateway seeding delay)
-  const cached = _recentUploads.get(txId);
+  const cached = _recentUploads.get(normalizedTxId);
   if (cached) {
     if (Date.now() - cached.ts < UPLOAD_CACHE_TTL_MS) {
       return cached.data;
     }
-    _recentUploads.delete(txId); // expired — but disk cache may still be valid
+    _recentUploads.delete(normalizedTxId); // expired — but disk cache may still be valid
   }
   // Check persistent disk cache (survives server restarts)
-  const diskCached = _readDiskCache(txId);
+  const diskCached = _readDiskCache(normalizedTxId);
   if (diskCached) {
-    console.log('[arweaveReleaseStorage] disk cache hit for tx', txId);
+    console.log('[arweaveReleaseStorage] disk cache hit for tx', normalizedTxId);
     // Re-populate in-memory cache
-    _recentUploads.set(txId, { data: diskCached, ts: Date.now() });
+    _recentUploads.set(normalizedTxId, { data: diskCached, ts: Date.now() });
     return diskCached;
   }
   const configured = (config.arweave?.gateway || 'https://arweave.net').replace(/\/$/, '');
@@ -213,13 +236,13 @@ async function fetchFromArweave(txId, { skipExtendedRetry = false } = {}) {
 
   // Race all gateways concurrently — first success wins
   const racePromises = gateways.map(async (gw) => {
-    const url = `${gw}/${txId}`;
+    const url = `${gw}/${normalizedTxId}`;
     try {
       const text = await fetchFromArweaveOnce(url);
       if (text !== null) return text;
       throw new Error('empty response');
     } catch (err) {
-      console.warn('[arweaveReleaseStorage] gateway %s failed for tx %s: %s', gw, txId, err.message);
+      console.warn('[arweaveReleaseStorage] gateway %s failed for tx %s: %s', gw, normalizedTxId, err.message);
       throw err;
     }
   });
@@ -228,19 +251,19 @@ async function fetchFromArweave(txId, { skipExtendedRetry = false } = {}) {
     return await Promise.any(racePromises);
   } catch (_) {
     if (skipExtendedRetry) {
-      console.warn('[arweaveReleaseStorage] all gateways failed for tx %s (skipping extended retry)', txId);
+      console.warn('[arweaveReleaseStorage] all gateways failed for tx %s (skipping extended retry)', normalizedTxId);
       return null;
     }
     // All gateways failed — sequential retry each gateway with longer timeout
-    console.warn('[arweaveReleaseStorage] all gateways failed for tx %s, retrying with extended timeout', txId);
+    console.warn('[arweaveReleaseStorage] all gateways failed for tx %s, retrying with extended timeout', normalizedTxId);
     await new Promise((r) => setTimeout(r, 2000));
     for (const gw of gateways) {
       try {
-        const text = await fetchFromArweaveOnce(`${gw}/${txId}`, 30000);
+        const text = await fetchFromArweaveOnce(`${gw}/${normalizedTxId}`, 30000);
         if (text !== null) return text;
       } catch (_) {}
     }
-    console.error('[arweaveReleaseStorage] fetch exhausted all retries for tx %s', txId);
+    console.error('[arweaveReleaseStorage] fetch exhausted all retries for tx %s', normalizedTxId);
     return null;
   }
 }

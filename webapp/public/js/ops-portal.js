@@ -55,6 +55,20 @@ function shortAddr(addr) {
   return addr.substring(0, 8) + '...' + addr.substring(addr.length - 4);
 }
 
+function normalizeHexAddress(addr) {
+  if (!addr || typeof addr !== 'string') return '';
+  return addr.replace(/^0x/i, '').toLowerCase();
+}
+
+function normalizeText(value) {
+  if (value === null || value === undefined) return '';
+  return String(value).trim();
+}
+
+function redeliverCandidateKey(walletId, authorityId, recipientIndex) {
+  return `${normalizeHexAddress(walletId)}|${normalizeText(authorityId)}|${Number(recipientIndex)}`;
+}
+
 function showToast(msg, type) {
   const existing = document.querySelector('.toast');
   if (existing) existing.remove();
@@ -417,13 +431,24 @@ function renderRedeliver() {
       const statusClass = status === 'delivered' ? 'badge-active' : (status === 'failed' || status === 'pending' ? 'badge-pending' : 'badge-muted');
       const txShort = rec.delivery_tx_id ? (rec.delivery_tx_id.substring(0, 12) + (rec.delivery_tx_id.length > 12 ? '...' : '')) : '—';
       const idx = candidateIndex++;
+      const candidate = state.redeliverCandidates[idx] || null;
+      const pendingApprovalId = candidate?.pending_approval_id || null;
+      const awaitingOtherSigner = !!(candidate?.pending_signed_by_current && pendingApprovalId);
+      const actionLabel = awaitingOtherSigner
+        ? 'Awaiting Other Signer'
+        : (pendingApprovalId ? 'Approve Redeliver' : 'Redeliver');
+      const disabledAttr = awaitingOtherSigner ? 'disabled' : '';
+      const approvalHint = pendingApprovalId
+        ? `<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Approval: ${esc(pendingApprovalId.slice(0, 10))}... (${candidate?.pending_current || 1}/${candidate?.pending_required || 2})</div>`
+        : '';
       return `
         <tr>
           <td>${esc(rec.name || 'Recipient ' + rec.recipient_index)}</td>
           <td><span class="badge ${statusClass}">${esc(status)}</span></td>
           <td style="font-size:11px;color:var(--text-muted);" class="mono" title="${esc(rec.delivery_tx_id || '')}">${esc(txShort)}</td>
           <td>
-            <button class="btn btn-sm btn-primary" data-action="redeliver-one" data-candidate-index="${idx}">Redeliver</button>
+            <button class="btn btn-sm btn-primary" data-action="redeliver-one" data-candidate-index="${idx}" ${disabledAttr}>${actionLabel}</button>
+            ${approvalHint}
           </td>
         </tr>
       `;
@@ -807,8 +832,42 @@ async function loadPage() {
               recipient_index: rec.recipient_index,
               delivery_status: rec.delivery_status,
               trigger_id: plan.trigger_id,
+              pending_approval_id: null,
+              pending_required: null,
+              pending_current: null,
+              pending_signed_by_current: false,
             });
           }
+        }
+
+        // Bind pending force-redeliver approvals to candidate rows so second signer can approve.
+        try {
+          const pending = await api('/admin/approvals/pending');
+          const pendingApprovals = Array.isArray(pending.approvals) ? pending.approvals : [];
+          const byKey = new Map();
+          for (const approval of pendingApprovals) {
+            if (!approval || approval.action !== 'force-redeliver' || !approval.params) continue;
+            const key = redeliverCandidateKey(
+              approval.params.wallet_id,
+              approval.params.authority_id,
+              approval.params.recipient_index
+            );
+            byKey.set(key, approval);
+          }
+          const currentAdmin = normalizeHexAddress(state.auth?.address || '');
+          for (const c of state.redeliverCandidates) {
+            const key = redeliverCandidateKey(c.wallet_id, c.authority_id, c.recipient_index);
+            const approval = byKey.get(key);
+            if (!approval) continue;
+            const signers = Array.isArray(approval.current_approvals) ? approval.current_approvals : [];
+            const signerAddrs = signers.map((s) => normalizeHexAddress(s?.address || ''));
+            c.pending_approval_id = approval.approval_id || null;
+            c.pending_required = approval.required_approvals || null;
+            c.pending_current = signers.length;
+            c.pending_signed_by_current = currentAdmin ? signerAddrs.includes(currentAdmin) : false;
+          }
+        } catch (_) {
+          // Non-fatal: page still works without pending approvals context.
         }
         break;
       }
@@ -1148,12 +1207,15 @@ function attachEvents() {
       if (resultEl) { resultEl.style.display = 'none'; resultEl.textContent = ''; }
       btn.disabled = true;
       try {
-        const data = await apiPost('/admin/release/redeliver', {
-          wallet_id: c.wallet_id,
-          authority_id: c.authority_id,
-          recipient_index: c.recipient_index,
-          force_redeliver: true,
-        });
+        const body = c.pending_approval_id
+          ? { approval_id: c.pending_approval_id }
+          : {
+              wallet_id: c.wallet_id,
+              authority_id: c.authority_id,
+              recipient_index: c.recipient_index,
+              force_redeliver: true,
+            };
+        const data = await apiPost('/admin/release/redeliver', body);
         if (resultEl) {
           resultEl.style.display = 'block';
           if (data.delivered) {
@@ -1163,6 +1225,16 @@ function attachEvents() {
             showToast('Redeliver succeeded', 'success');
             state.page = 'redeliver';
             loadPage();
+          } else if (data.status === 'awaiting_approval' && data.approval_id) {
+            c.pending_approval_id = data.approval_id;
+            c.pending_required = data.required || null;
+            c.pending_current = data.current || null;
+            c.pending_signed_by_current = true;
+            resultEl.style.color = 'var(--warning, #f59e0b)';
+            resultEl.textContent = data.message || 'Awaiting additional admin approval.';
+            resultEl.title = data.approval_id;
+            showToast('Approval created. Waiting for another admin signature.', 'warning');
+            render();
           } else {
             resultEl.style.color = 'var(--danger, #dc3545)';
             resultEl.textContent = 'Failed: ' + (data.error || 'Redeliver failed');
