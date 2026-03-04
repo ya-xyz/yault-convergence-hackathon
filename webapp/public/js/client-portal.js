@@ -868,6 +868,17 @@ function parseClaimDecryptedPayload(rawText) {
   } catch (_) {
     throw new Error('Invalid JSON format.');
   }
+  if (typeof parsed === 'string') {
+    const s = parsed.trim();
+    if (isPlainClaimAdminFactor(s) || isPlainClaimBlob(s)) {
+      return { releaseKey: s };
+    }
+    try {
+      parsed = JSON.parse(s);
+    } catch (_) {
+      throw new Error('Invalid JSON format.');
+    }
+  }
 
   const tryParseJson = (v) => {
     try { return JSON.parse(String(v || '').trim()); } catch (_) { return null; }
@@ -981,11 +992,29 @@ function applyClaimDecryptedPayloadToState(parsedPayload) {
 }
 
 function parseDecryptResultToClaimPayload(result) {
+  const extractReleaseKeyFromLooseText = (text) => {
+    const s = String(text || '');
+    const keyed = s.match(/"(?:releaseKey|release_key|admin_factor_hex|adminFactor|admin_factor|blob_hex)"\s*:\s*"([0-9a-fA-Fx]+)"/i);
+    if (keyed && keyed[1] && (isPlainClaimAdminFactor(keyed[1]) || isPlainClaimBlob(keyed[1]))) {
+      return keyed[1];
+    }
+    const bare = s.match(/\b(?:0x)?([0-9a-fA-F]{64}|[0-9a-fA-F]{80})\b/);
+    if (bare && bare[1] && (isPlainClaimAdminFactor(bare[1]) || isPlainClaimBlob(bare[1]))) {
+      return bare[1];
+    }
+    return '';
+  };
   if (result == null) throw new Error('Empty decrypt result from Yallet.');
   if (typeof result === 'string') {
     const v = result.trim();
     if (isPlainClaimAdminFactor(v) || isPlainClaimBlob(v)) return { releaseKey: v };
-    return parseClaimDecryptedPayload(v);
+    try {
+      return parseClaimDecryptedPayload(v);
+    } catch (err) {
+      const extracted = extractReleaseKeyFromLooseText(v);
+      if (extracted) return { releaseKey: extracted };
+      throw err;
+    }
   }
   if (typeof result === 'object') {
     const af = pickFirstNonEmpty(result, ['admin_factor_hex', 'adminFactor', 'admin_factor', 'blob_hex']);
