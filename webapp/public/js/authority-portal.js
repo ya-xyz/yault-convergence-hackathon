@@ -1170,6 +1170,7 @@ async function sendTransactionInWallet(transaction, fromAddress) {
       to: transaction.to ? normalizeHex(transaction.to) : undefined,
       data: transaction.data ? normalizeHex(transaction.data) : undefined,
       value: value,
+      chainId: chainIdHex || undefined,
     }],
   });
 }
