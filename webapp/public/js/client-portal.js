@@ -992,6 +992,19 @@ function applyClaimDecryptedPayloadToState(parsedPayload) {
 }
 
 function parseDecryptResultToClaimPayload(result) {
+  const tryDecodeBase64Utf8 = (value) => {
+    const s = String(value || '').trim();
+    if (!s || s.length % 4 !== 0) return '';
+    if (!/^[A-Za-z0-9+/=]+$/.test(s)) return '';
+    try {
+      const bin = atob(s);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new TextDecoder().decode(bytes);
+    } catch (_) {
+      return '';
+    }
+  };
   const extractReleaseKeyFromLooseText = (text) => {
     const s = String(text || '');
     const keyed = s.match(/"(?:releaseKey|release_key|admin_factor_hex|adminFactor|admin_factor|blob_hex)"\s*:\s*"([0-9a-fA-Fx]+)"/i);
@@ -1013,6 +1026,14 @@ function parseDecryptResultToClaimPayload(result) {
     } catch (err) {
       const extracted = extractReleaseKeyFromLooseText(v);
       if (extracted) return { releaseKey: extracted };
+      const decoded = tryDecodeBase64Utf8(v);
+      if (decoded) {
+        const extractedDecoded = extractReleaseKeyFromLooseText(decoded);
+        if (extractedDecoded) return { releaseKey: extractedDecoded };
+        try {
+          return parseClaimDecryptedPayload(decoded);
+        } catch (_) {}
+      }
       throw err;
     }
   }
