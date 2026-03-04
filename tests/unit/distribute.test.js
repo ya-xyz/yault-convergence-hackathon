@@ -209,8 +209,9 @@ describe('POST /api/release/distribute', () => {
     expect(res.body.status).toBe('active');
   });
 
-  test('rejects duplicate distribute for same wallet + authority (idempotency)', async () => {
-    // The previous test already created an active binding for walletKp + authorityId
+  test('replaces existing binding when distributing again for same wallet + authority', async () => {
+    // The previous test already created an active binding for walletKp + authorityId.
+    // A new distribute should replace the old binding (not reject with 409).
     const res = await distributeWithAuth({
       wallet_id: walletKp.publicKey,
       authority_id: authorityId,
@@ -218,8 +219,8 @@ describe('POST /api/release/distribute', () => {
         { index: 0, package_hex: 'eeff0011', ephemeral_pubkey_hex: '2'.repeat(64) },
       ],
     });
-    expect(res.status).toBe(409);
-    expect(res.body.error).toMatch(/Binding already exists/i);
+    expect(res.status).toBe(201);
     expect(res.body).toHaveProperty('binding_id');
+    expect(res.body.status).toBe('active');
   });
 });
