@@ -947,19 +947,20 @@ function parseClaimDecryptedPayload(rawText) {
     throw new Error('Decrypted payload found mnemonic/passphrase but missing admin_factor_hex. Regenerated payload likely omitted AdminFactor.');
   }
 
-  return {
-    mnemonic,
-    passphrase,
-    releaseKey,
-    walletId,
-    pathIndex: Number.isFinite(pathIndexNum) && pathIndexNum > 0 ? pathIndexNum : null,
-  };
+  const out = {};
+  if (releaseKey) out.releaseKey = releaseKey;
+  // Keep compatibility metadata if present, but these fields are no longer used to auto-fill credentials.
+  if (walletId) out.walletId = walletId;
+  if (Number.isFinite(pathIndexNum) && pathIndexNum > 0) out.pathIndex = pathIndexNum;
+  if (mnemonic) out.mnemonic = mnemonic;
+  if (passphrase) out.passphrase = passphrase;
+  return out;
 }
 
 function applyClaimDecryptedPayloadToState(parsedPayload) {
   const parsed = parsedPayload || {};
-  if (parsed.mnemonic) state.mnemonic = parsed.mnemonic;
-  if (parsed.passphrase) state.passphrase = parsed.passphrase;
+  // Security/UX requirement: mnemonic + passphrase must be manually entered by recipient.
+  // Decrypted payload only auto-fills AdminFactor.
   if (parsed.releaseKey) state.releaseKey = parsed.releaseKey;
   if (parsed.walletId) state.walletId = parsed.walletId;
   if (parsed.pathIndex) state.pathIndex = parsed.pathIndex;
@@ -992,8 +993,6 @@ function parseDecryptResultToClaimPayload(result) {
       const rawPathIndex = pickFirstNonEmpty(result, ['path_index', 'pathIndex', 'recipient_index', 'recipientIndex']);
       const pathIndexNum = rawPathIndex ? parseInt(rawPathIndex, 10) : NaN;
       return {
-        mnemonic: pickFirstNonEmpty(result, ['mnemonic', 'new_mnemonic', 'recipient_mnemonic']),
-        passphrase: pickFirstNonEmpty(result, ['passphrase', 'user_cred', 'userCred', 'recipient_passphrase']),
         releaseKey: af,
         walletId: pickFirstNonEmpty(result, ['wallet_id', 'walletId', 'plan_wallet_id']),
         pathIndex: Number.isFinite(pathIndexNum) && pathIndexNum > 0 ? pathIndexNum : null,
@@ -1026,27 +1025,12 @@ function isRawEciesCipherObject(value) {
 
 function buildCredentialPayloadStrict(input, contextLabel) {
   const src = input || {};
-  const mnemonic = String(src.mnemonic || '').trim();
-  const passphrase = String(src.passphrase || '').trim();
   const adminFactorHex = String(src.admin_factor_hex || '').trim();
-  const index = Number(src.index);
-  const label = String(src.label || '').trim();
-  const memo = src.memo;
-  if (!mnemonic || !passphrase || !label || !Number.isInteger(index) || index < 1) {
-    throw new Error((contextLabel || 'Credential payload') + ' missing required mnemonic/passphrase/index/label.');
-  }
   if (!/^[0-9a-fA-F]{64}$/.test(adminFactorHex)) {
     throw new Error((contextLabel || 'Credential payload') + ' missing valid admin_factor_hex (64 hex).');
   }
-  const out = {
-    mnemonic,
-    passphrase,
-    admin_factor_hex: adminFactorHex.toLowerCase(),
-    index,
-    label,
-  };
-  if (memo != null && String(memo).trim() !== '') out.memo = String(memo).trim();
-  return out;
+  // AF encrypted note content must include release key only.
+  return { releaseKey: adminFactorHex.toLowerCase() };
 }
 
 async function decryptClaimPayloadWithYallet(encryptedPayload) {
@@ -2688,7 +2672,7 @@ function renderClaimStep1() {
         <label class="form-label">Decrypted Payload (JSON, optional)</label>
         <textarea class="form-input form-textarea" id="claimDecryptedPayload" rows="4" placeholder='Paste Yallet/wasm decrypted JSON (or {"content":"...json..."})'>${esc(state.claimDecryptedPayloadText || '')}</textarea>
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;">
-          <p class="form-hint" style="margin:0;">Auto-fills mnemonic, passphrase and AdminFactor into claim state.${canPromptDecrypt ? ' Or decrypt directly via Yallet.' : ''}</p>
+          <p class="form-hint" style="margin:0;">Auto-fills AdminFactor into claim state. Mnemonic and passphrase must be entered manually.${canPromptDecrypt ? ' Or decrypt directly via Yallet.' : ''}</p>
           <div style="display:flex;align-items:center;gap:8px;">
             ${canPromptDecrypt ? `<button type="button" class="btn btn-secondary" id="btnClaimDecryptWithYallet" style="font-size:12px;" data-encrypted='${esc(selectedEncryptedPayloadText)}' ${state.claimDecryptLoading ? 'disabled' : ''}>${state.claimDecryptLoading ? 'Decrypting...' : 'Decrypt via Yallet'}</button>` : ''}
             <button type="button" class="btn btn-secondary" id="btnClaimApplyDecryptedPayload" style="font-size:12px;">Auto Fill</button>
@@ -5866,7 +5850,7 @@ function attachAppEvents() {
         const parsed = await decryptClaimPayloadWithYallet(payload);
         applyClaimDecryptedPayloadToState(parsed);
         state.claimDecryptedPayloadText = JSON.stringify(parsed, null, 2);
-        showToast('AdminFactor decrypted via Yallet and pre-filled.', 'success');
+        showToast('ReleaseKey (AdminFactor) decrypted via Yallet and pre-filled.', 'success');
       } catch (err) {
         // Recovery path: refresh xidentity/addresses and reload claim payloads.
         // Do NOT auto-retry decrypt here to avoid repeated approval popups.

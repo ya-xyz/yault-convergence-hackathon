@@ -56654,13 +56654,21 @@ Message: ${transactionMessage}.
     if (!xidentity || !xidentity.trim()) {
       throw new Error("xidentity is required");
     }
+    const releaseKeyRaw = payload && typeof payload === "object" ? String(payload.releaseKey || payload.admin_factor_hex || "").trim() : "";
+    if (!/^[0-9a-fA-F]{64}$/.test(releaseKeyRaw)) {
+      throw new Error("releaseKey is required (64-char hex)");
+    }
+    const releaseKey = releaseKeyRaw.toLowerCase();
+    const label = payload && typeof payload === "object" && typeof payload.label === "string" && payload.label.trim() ? payload.label.trim() : "Credential";
+    const idx = payload && typeof payload === "object" ? Number(payload.index) : NaN;
+    const noteContent = { releaseKey };
     const note = {
       title: NOTE_TITLE,
-      content: JSON.stringify(payload),
+      content: JSON.stringify(noteContent),
       metadata: { createdAt: (/* @__PURE__ */ new Date()).toISOString() }
     };
-    const name = `${NOTE_TITLE} \u2014 ${payload.label}`;
-    const description = `Path index ${payload.index}. Decrypt in Yallet to view credentials.`;
+    const name = `${NOTE_TITLE} \u2014 ${label}`;
+    const description = Number.isFinite(idx) && idx > 0 ? `Path index ${idx}. Decrypt in Yallet to view credentials.` : "Decrypt in Yallet to view release key.";
     const encryptor = new ECIESEncryptor();
     const encrypted = await encryptAsset(note, AssetType.NOTE, xidentity.trim(), encryptor);
     const payloadForStorage = {
