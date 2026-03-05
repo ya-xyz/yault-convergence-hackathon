@@ -18,6 +18,7 @@
 import { handler, Runner, Runtime, getNetwork } from "@chainlink/cre-sdk";
 import { cron } from "@chainlink/cre-sdk/triggers";
 import { z } from "zod";
+import { fetchPriceFeed, enrichEvidenceWithPrice, type PriceFeedConfig, type PriceFeedResult } from "./price-feed-enrichment";
 
 // ---------------------------------------------------------------------------
 // Config schema (CRE uses Zod for validation)
@@ -32,6 +33,10 @@ const ConfigSchema = z.object({
   drandUrl: z.string().url().optional(),           // A: drand beacon endpoint
   vaultAddress: z.string().optional(),              // B: ERC-4626 vault for balance check
   complianceApiUrl: z.string().url().optional(),    // C: External KYC/compliance API
+  // --- Data Source D: Chainlink Price Feed ---
+  priceFeedAddress: z.string().optional(),          // D: Chainlink AggregatorV3 address
+  minPriceUSD: z.number().optional(),               // D: Minimum acceptable price gate
+  maxStalenessSeconds: z.number().optional(),        // D: Max price age (default: 3600)
 });
 
 type Config = z.infer<typeof ConfigSchema>;
@@ -260,6 +265,7 @@ type PreAttestationContext = {
   drand: DrandBeacon;
   vault: VaultBalanceResult;
   compliance: ComplianceResult;
+  priceFeed: PriceFeedResult | null;
 };
 
 /**
@@ -271,10 +277,21 @@ async function runPreAttestationChecks(
   config: Config,
   input: AttestationInput
 ): Promise<PreAttestationContext> {
-  const [drand, vault, compliance] = await Promise.all([
+  // Build price feed config if address is provided
+  const priceFeedPromise: Promise<PriceFeedResult | null> = config.priceFeedAddress
+    ? fetchPriceFeed(runtime, {
+        rpcUrl: config.rpcUrl,
+        priceFeedAddress: config.priceFeedAddress,
+        minPriceUSD: config.minPriceUSD,
+        maxStalenessSeconds: config.maxStalenessSeconds,
+      })
+    : Promise.resolve(null);
+
+  const [drand, vault, compliance, priceFeed] = await Promise.all([
     fetchDrandBeacon(runtime, config),
     checkVaultBalance(runtime, config),
     checkCompliance(runtime, config, input.wallet_id, input.recipient_index),
+    priceFeedPromise,
   ]);
 
   // Gate: vault must hold assets
@@ -291,7 +308,14 @@ async function runPreAttestationChecks(
     );
   }
 
-  return { drand, vault, compliance };
+  // Gate: price feed must be fresh if configured
+  if (priceFeed && !priceFeed.isFresh) {
+    throw new Error(
+      `Price feed data is stale (updatedAt=${priceFeed.updatedAt.toString()}). Attestation aborted.`
+    );
+  }
+
+  return { drand, vault, compliance, priceFeed };
 }
 
 // ---------------------------------------------------------------------------
@@ -351,13 +375,22 @@ async function doSubmitAttestation(
     ? input.evidence_hash
     : `0x${input.evidence_hash}`;
 
-  const enrichedEvidencePreimage = [
+  // Build evidence preimage from all external data sources (A, B, C, D)
+  const evidenceComponents = [
     rawEvidence,
-    toHex(BigInt(ctx.drand.round), { size: 32 }),
-    `0x${ctx.drand.randomness}`,
-    toHex(ctx.vault.totalAssets, { size: 32 }),
-    toHex(new TextEncoder().encode(ctx.compliance.checkId)),
-  ].join("");
+    toHex(BigInt(ctx.drand.round), { size: 32 }),        // A: drand round
+    `0x${ctx.drand.randomness}`,                          // A: drand randomness
+    toHex(ctx.vault.totalAssets, { size: 32 }),            // B: vault balance
+    toHex(new TextEncoder().encode(ctx.compliance.checkId)), // C: compliance
+  ];
+
+  // D: Chainlink Price Feed data (if available)
+  if (ctx.priceFeed) {
+    const priceComponents = await enrichEvidenceWithPrice(rawEvidence, ctx.priceFeed);
+    evidenceComponents.push(...priceComponents);
+  }
+
+  const enrichedEvidencePreimage = evidenceComponents.join("");
 
   // keccak256 of concatenated preimage gives a single bytes32 evidence hash
   const enrichedEvidence = viemKeccak256(enrichedEvidencePreimage as `0x${string}`);

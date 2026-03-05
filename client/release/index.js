@@ -32,11 +32,9 @@ export {
   getLatestTriggerNFT,
 } from './arweave-nft.js';
 
-// Authority crypto (Shamir + E2E encryption)
+// Authority crypto (E2E encryption)
 export {
-  splitAdminFactor,
-  reconstructAdminFactor,
-  encryptShareForAuthority,
+  encryptForAuthority,
   distributeToAuthorities,
   verifyShareReceipt,
 } from './authority-crypto.js';
