@@ -5,10 +5,10 @@
  * (Arweave, drand, chain APIs). Verifies that the modules compose correctly.
  *
  * Full lifecycle:
- * 1. Create recipient path → seal → split AdminFactor → distribute
+ * 1. Create recipient path → seal → distribute AdminFactor (E2E encrypted)
  * 2. Upload Trigger NFT + Recovery NFT to Arweave
  * 3. Authority initiates legal-event trigger → notification
- * 4. Authority releases share → recipient reconstructs AdminFactor
+ * 4. Authority releases AdminFactor → recipient decrypts
  * 5. Recipient activates path → derives keys
  */
 
@@ -33,18 +33,6 @@ jest.mock('../../wasm-core/pkg/yault_custody_wasm', () => ({
     'a'.repeat(64),
   custody_admin_factor_fingerprint: (afHex) =>
     'd'.repeat(64),
-  custody_shamir_split: (secretHex, total, threshold) => {
-    const shares = [];
-    for (let i = 0; i < total; i++) {
-      shares.push({
-        index: i + 1,
-        data_hex: `share${i + 1}_` + 'e'.repeat(58),
-      });
-    }
-    return shares;
-  },
-  custody_shamir_reconstruct: (sharesJson, _threshold) =>
-    'a'.repeat(64),
   custody_encrypt_for_authority: (msgHex, pkHex) => ({
     package_hex: 'f'.repeat(128),
     ephemeral_pubkey_hex: 'g'.repeat(64),
@@ -108,54 +96,29 @@ afterEach(() => {
 // ─── Tests ───
 
 import {
-  splitAdminFactor,
-  reconstructAdminFactor,
-  encryptShareForAuthority,
+  encryptForAuthority,
   distributeToAuthorities,
 } from '../../client/release/authority-crypto.js';
 
-describe('Shamir Split + Reconstruct Lifecycle', () => {
-  test('split into 3 shares and reconstruct from 2', () => {
-    const adminFactor = 'a'.repeat(64);
-    const shares = splitAdminFactor(adminFactor, 3, 2);
-
-    expect(shares).toHaveLength(3);
-    expect(shares[0].index).toBe(1);
-    expect(shares[1].index).toBe(2);
-    expect(shares[2].index).toBe(3);
-
-    // Reconstruct from any 2 shares
-    const subset = [shares[0], shares[2]];
-    const reconstructed = reconstructAdminFactor(subset);
-    expect(reconstructed).toBe(adminFactor);
-  });
-
-  test('split validates parameters', () => {
-    expect(() => splitAdminFactor('short', 3, 2)).toThrow();
-    expect(() => splitAdminFactor('a'.repeat(64), 1, 1)).toThrow();
-    expect(() => splitAdminFactor('a'.repeat(64), 3, 4)).toThrow();
-  });
-});
-
 describe('E2E Encryption for Authorities', () => {
-  test('encrypts share for authority public key', () => {
-    const shareHex = 'share1_' + 'e'.repeat(58);
+  test('encrypts AdminFactor for authority public key', () => {
+    const adminFactorHex = 'a'.repeat(64);
     const pubkeyHex = '0'.repeat(64);
 
-    const result = encryptShareForAuthority(shareHex, pubkeyHex);
+    const result = encryptForAuthority(adminFactorHex, pubkeyHex);
     expect(result).toHaveProperty('package_hex');
     expect(result).toHaveProperty('ephemeral_pubkey_hex');
     expect(result.package_hex.length).toBeGreaterThan(0);
   });
 
   test('validates inputs', () => {
-    expect(() => encryptShareForAuthority('', '0'.repeat(64))).toThrow();
-    expect(() => encryptShareForAuthority('data', 'short')).toThrow();
+    expect(() => encryptForAuthority('', '0'.repeat(64))).toThrow();
+    expect(() => encryptForAuthority('data', 'short')).toThrow();
   });
 });
 
 describe('Full Distribution Flow', () => {
-  test('distributes to 3 authorities with threshold 2', async () => {
+  test('distributes to 3 authorities', async () => {
     const authorities = [
       { id: 'lf1', publicKeyHex: '1'.repeat(64) },
       { id: 'lf2', publicKeyHex: '2'.repeat(64) },
@@ -163,53 +126,24 @@ describe('Full Distribution Flow', () => {
     ];
 
     const result = await distributeToAuthorities(
-      'a'.repeat(64), authorities, 2, 'wallet_test', 1
+      'a'.repeat(64), authorities, null, 'wallet_test', 1
     );
 
-    expect(result.totalShares).toBe(3);
-    expect(result.threshold).toBe(2);
+    expect(result.totalAuthorities).toBe(3);
     expect(result.fingerprint).toBeTruthy();
     expect(result.shares).toHaveLength(3);
     expect(result.shares[0].authorityId).toBe('lf1');
     expect(result.shares[1].authorityId).toBe('lf2');
     expect(result.shares[2].authorityId).toBe('lf3');
   });
-
-  test('rejects less than 2 authorities', async () => {
-    await expect(
-      distributeToAuthorities('a'.repeat(64), [{ id: 'lf1', publicKeyHex: '1'.repeat(64) }], 1, 'w', 1)
-    ).rejects.toThrow();
-  });
 });
 
 describe('Path Manager Integration', () => {
-  // Note: Full path manager tests require more sophisticated mocking
-  // as createRecipientPath orchestrates multiple async operations
-
   test('path status enum values are correct', () => {
-    // Verify the expected status values exist
     const validStatuses = ['active', 'triggered', 'released', 'activated', 'revoked'];
     validStatuses.forEach((s) => {
       expect(typeof s).toBe('string');
     });
-  });
-});
-
-describe('Recipient Activation Flow', () => {
-  test('reconstructs AdminFactor from shares', () => {
-    const shares = [
-      { index: 1, data_hex: 'share1_' + 'e'.repeat(58) },
-      { index: 3, data_hex: 'share3_' + 'e'.repeat(58) },
-    ];
-
-    const result = reconstructAdminFactor(shares);
-    expect(result).toBeTruthy();
-    expect(result.length).toBe(64);
-  });
-
-  test('rejects insufficient shares', () => {
-    const shares = [{ index: 1, data_hex: 'share1_' + 'e'.repeat(58) }];
-    expect(() => reconstructAdminFactor(shares)).toThrow();
   });
 });
 
@@ -220,7 +154,6 @@ describe('Device Recovery Concept', () => {
     const key1 = custody_derive_backup_key('rev_hex', 1);
     const key2 = custody_derive_backup_key('rev_hex', 1);
 
-    // Mock returns constant, but in real WASM these should be equal for same input
     expect(key1).toBe(key2);
   });
 
@@ -236,8 +169,6 @@ describe('Device Recovery Concept', () => {
     const encrypted = custody_encrypt_backup(af, key);
     expect(encrypted).toBeTruthy();
 
-    // In real implementation, decrypt(encrypt(af, key), key) === af
-    // Mock just returns a constant
     const decrypted = custody_decrypt_backup(encrypted, key);
     expect(decrypted).toBeTruthy();
   });
