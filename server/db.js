@@ -541,7 +541,9 @@ const rwaReleaseRegistry = createCollection('rwaReleaseRegistry');
 // id = `${wallet_id}_${authority_id}_${recipient_index}`, data = { wallet_id, authority_id, recipient_index, status, txId?, error?, attempts, created_at, updated_at }
 const rwaDeliveryLog = createCollection('rwaDeliveryLog', { allowedJsonFields: ['wallet_id', 'status'] });
 rwaDeliveryLog.findPending = async function () {
-  return this.findByField('status', 'pending');
+  const pending = await this.findByField('status', 'pending');
+  const superseded = await this.findByField('status', 'superseded');
+  return [...pending, ...superseded];
 };
 rwaDeliveryLog.findByWallet = async function (walletId) {
   return this.findByField('wallet_id', walletId);

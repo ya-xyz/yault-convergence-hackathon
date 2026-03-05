@@ -112,6 +112,29 @@ router.post('/', async (req, res) => {
     for (const old of walletBindings) {
       if (old.status === 'active') {
         await db.bindings.update(old.binding_id, { ...old, status: 'replaced', terminated_at: Date.now() });
+        // Reset delivery log for all recipients of the replaced binding so the new binding
+        // can deliver fresh NFTs without being blocked by stale "delivered" records.
+        if (Array.isArray(old.recipient_indices) && old.authority_id) {
+          for (const idx of old.recipient_indices) {
+            const logId = `${String(old.wallet_id).trim().toLowerCase()}_${String(old.authority_id).trim()}_${idx}`;
+            try {
+              const existingLog = await db.rwaDeliveryLog.findById(logId);
+              if (existingLog) {
+                await db.rwaDeliveryLog.create(logId, {
+                  ...existingLog,
+                  status: 'superseded',
+                  superseded_at: Date.now(),
+                  previous_txId: existingLog.txId || null,
+                  txId: null,
+                  error: null,
+                  attempts: 0,
+                  updated_at: Date.now(),
+                });
+                console.log('[release/distribute] Reset delivery log for replaced binding: wallet=%s recipient=%s', old.wallet_id, idx);
+              }
+            } catch (err) { console.warn('[release/distribute] Non-fatal: failed to reset delivery log for recipient %s: %s', idx, err.message); }
+          }
+        }
         // Decrement old authority's active_bindings
         if (old.authority_id) {
           try {

@@ -67,11 +67,15 @@ async function deliverRwaPackageForRecipient(binding, recipientIndex, opts = {})
     return result;
   }
 
-  // Skip if already delivered (unless force redeliver)
+  // Skip if already delivered (unless force redeliver or log was superseded by credential regeneration)
   const logId = deliveryLogId(binding.wallet_id, binding.authority_id, recipientIndex);
   const existingLog = await db.rwaDeliveryLog.findById(logId).catch(() => null);
   if (existingLog?.status === 'delivered' && !opts.forceRedeliver) {
     return { delivered: true, txId: existingLog.txId };
+  }
+  // 'superseded' means credentials were regenerated — treat as fresh delivery needed
+  if (existingLog?.status === 'superseded') {
+    console.log('[deliverRwaRelease] Delivery log superseded for wallet=%s recipient=%s (credentials regenerated), proceeding with fresh delivery', binding.wallet_id, recipientIndex);
   }
 
   let rwaUploadBody = null;

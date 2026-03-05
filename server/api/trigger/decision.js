@@ -93,11 +93,22 @@ async function submitReleaseAttestationForAllRecipients(walletId, recipientIndic
  * @returns {Promise<object|null>} active binding or null
  */
 async function findActiveBindingForTrigger(trigger) {
+  // Normalize wallet_id: try original, with/without 0x prefix, and lowercase variants
   const wid = trigger.wallet_id;
-  const widAlt = wid.startsWith('0x') ? wid.slice(2) : `0x${wid}`;
-  const bindings = [...(await db.bindings.findByWallet(wid)), ...(await db.bindings.findByWallet(widAlt))];
+  const widNoPrefix = wid.startsWith('0x') ? wid.slice(2) : wid;
+  const widWithPrefix = wid.startsWith('0x') ? wid : `0x${wid}`;
+  const candidates = new Set([wid, widNoPrefix, widWithPrefix, widNoPrefix.toLowerCase(), widWithPrefix.toLowerCase()]);
+  const allBindings = [];
+  for (const candidate of candidates) {
+    const found = await db.bindings.findByWallet(candidate);
+    for (const b of found) {
+      if (!allBindings.some(existing => existing.binding_id === b.binding_id)) {
+        allBindings.push(b);
+      }
+    }
+  }
   const isOracle = trigger.trigger_type === 'oracle';
-  return bindings.find(
+  return allBindings.find(
     (b) =>
       (isOracle || b.authority_id === trigger.authority_id) &&
       b.status === 'active' &&
@@ -351,6 +362,21 @@ async function _doFinalizeTrigger(triggerId, trigger) {
   await db.triggers.update(triggerId, finalizedTrigger);
 
   // When finalized as 'release', deliver stored RWA credential NFT to all recipients on the binding.
+  if (trigger.decision === 'release' && trigger.recipient_index != null && !activeBinding) {
+    console.error('[trigger/decision] WARNING: Trigger %s finalized as released but NO active binding found for wallet=%s recipient_index=%s trigger_type=%s. NFT delivery SKIPPED. Check wallet_id case, binding status, and recipient_indices.',
+      triggerId, trigger.wallet_id, trigger.recipient_index, trigger.trigger_type);
+    try {
+      await db.auditLog.create(`no_binding_${triggerId}_${Date.now()}`, {
+        type: 'release_no_binding',
+        trigger_id: triggerId,
+        wallet_id: trigger.wallet_id,
+        recipient_index: trigger.recipient_index,
+        trigger_type: trigger.trigger_type,
+        message: 'Trigger finalized as released but no active binding found — NFT delivery skipped',
+        created_at: Date.now(),
+      });
+    } catch (_) { /* audit best-effort */ }
+  }
   if (trigger.decision === 'release' && trigger.recipient_index != null && activeBinding) {
     try {
       if (Array.isArray(activeBinding.recipient_indices)) {
