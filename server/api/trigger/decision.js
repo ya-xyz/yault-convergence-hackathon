@@ -85,15 +85,21 @@ async function submitReleaseAttestationForAllRecipients(walletId, recipientIndic
 /**
  * Find active binding for a trigger's wallet/authority/recipient.
  * Used by both cooldown finalizer and immediate release paths.
+ *
+ * For oracle triggers the authority_id on the trigger is a synthetic
+ * ORACLE_AUTHORITY_ID (not any real entity authority), so we skip the
+ * authority_id match — oracle attestations authorise release regardless
+ * of which entity authority owns the binding.
  * @returns {Promise<object|null>} active binding or null
  */
 async function findActiveBindingForTrigger(trigger) {
   const wid = trigger.wallet_id;
   const widAlt = wid.startsWith('0x') ? wid.slice(2) : `0x${wid}`;
   const bindings = [...(await db.bindings.findByWallet(wid)), ...(await db.bindings.findByWallet(widAlt))];
+  const isOracle = trigger.trigger_type === 'oracle';
   return bindings.find(
     (b) =>
-      b.authority_id === trigger.authority_id &&
+      (isOracle || b.authority_id === trigger.authority_id) &&
       b.status === 'active' &&
       Array.isArray(b.recipient_indices) &&
       b.recipient_indices.some((idx) => Number(idx) === Number(trigger.recipient_index)) &&
