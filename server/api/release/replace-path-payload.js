@@ -108,6 +108,28 @@ router.post('/', async (req, res) => {
       const newManifestTxId = result.manifest_arweave_tx_id;
       await updateRegistryAndSave(wallet_id, authority_id, newManifestTxId);
 
+      // Reset delivery log for this recipient so the new payload can be delivered
+      // without being blocked by stale "delivered" records from the old payload.
+      const logId = `${String(wallet_id).trim().toLowerCase()}_${String(authority_id).trim()}_${idx}`;
+      try {
+        const existingLog = await db.rwaDeliveryLog.findById(logId);
+        if (existingLog) {
+          await db.rwaDeliveryLog.create(logId, {
+            ...existingLog,
+            status: 'superseded',
+            superseded_at: Date.now(),
+            previous_txId: existingLog.txId || null,
+            txId: null,
+            error: null,
+            attempts: 0,
+            updated_at: Date.now(),
+          });
+          console.log('[release/replace-path-payload] Reset delivery log for replaced payload: wallet=%s recipient=%s', wallet_id, idx);
+        }
+      } catch (logErr) {
+        console.warn('[release/replace-path-payload] Non-fatal: failed to reset delivery log:', logErr.message);
+      }
+
       const fingerprints = (binding.admin_factor_fingerprints || []).slice();
       const pos = indices.indexOf(idx);
       if (pos >= 0) {
