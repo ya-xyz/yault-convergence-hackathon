@@ -208,7 +208,7 @@
   flex-shrink: 0;
 }
 
-.shamir-badge {
+.authority-badge {
   display: inline-block;
   padding: 2px 8px;
   border-radius: var(--radius-full);

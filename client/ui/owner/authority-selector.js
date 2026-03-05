@@ -5,7 +5,7 @@
  * - AuthoritySearchPanel            // search by region, language, specialization
  * - AuthorityCard                   // name, rating, jurisdiction, capacity, fee structure
  * - AuthorityDetailModal            // detailed profile view
- * - AuthorityBindConfirmation       // confirm binding, display Shamir config (2-of-3)
+ * - AuthorityBindConfirmation       // confirm binding, display encryption config
  *
  * Exports:
  * - renderAuthoritySelector(container, onSelect)
@@ -307,7 +307,7 @@ function _showBindConfirmation(container, authority) {
         <div class="yallet-modal-body">
           <div class="alert-banner alert-info">
             <span class="alert-icon">&#8505;</span>
-            Binding an authority grants them a Shamir share of your AdminFactor.
+            Binding an authority grants them an encrypted copy of your AdminFactor.
             They cannot access your assets independently.
           </div>
           <div class="bind-confirm-detail">
@@ -320,8 +320,8 @@ function _showBindConfirmation(container, authority) {
               <span class="value">${escapeHTML(authority.jurisdiction || authority.region || '')}</span>
             </div>
             <div class="bind-confirm-row">
-              <span class="label">Shamir Config</span>
-              <span class="value">2-of-3 threshold</span>
+              <span class="label">Encryption</span>
+              <span class="value">E2E encrypted AdminFactor</span>
             </div>
             <div class="bind-confirm-row">
               <span class="label">Share Type</span>

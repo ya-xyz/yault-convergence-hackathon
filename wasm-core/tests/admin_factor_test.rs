@@ -2,7 +2,6 @@
 
 use yault_custody_wasm::custody::admin_factor::*;
 use yault_custody_wasm::custody::e2e_crypto;
-use yault_custody_wasm::custody::shamir;
 
 fn test_rev() -> [u8; 16] {
     [0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04,
@@ -29,42 +28,21 @@ fn test_full_lifecycle() {
 }
 
 #[test]
-fn test_shamir_split_then_e2e_encrypt() {
-    // Simulate: split AdminFactor into 3 shares, encrypt each for an authority
+fn test_e2e_encrypt_admin_factor_for_authority() {
+    // Simulate: encrypt AdminFactor for an authority, then decrypt
 
     let af = generate_admin_factor();
-    let shares = shamir::split(&af, 3, 2).unwrap();
-    assert_eq!(shares.len(), 3);
 
-    // Each authority has a keypair
+    // Authority has a keypair
     let (pk_a, sk_a) = e2e_crypto::generate_x25519_keypair();
-    let (pk_b, sk_b) = e2e_crypto::generate_x25519_keypair();
-    let (pk_c, sk_c) = e2e_crypto::generate_x25519_keypair();
 
-    let pubkeys = [pk_a, pk_b, pk_c];
-    let seckeys = [sk_a, sk_b, sk_c];
+    // Encrypt AdminFactor for the authority
+    let package = e2e_crypto::encrypt_for_authority(&af, &pk_a).unwrap();
+    let pkg_bytes = package.to_bytes();
 
-    // Encrypt each share for its authority
-    let mut encrypted_packages = Vec::new();
-    for (share, pk) in shares.iter().zip(pubkeys.iter()) {
-        let package = e2e_crypto::encrypt_for_authority(&share.data, pk).unwrap();
-        encrypted_packages.push(package.to_bytes());
-    }
-
-    // Each authority decrypts their share
-    let mut recovered_shares = Vec::new();
-    for (i, (pkg_bytes, sk)) in encrypted_packages.iter().zip(seckeys.iter()).enumerate() {
-        let decrypted = e2e_crypto::decrypt_from_user(pkg_bytes, sk).unwrap();
-        recovered_shares.push(shamir::ShamirShare {
-            index: shares[i].index,
-            data: decrypted,
-        });
-    }
-
-    // Any 2 authorities can reconstruct the AdminFactor
-    let subset = vec![recovered_shares[0].clone(), recovered_shares[2].clone()];
-    let reconstructed = shamir::reconstruct(&subset).unwrap();
-    assert_eq!(reconstructed, af.to_vec());
+    // Authority decrypts
+    let decrypted = e2e_crypto::decrypt_from_user(&pkg_bytes, &sk_a).unwrap();
+    assert_eq!(decrypted, af.to_vec());
 }
 
 #[test]

@@ -8,7 +8,7 @@
  *
  * KEY DIFFERENCES from client-portal.js (the active flow):
  *   - Uses custody_generate_path() with word-list passphrase (vs random password in client-portal)
- *   - Uses Shamir Secret Sharing to split AdminFactor across authorities
+ *   - E2E encrypts AdminFactor for each authority
  *   - Uses tlock (drand) for time-locked encryption
  *   - Generates UserCred from 256-word list (vs generateRandomPassphrase(12) in client-portal)
  *   - Does NOT use Yallet extension's yallet_changePassphraseWithAdmin()
@@ -41,7 +41,7 @@ import {
   custody_build_composite,
 } from '../../wasm-core/pkg/yault_custody_wasm';
 
-import { splitAdminFactor, distributeToAuthorities } from './authority-crypto.js';
+import { distributeToAuthorities } from './authority-crypto.js';
 import {
   uploadTriggerNFT,
   uploadRecoveryNFT,
@@ -269,7 +269,7 @@ async function _nextIndex() {
  *
  * This is the main orchestration function that:
  *   1. Generates credentials via WASM (UserCred, AdminFactor, etc.)
- *   2. Splits the AdminFactor via Shamir and distributes to authorities
+ *   2. E2E encrypts the AdminFactor and distributes to authorities
  *   3. Creates an encrypted backup (Recovery NFT) on Arweave
  *   4. Creates a tlock-encrypted Trigger NFT on Arweave
  *   5. Persists the path metadata to local storage
@@ -290,7 +290,7 @@ async function _nextIndex() {
  *   adminFactorFingerprint: string,
  *   triggerNftTxId: string,
  *   recoveryNftTxId: string,
- *   shamirConfig: { total: number, threshold: number },
+ *   authorityConfig: { total: number },
  *   tlockRound: number,
  *   status: string,
  * }>}
@@ -318,21 +318,20 @@ export async function createRecipientPath(revHex, label, authorities, contact, w
   const fingerprint = custody_admin_factor_fingerprint(adminFactorHex);
   _checkWasmResult(fingerprint);
 
-  // Step 3: Shamir split and distribute to authorities
-  const threshold = options.threshold || Math.ceil(authorities.length * 2 / 3);
+  // Step 3: Distribute AdminFactor to authorities via E2E encryption
   const distribution = await distributeToAuthorities(
     adminFactorHex,
     authorities,
-    threshold,
+    null,
     walletId,
     index,
   );
 
-  // Verify minimum threshold of shares were delivered
-  const deliveredCount = distribution.filter(d => d.delivered).length;
-  if (deliveredCount < threshold) {
+  // Verify at least one authority received the encrypted AdminFactor
+  const deliveredCount = distribution.shares.filter(d => d.delivered).length;
+  if (deliveredCount < 1) {
     throw new Error(
-      `Only ${deliveredCount}/${threshold} Shamir shares were delivered. ` +
+      `No authorities received the AdminFactor. ` +
       `Cannot safely activate path. Please retry or check authority connectivity.`
     );
   }
@@ -385,9 +384,8 @@ export async function createRecipientPath(revHex, label, authorities, contact, w
     adminFactorFingerprint: fingerprint,
     triggerNftTxId,
     recoveryNftTxId,
-    shamirConfig: {
-      total: distribution.totalShares,
-      threshold: distribution.threshold,
+    authorityConfig: {
+      total: distribution.totalAuthorities,
     },
     authorityIds: authorities.map((lf) => lf.id),
     tlockRound,
@@ -407,7 +405,7 @@ export async function createRecipientPath(revHex, label, authorities, contact, w
     adminFactorFingerprint: fingerprint,
     triggerNftTxId,
     recoveryNftTxId,
-    shamirConfig: { total: distribution.totalShares, threshold: distribution.threshold },
+    authorityConfig: { total: distribution.totalAuthorities },
     tlockRound,
     status: PathStatus.ACTIVE,
   };
@@ -421,7 +419,7 @@ export async function createRecipientPath(revHex, label, authorities, contact, w
  *   label: string,
  *   status: string,
  *   authorityIds: string[],
- *   shamirConfig: { total: number, threshold: number },
+ *   authorityConfig: { total: number },
  *   tlockRound: number,
  *   createdAt: string,
  *   updatedAt: string,
@@ -433,7 +431,7 @@ export async function listRecipientPaths() {
     label: p.label,
     status: p.status,
     authorityIds: p.authorityIds || [],
-    shamirConfig: p.shamirConfig,
+    authorityConfig: p.authorityConfig || p.shamirConfig,
     tlockRound: p.tlockRound,
     adminFactorFingerprint: p.adminFactorFingerprint,
     createdAt: p.createdAt,
@@ -500,7 +498,7 @@ export async function getRecipientPathStatus(recipientIndex) {
  *
  * Despite the name, this function performs a **key rotation** rather than a
  * simple revocation. It generates a new AdminFactor, re-seals the path,
- * re-distributes Shamir shares to authorities, and supersedes the old Trigger
+ * re-distributes encrypted AdminFactor to authorities, and supersedes the old Trigger
  * and Recovery NFTs on Arweave. The path remains ACTIVE with fresh
  * credentials, so the recipient's release entitlement is preserved
  * while the old key material is invalidated.
@@ -535,8 +533,7 @@ export async function revokeRecipientPath(recipientIndex, revHex, authorities, w
   _checkWasmResult(newFingerprint);
 
   // Re-distribute to authorities
-  const threshold = path.shamirConfig?.threshold || Math.ceil(authorities.length * 2 / 3);
-  await distributeToAuthorities(newAdminFactorHex, authorities, threshold, walletId, recipientIndex);
+  await distributeToAuthorities(newAdminFactorHex, authorities, null, walletId, recipientIndex);
 
   // Create new Recovery NFT
   const backupKeyHex = custody_derive_backup_key(revHex, recipientIndex);
