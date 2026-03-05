@@ -610,7 +610,7 @@ async function loadBoundFirms() {
         jurisdiction: f.jurisdiction || '',
         verified: !!f.verified,
         recipient_indices: f.recipient_indices || [],
-        shamir_config: f.recipient_count != null ? { total_shares: firms.length } : undefined,
+        authority_config: f.recipient_count != null ? { total_authorities: firms.length } : undefined,
       }));
     }
   } catch { /* non-fatal */ }

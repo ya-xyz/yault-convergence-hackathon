@@ -1,21 +1,19 @@
 /**
  * authority-crypto.js — Client-side Authority Crypto Operations
  *
- * Wrapper around WASM Shamir secret sharing + E2E encryption for
- * distributing AdminFactor shares to authorities.
+ * Wrapper around WASM E2E encryption for distributing AdminFactor
+ * to authorities. Each authority receives the full AdminFactor encrypted
+ * with their public key (no secret sharing).
  *
  * Flow:
- *   1. splitAdminFactor() - Shamir split the AdminFactor into N shares
- *   2. encryptShareForAuthority() - E2E encrypt each share with the authority's public key
- *   3. distributeToAuthorities() - Orchestrate split + encrypt + send via server API
- *   4. verifyShareReceipt() - Confirm authority received and can hold the share
+ *   1. encryptForAuthority() - E2E encrypt the AdminFactor with the authority's public key
+ *   2. distributeToAuthorities() - Orchestrate encrypt + send via server API
+ *   3. verifyShareReceipt() - Confirm authority received and can hold the factor
  *
  * Dependencies: WASM core (custody module), server API
  */
 
 import {
-  custody_shamir_split,
-  custody_shamir_reconstruct,
   custody_encrypt_for_authority,
   custody_admin_factor_fingerprint,
 } from '../../wasm-core/pkg/yault_custody_wasm';
@@ -57,140 +55,67 @@ function _checkWasmObject(result) {
 // ─── Exported Functions ───
 
 /**
- * Split an AdminFactor into Shamir secret shares.
- *
- * Uses GF(2^8) Shamir secret sharing via WASM. The AdminFactor can be
- * reconstructed from any `threshold` of the `totalShares` shares.
- *
- * @param {string} adminFactorHex - The AdminFactor as a hex string (64 chars = 32 bytes).
- * @param {number} totalShares - Total number of shares to generate (e.g. 3).
- * @param {number} threshold - Minimum shares needed for reconstruction (e.g. 2).
- * @returns {Array<{ index: number, data_hex: string }>} Array of share objects.
- * @throws {Error} If WASM operation fails or parameters are invalid.
- */
-export function splitAdminFactor(adminFactorHex, totalShares, threshold) {
-  if (!adminFactorHex || adminFactorHex.length !== 64) {
-    throw new Error('adminFactorHex must be a 64-character hex string (32 bytes)');
-  }
-  if (!Number.isInteger(totalShares) || totalShares < 2 || totalShares > 255) {
-    throw new Error('totalShares must be an integer between 2 and 255');
-  }
-  if (!Number.isInteger(threshold) || threshold < 2 || threshold > totalShares) {
-    throw new Error('threshold must be an integer between 2 and totalShares');
-  }
-
-  const result = custody_shamir_split(adminFactorHex, totalShares, threshold);
-  return _checkWasmObject(result);
-}
-
-/**
- * Reconstruct the AdminFactor from Shamir shares.
- *
- * Requires at least `threshold` shares (as specified during splitting).
- * Shares can come from different authorities and be in any order.
- *
- * @param {Array<{ index: number, data_hex: string }>} shares
- *   Array of share objects, each with a 1-based index and hex-encoded data.
- * @param {number} [threshold=2] - Minimum shares required (must match the original split threshold).
- * @returns {string} The reconstructed AdminFactor as a hex string.
- * @throws {Error} If reconstruction fails (e.g. insufficient or corrupted shares).
- */
-export function reconstructAdminFactor(shares, threshold = 2) {
-  if (!Array.isArray(shares) || shares.length < 2) {
-    throw new Error('At least 2 shares are required for reconstruction');
-  }
-
-  if (!Number.isInteger(threshold) || threshold < 2) {
-    throw new Error('threshold must be an integer >= 2');
-  }
-
-  for (const share of shares) {
-    if (!Number.isInteger(share.index) || !share.data_hex) {
-      throw new Error('Each share must have integer index and data_hex string');
-    }
-  }
-
-  const sharesJson = JSON.stringify(shares);
-  const result = custody_shamir_reconstruct(sharesJson, threshold);
-  return _checkWasmResult(result);
-}
-
-/**
- * Encrypt a Shamir share for a specific authority using X25519 ECDH + AES-GCM.
+ * Encrypt the AdminFactor for a specific authority using X25519 ECDH + ChaCha20-Poly1305.
  *
  * The authority's public key is used for an ephemeral Diffie-Hellman key exchange.
- * The resulting shared secret encrypts the share data. Only the authority's
+ * The resulting shared secret encrypts the AdminFactor. Only the authority's
  * private key can decrypt it.
  *
- * @param {string} shareDataHex - The Shamir share data as a hex string.
+ * @param {string} adminFactorHex - The AdminFactor as a hex string.
  * @param {string} authorityPubkeyHex - The authority's X25519 public key (hex, 64 chars).
  * @returns {{ package_hex: string, ephemeral_pubkey_hex: string }}
- *   The encrypted package and the ephemeral public key for the authority to use.
  * @throws {Error} If encryption fails.
  */
-export function encryptShareForAuthority(shareDataHex, authorityPubkeyHex) {
-  if (!shareDataHex) {
-    throw new Error('shareDataHex is required');
+export function encryptForAuthority(adminFactorHex, authorityPubkeyHex) {
+  if (!adminFactorHex) {
+    throw new Error('adminFactorHex is required');
   }
   if (!authorityPubkeyHex || authorityPubkeyHex.length !== 64) {
     throw new Error('authorityPubkeyHex must be a 64-character hex string');
   }
 
-  const result = custody_encrypt_for_authority(shareDataHex, authorityPubkeyHex);
+  const result = custody_encrypt_for_authority(adminFactorHex, authorityPubkeyHex);
   return _checkWasmObject(result);
 }
 
 /**
- * Distribute AdminFactor shares to multiple authorities.
+ * Distribute AdminFactor to multiple authorities via E2E encryption.
  *
  * This is the high-level orchestration function that:
- *   1. Splits the AdminFactor into Shamir shares (one per authority)
- *   2. Encrypts each share with the respective authority's public key
- *   3. Sends each encrypted share to the server API for delivery
- *   4. Records the AdminFactor fingerprint for later verification
+ *   1. Encrypts the AdminFactor with each authority's public key
+ *   2. Sends each encrypted package to the server API for delivery
+ *   3. Records the AdminFactor fingerprint for later verification
  *
  * @param {string} adminFactorHex - The AdminFactor hex string (64 chars).
  * @param {Array<{ id: string, publicKeyHex: string }>} authorities
  *   Array of authority objects, each with an ID and X25519 public key.
- * @param {number} threshold - Minimum shares for reconstruction (default: ceil(N * 2/3)).
+ * @param {number} _threshold - Unused (kept for API compatibility).
  * @param {string} walletId - Owner's wallet ID for the binding record.
  * @param {number} recipientIndex - 1-based recipient path index.
  * @returns {Promise<{
- *   shares: Array<{ authorityId: string, shareIndex: number, packageHex: string, delivered: boolean }>,
+ *   shares: Array<{ authorityId: string, packageHex: string, delivered: boolean }>,
  *   fingerprint: string,
- *   threshold: number,
- *   totalShares: number,
+ *   totalAuthorities: number,
  * }>}
- * @throws {Error} If splitting, encryption, or delivery fails.
+ * @throws {Error} If encryption or delivery fails.
  */
-export async function distributeToAuthorities(adminFactorHex, authorities, threshold, walletId, recipientIndex) {
-  if (!Array.isArray(authorities) || authorities.length < 2) {
-    throw new Error('At least 2 authorities are required for Shamir distribution');
+export async function distributeToAuthorities(adminFactorHex, authorities, _threshold, walletId, recipientIndex) {
+  if (!Array.isArray(authorities) || authorities.length < 1) {
+    throw new Error('At least 1 authority is required for distribution');
   }
 
-  const totalShares = authorities.length;
-  const effectiveThreshold = threshold || Math.ceil(totalShares * 2 / 3);
-
-  if (effectiveThreshold < 2 || effectiveThreshold > totalShares) {
-    throw new Error(`Invalid threshold ${effectiveThreshold} for ${totalShares} shares`);
-  }
-
-  // Step 1: Split AdminFactor
-  const rawShares = splitAdminFactor(adminFactorHex, totalShares, effectiveThreshold);
-
-  // Step 2: Compute fingerprint for verification
+  // Compute fingerprint for verification
   const fingerprint = custody_admin_factor_fingerprint(adminFactorHex);
   _checkWasmResult(fingerprint);
 
-  // Step 3: Encrypt each share and deliver
+  // Encrypt and deliver to each authority
   const deliveryResults = [];
 
   for (let i = 0; i < authorities.length; i++) {
     const authority = authorities[i];
-    const share = rawShares[i];
 
-    // Encrypt the share for this authority
-    const encrypted = encryptShareForAuthority(share.data_hex, authority.publicKeyHex);
+    // Encrypt the full AdminFactor for this authority
+    const encrypted = encryptForAuthority(adminFactorHex, authority.publicKeyHex);
 
     // Deliver via server API
     let delivered = false;
@@ -202,12 +127,7 @@ export async function distributeToAuthorities(adminFactorHex, authorities, thres
           wallet_id: walletId,
           authority_id: authority.id,
           recipient_indices: [recipientIndex],
-          shamir_config: {
-            share_index: share.index,
-            total_shares: totalShares,
-            threshold: effectiveThreshold,
-          },
-          encrypted_share: {
+          encrypted_admin_factor: {
             package_hex: encrypted.package_hex,
             ephemeral_pubkey_hex: encrypted.ephemeral_pubkey_hex,
           },
@@ -220,12 +140,10 @@ export async function distributeToAuthorities(adminFactorHex, authorities, thres
       }
     } catch {
       // Delivery failure is recorded but does not abort the entire operation.
-      // The user can retry delivery for failed shares.
     }
 
     deliveryResults.push({
       authorityId: authority.id,
-      shareIndex: share.index,
       packageHex: encrypted.package_hex,
       delivered,
     });
@@ -234,13 +152,12 @@ export async function distributeToAuthorities(adminFactorHex, authorities, thres
   return {
     shares: deliveryResults,
     fingerprint,
-    threshold: effectiveThreshold,
-    totalShares,
+    totalAuthorities: authorities.length,
   };
 }
 
 /**
- * Verify that an authority has received and can hold a share.
+ * Verify that an authority has received and can hold the AdminFactor.
  *
  * Queries the server API to check the binding status for a specific
  * authority + wallet + recipient combination.

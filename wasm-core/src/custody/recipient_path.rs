@@ -43,7 +43,7 @@ pub struct RecipientCredentials {
     pub user_cred: String,
     /// UserCred raw entropy bytes (hex)
     pub user_cred_entropy_hex: String,
-    /// AdminFactor: 256-bit key (given to authorities via Shamir)
+    /// AdminFactor: 256-bit key (given to authorities via E2E encryption)
     pub admin_factor_hex: String,
     /// Context tuple for HKDF isolation
     pub context: ContextTuple,

@@ -15,14 +15,6 @@ module.exports = {
   custody_encrypt_backup: () => 'c'.repeat(64),
   custody_decrypt_backup: () => 'a'.repeat(64),
   custody_admin_factor_fingerprint: () => 'd'.repeat(64),
-  custody_shamir_split: (_secretHex, total) => {
-    const shares = [];
-    for (let i = 0; i < total; i++) {
-      shares.push({ index: i + 1, data_hex: `share${i + 1}_` + 'e'.repeat(58) });
-    }
-    return shares;
-  },
-  custody_shamir_reconstruct: (_sharesJson, _threshold) => 'a'.repeat(64),
   custody_encrypt_for_authority: () => ({
     package_hex: 'f'.repeat(128),
     ephemeral_pubkey_hex: 'g'.repeat(64),

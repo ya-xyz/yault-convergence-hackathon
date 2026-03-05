@@ -30,7 +30,7 @@
  *   POST   /api/vault/redeem            - Redeem vault → wallet
  *   POST   /api/vault/harvest           - Harvest accumulated yield
  *
- *   POST   /api/release/prepare-distribute - Prepare factor distribution (one package per authority, no Shamir)
+ *   POST   /api/release/prepare-distribute - Prepare factor distribution (one E2E encrypted package per authority)
  *
  *   POST   /api/accounts/members          - Add sub-account member
  *   GET    /api/accounts/members          - List sub-account members
