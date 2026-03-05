@@ -2,7 +2,7 @@
  * POST /api/release/prepare-distribute
  *
  * Prepare distribution of the authorization factor to selected authorities.
- * No Shamir: each authority receives one encrypted package (full factor, encrypted for that authority).
+ * Each authority receives one E2E encrypted package (full factor, encrypted for that authority).
  *
  * Body: { admin_factor_hex, firms: [{ id, name, public_key_hex }] }
  * Returns: { fingerprint, packages: [{ authorityId, firmName, packageHex, ephemeralPubkeyHex, delivered }] }

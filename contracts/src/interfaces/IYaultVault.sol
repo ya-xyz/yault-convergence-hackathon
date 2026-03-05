@@ -88,6 +88,11 @@ interface IYaultVault is IERC4626 {
     //  View functions
     // -----------------------------------------------------------------------
 
+    /// @notice Return the deposited principal for a given user.
+    /// @param user The depositor address.
+    /// @return principal The user's tracked principal (cost basis).
+    function userPrincipal(address user) external view returns (uint256 principal);
+
     /// @notice Return the revenue configuration for a given user.
     /// @param user The depositor address.
     /// @return config The `RevenueConfig` struct.

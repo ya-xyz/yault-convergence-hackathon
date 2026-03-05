@@ -389,7 +389,7 @@ function renderOverview() {
         <tr>
           <td>${esc(b.wallet_id?.substring(0, 12))}...</td>
           <td>${(b.recipient_indices || []).join(', ')}</td>
-          <td>${b.shamir_config ? `${b.shamir_config.threshold}-of-${b.shamir_config.total_shares}` : '--'}</td>
+          <td>${b.authority_config ? `${b.authority_config.total_authorities} authorities` : 'E2E'}</td>
           <td><span class="badge badge-active">${esc(b.status)}</span></td>
           <td>${new Date(b.created_at).toLocaleDateString()}</td>
         </tr>
@@ -420,7 +420,7 @@ function renderOverview() {
           <tr>
             <th>Wallet ID</th>
             <th>Paths</th>
-            <th>Shamir</th>
+            <th>Encryption</th>
             <th>Status</th>
             <th>Created</th>
           </tr>

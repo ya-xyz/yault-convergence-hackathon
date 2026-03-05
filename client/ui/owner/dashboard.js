@@ -6,7 +6,7 @@
  * Components:
  * - ReleaseDashboard                // top-level container
  *   +-- ReleaseStatus               // path status summary (active / triggered / released)
- *   +-- AuthorityBindings           // authority cards with verification badges, Shamir status
+ *   +-- AuthorityBindings           // authority cards with verification badges
  *   +-- RecipientPathList           // recipient cards with status
  *   |   +-- RecipientPathCard       // individual path: label, status, actions
  *   +-- AddRecipientForm            // create new path wizard
@@ -182,10 +182,6 @@ function renderAuthorityBindingsHTML(bindings) {
     const verifiedHTML = b.verified
       ? '<span class="verified-badge" title="Verified">&#10003;</span>'
       : '';
-    const shamirLabel = b.shamir_config
-      ? `${b.shamir_config.threshold}-of-${b.shamir_config.total_shares}`
-      : '2-of-3';
-
     return `
       <div class="authority-card" data-action="authority-detail" data-index="${idx}">
         <div class="authority-avatar">${initial}</div>
@@ -194,8 +190,8 @@ function renderAuthorityBindingsHTML(bindings) {
           <div class="authority-jurisdiction">${escapeHTML(b.jurisdiction || '')}</div>
         </div>
         <div class="authority-meta">
-          <div class="shamir-badge">${shamirLabel}</div>
-          <div class="authority-share-index">Share #${b.share_index != null ? b.share_index + 1 : idx + 1}</div>
+          <div class="authority-badge">E2E</div>
+          <div class="authority-index">Authority #${idx + 1}</div>
         </div>
       </div>
     `;
@@ -405,7 +401,7 @@ function renderReplaceAuthorityModal(opts) {
         <div class="yallet-modal-body">
           <div class="alert-banner alert-warning">
             <span class="alert-icon">&#9888;</span>
-            Replacing an authority will re-split the AdminFactor using Shamir and distribute new shares.
+            Replacing an authority will re-encrypt the AdminFactor and distribute to all authorities.
           </div>
           <div class="bind-confirm-detail">
             <div class="bind-confirm-row">
@@ -417,8 +413,8 @@ function renderReplaceAuthorityModal(opts) {
               <span class="value">${escapeHTML(opts.newName || 'New firm')}</span>
             </div>
             <div class="bind-confirm-row">
-              <span class="label">Shamir Config</span>
-              <span class="value">2-of-3</span>
+              <span class="label">Encryption</span>
+              <span class="value">E2E encrypted</span>
             </div>
           </div>
         </div>
