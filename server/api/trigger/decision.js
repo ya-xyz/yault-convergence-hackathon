@@ -49,24 +49,33 @@ const CANCEL_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour after cancellation
  * So VaultShareEscrow blocks owner reclaim for every recipient and all can claim.
  * Best-effort per recipient; skips if ReleaseAttestation not configured.
  */
-async function submitReleaseAttestationForAllRecipients(walletId, recipientIndices, evidenceHash, reasonCode) {
+async function submitReleaseAttestationForAllRecipients(walletId, recipientIndices, evidenceHash, reasonCode, planId) {
   if (!config?.oracle?.releaseAttestationAddress || !config?.oracle?.releaseAttestationRelayerPrivateKey) return;
   if (!evidenceHash || typeof evidenceHash !== 'string') return;
   const evidenceHex = evidenceHash.replace(/^0x/i, '');
   if (evidenceHex.length !== 64 || !/^[0-9a-fA-F]+$/.test(evidenceHex)) return;
   const reason = (reasonCode && typeof reasonCode === 'string' && reasonCode.length >= 64) ? reasonCode : '0x' + '0'.repeat(64);
+  const attPlanId = planId || null;
+  const ATTESTATION_MAX_AGE_MS =
+    Math.max(1, parseInt(process.env.ATTESTATION_MAX_AGE_SEC || `${7 * 24 * 60 * 60}`, 10)) * 1000;
   for (const idx of recipientIndices) {
     try {
-      // Skip if a RELEASE attestation already exists on-chain (idempotent retry guard)
+      // Skip only if a RELEASE attestation exists AND is not expired
       const existing = await getAttestationOnChain({
         rpcUrl: config?.oracle?.rpcUrl,
         contractAddress: config.oracle.releaseAttestationAddress,
         walletId,
         recipientIndex: Number(idx),
+        planId: attPlanId,
       });
       if (existing && existing.decision === 'release') {
-        console.log('[trigger/decision] On-chain RELEASE attestation already exists for recipient %s, skipping', idx);
-        continue;
+        const ts = Number(existing.timestamp || 0);
+        const ageMs = ts > 0 ? Date.now() - ts * 1000 : Infinity;
+        if (ageMs < ATTESTATION_MAX_AGE_MS) {
+          console.log('[trigger/decision] On-chain RELEASE attestation still valid for recipient %s (plan=%s), skipping', idx, attPlanId);
+          continue;
+        }
+        console.log('[trigger/decision] On-chain RELEASE attestation expired for recipient %s (plan=%s), resubmitting', idx, attPlanId);
       }
       await submitFallbackAttestation(config, {
         walletId,
@@ -74,8 +83,9 @@ async function submitReleaseAttestationForAllRecipients(walletId, recipientIndic
         decision: 'release',
         reasonCode: reason,
         evidenceHash: '0x' + evidenceHex,
+        planId: attPlanId,
       });
-      console.log('[trigger/decision] On-chain RELEASE attestation submitted for recipient %s', idx);
+      console.log('[trigger/decision] On-chain RELEASE attestation submitted for recipient %s (plan=%s)', idx, attPlanId);
     } catch (err) {
       console.warn('[trigger/decision] On-chain attestation failed for recipient %s: %s', idx, err?.message);
     }
@@ -108,10 +118,13 @@ async function findActiveBindingForTrigger(trigger) {
     }
   }
   const isOracle = trigger.trigger_type === 'oracle';
+  const triggerPlanId = trigger.plan_id || null;
+  if (!triggerPlanId) return null;
   return allBindings.find(
     (b) =>
       (isOracle || b.authority_id === trigger.authority_id) &&
       b.status === 'active' &&
+      b.plan_id === triggerPlanId &&
       Array.isArray(b.recipient_indices) &&
       b.recipient_indices.some((idx) => Number(idx) === Number(trigger.recipient_index)) &&
       (b.manifest_arweave_tx_id || (Array.isArray(b.encrypted_packages) && b.encrypted_packages.some(p => p.rwa_upload_body)))
@@ -298,10 +311,12 @@ async function _doFinalizeTrigger(triggerId, trigger) {
   if (isReleasePaused()) return trigger;
 
   const isOracleTrigger = trigger.trigger_type === 'oracle';
+  const triggerPlanId = trigger.plan_id || null;
   if (isOracleTrigger) {
     const gate = await evaluateReleaseAttestationGate({
       walletId: trigger.wallet_id,
       recipientIndex: trigger.recipient_index,
+      planId: triggerPlanId,
       allowFallback: !!trigger.emergency_recovery,
     });
     if (!gate.valid) {
@@ -342,7 +357,8 @@ async function _doFinalizeTrigger(triggerId, trigger) {
         activeBinding.wallet_id,
         activeBinding.recipient_indices.map(Number),
         trigger.decision_evidence_hash,
-        trigger.decision_reason_code
+        trigger.decision_reason_code,
+        triggerPlanId
       );
       console.log('[trigger/decision] Pre-finalization FALLBACK attestation written for all recipients (non-oracle cooldown)');
     } catch (attestErr) {
@@ -396,7 +412,7 @@ async function _doFinalizeTrigger(triggerId, trigger) {
           } catch (perRecipientErr) {
             const errMsg = perRecipientErr?.message || String(perRecipientErr);
             console.warn('[trigger/decision] RWA delivery threw for recipient %s: %s', recipientIndex, errMsg);
-            await recordDeliveryFailure(activeBinding.wallet_id, activeBinding.authority_id, recipientIndex, errMsg);
+            await recordDeliveryFailure(activeBinding.wallet_id, activeBinding.authority_id, recipientIndex, errMsg, activeBinding.plan_id);
             try {
               await db.auditLog.create(`rwa_throw_${triggerId}_${recipientIndex}_${Date.now()}`, {
                 type: 'rwa_delivery_threw',
@@ -410,16 +426,10 @@ async function _doFinalizeTrigger(triggerId, trigger) {
             } catch (_) { /* audit best-effort */ }
           }
         }
-        // For oracle triggers: write supplementary FALLBACK attestation for delivered recipients
-        // (non-oracle already wrote attestation pre-finalization for ALL recipients above)
-        if (isOracleTrigger && deliveredIndices.length > 0) {
-          await submitReleaseAttestationForAllRecipients(
-            activeBinding.wallet_id,
-            deliveredIndices,
-            trigger.decision_evidence_hash,
-            trigger.decision_reason_code
-          );
-        }
+        // Oracle triggers: DO NOT write supplementary FALLBACK attestation for siblings.
+        // Oracle attestation should already exist from simulate-chainlink / CRE for ALL recipients.
+        // The contract doesn't allow overwriting, and writing FALLBACK for siblings that
+        // haven't been individually triggered poisons the on-chain state.
       }
     } catch (deliveryErr) {
       console.warn('[trigger/decision] Non-fatal: RWA delivery on finalization failed:', deliveryErr.message);
@@ -517,12 +527,14 @@ router.post('/:id/decision', authorityAuthMiddleware, async (req, res) => {
     // Determine status based on decision type and cooldown
     // Oracle gate only for triggers created from oracle; legal_event/activity_drand are not gated.
     const isOracleTrigger = trigger.trigger_type === 'oracle';
+    const decisionPlanId = trigger.plan_id || null;
     let newStatus;
     if (decisionData.decision === 'release' && decisionData.cooldown_ms > 0) {
       if (isOracleTrigger) {
         const gate = await evaluateReleaseAttestationGate({
           walletId: trigger.wallet_id,
           recipientIndex: trigger.recipient_index,
+          planId: decisionPlanId,
         });
         if (!gate.valid) {
           return res.status(409).json({
@@ -539,6 +551,7 @@ router.post('/:id/decision', authorityAuthMiddleware, async (req, res) => {
         const gate = await evaluateReleaseAttestationGate({
           walletId: trigger.wallet_id,
           recipientIndex: trigger.recipient_index,
+          planId: decisionPlanId,
         });
         if (!gate.valid) {
           return res.status(409).json({
@@ -568,7 +581,8 @@ router.post('/:id/decision', authorityAuthMiddleware, async (req, res) => {
             preReleaseBinding.wallet_id,
             preReleaseBinding.recipient_indices.map(Number),
             decisionData.evidence_hash,
-            decisionData.reason_code
+            decisionData.reason_code,
+            decisionPlanId
           );
           console.log('[trigger/decision] Pre-release FALLBACK attestation written for all recipients (non-oracle immediate)');
         } catch (attestErr) {
@@ -635,7 +649,7 @@ router.post('/:id/decision', authorityAuthMiddleware, async (req, res) => {
             } catch (perRecipientErr) {
               const errMsg = perRecipientErr?.message || String(perRecipientErr);
               console.warn('[trigger/decision] RWA delivery threw for recipient %s: %s', recipientIndex, errMsg);
-              await recordDeliveryFailure(activeBinding.wallet_id, activeBinding.authority_id, recipientIndex, errMsg);
+              await recordDeliveryFailure(activeBinding.wallet_id, activeBinding.authority_id, recipientIndex, errMsg, activeBinding.plan_id);
               try {
                 await db.auditLog.create(`rwa_throw_${id}_${recipientIndex}_${Date.now()}`, {
                   type: 'rwa_delivery_threw',
@@ -649,16 +663,8 @@ router.post('/:id/decision', authorityAuthMiddleware, async (req, res) => {
               } catch (_) { /* audit best-effort */ }
             }
           }
-          // For oracle triggers: write supplementary FALLBACK attestation for delivered recipients
-          // (non-oracle already wrote attestation pre-status-update for ALL recipients above)
-          if (isOracleTrigger && deliveredIndices.length > 0) {
-            await submitReleaseAttestationForAllRecipients(
-              activeBinding.wallet_id,
-              deliveredIndices,
-              decisionData.evidence_hash,
-              decisionData.reason_code
-            );
-          }
+          // Oracle triggers: DO NOT write supplementary FALLBACK attestation for siblings.
+          // Oracle attestation should already exist from simulate-chainlink / CRE.
         }
       } catch (deliveryErr) {
         console.warn('[trigger/decision] Non-fatal: RWA delivery failed:', deliveryErr.message);

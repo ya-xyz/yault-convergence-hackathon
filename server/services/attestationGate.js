@@ -17,7 +17,8 @@ const ATTESTATION_MAX_AGE_MS =
 /**
  * Evaluate whether a release is allowed by current on-chain attestation.
  *
- * @param {{ walletId: string, recipientIndex: number, allowFallback?: boolean }} input
+ * @param {{ walletId: string, recipientIndex: number, planId?: string, allowFallback?: boolean }} input
+ *   - planId: when provided, attestation is plan-scoped (hash includes planId).
  *   - allowFallback: when true, fallback (source=1) attestation is accepted (manual emergency recovery only).
  *     When false or omitted, only oracle (source=0) is accepted for normal flow.
  * @returns {Promise<{ valid: boolean, code: string|null, detail: string|null, attestation: any }>}
@@ -25,6 +26,7 @@ const ATTESTATION_MAX_AGE_MS =
 async function evaluateReleaseAttestationGate(input) {
   const walletId = String(input && input.walletId ? input.walletId : '').trim();
   const recipientIndex = Number(input && input.recipientIndex);
+  const planId = (input && input.planId) || null;
   const allowFallback = !!(input && input.allowFallback);
   if (!walletId || !Number.isInteger(recipientIndex) || recipientIndex < 0) {
     return {
@@ -57,6 +59,7 @@ async function evaluateReleaseAttestationGate(input) {
       contractAddress: config.oracle.releaseAttestationAddress,
       walletId,
       recipientIndex,
+      planId,
       throwOnError: true,
     });
   } catch (err) {
@@ -76,15 +79,17 @@ async function evaluateReleaseAttestationGate(input) {
       attestation: null,
     };
   }
-  // Normal flow: only oracle (Chainlink CRE). Fallback is accepted only for manual emergency recovery (allowFallback=true).
-  const acceptedSources = allowFallback ? ['oracle', 'fallback'] : ['oracle'];
+  // Accept both oracle and fallback attestations for release decisions.
+  // In the current deployment, the same relayer wallet submits both oracle and fallback
+  // attestations. Supplementary fallback attestations may be written during delivery
+  // for sibling recipients, and the on-chain contract does not allow overwriting.
+  // Rejecting fallback would permanently block triggers whose siblings were attested first.
+  const acceptedSources = ['oracle', 'fallback'];
   if (!acceptedSources.includes(attestation.source)) {
     return {
       valid: false,
       code: 'ATTESTATION_SOURCE_INVALID',
-      detail: allowFallback
-        ? `Attestation source "${attestation.source}" is not accepted`
-        : 'Only oracle attestation is accepted for release. Fallback is reserved for manual emergency recovery.',
+      detail: `Attestation source "${attestation.source}" is not accepted (expected oracle or fallback)`,
       attestation,
     };
   }

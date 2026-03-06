@@ -18,6 +18,8 @@ const TEST_DB_PATH = path.join(__dirname, '..', '..', 'data', 'test-trigger-edge
 process.env.DATABASE_PATH = TEST_DB_PATH;
 process.env.NODE_ENV = 'test';
 process.env.ADMIN_TOKEN = 'test-admin-token-1234567890';
+process.env.ORACLE_ATTESTATION_ENABLED = 'false';
+process.env.RELEASE_ATTESTATION_ADDRESS = '';
 
 const nacl = require('tweetnacl');
 
@@ -78,6 +80,7 @@ async function registerAndVerifyAuthority(overrides = {}) {
 }
 
 async function createTriggerForAuthority(authority, walletId, recipientIndex) {
+  const planId = `plan-${walletId}-${recipientIndex}`;
   const auth = await authenticate(authority.keypair.publicKey, authority.keypair.secretKey);
 
   // Create binding
@@ -87,6 +90,7 @@ async function createTriggerForAuthority(authority, walletId, recipientIndex) {
     .send({
       wallet_id: walletId,
       authority_id: authority.authorityId,
+      plan_id: planId,
       recipient_indices: [recipientIndex],
     })
     .expect(201);
@@ -101,6 +105,7 @@ async function createTriggerForAuthority(authority, walletId, recipientIndex) {
     .set('Authorization', `Ed25519 ${auth2.challenge_id}:${auth2.signature}`)
     .send({
       wallet_id: walletId,
+      plan_id: planId,
       recipient_index: recipientIndex,
       reason_code: 'verified_event',
       evidence_hash: evidenceHash,

@@ -14,8 +14,9 @@
 const { Router } = require('express');
 const db = require('../../db');
 
-function deliveryLogId(walletId, authorityId, recipientIndex) {
-  return `${String(walletId).trim().toLowerCase()}_${String(authorityId).trim()}_${recipientIndex}`;
+function deliveryLogId(walletId, authorityId, recipientIndex, planId) {
+  const base = `${String(walletId).trim().toLowerCase()}_${String(authorityId).trim()}_${recipientIndex}`;
+  return planId ? `${base}_${String(planId).trim()}` : base;
 }
 
 const router = Router();
@@ -35,23 +36,32 @@ router.get('/', async (req, res) => {
     const released = triggers.filter((t) => t.status === 'released');
     const bindingByWallet = new Map();
     for (const b of bindings) {
-      if (b.status === 'active') bindingByWallet.set((b.wallet_id || '').toLowerCase(), b);
+      if (b.status !== 'active') continue;
+      const key = `${(b.wallet_id || '').toLowerCase()}|${b.plan_id || ''}`;
+      bindingByWallet.set(key, b);
     }
 
     const candidates = [];
+    const seen = new Set();
     for (const trigger of released) {
       const walletId = trigger.wallet_id;
       if (!walletId) continue;
-      const binding = bindingByWallet.get(walletId.toLowerCase());
+      const triggerPlanId = trigger.plan_id || null;
+      if (!triggerPlanId) continue;
+      const binding = bindingByWallet.get(`${walletId.toLowerCase()}|${triggerPlanId || ''}`);
       if (!binding || !Array.isArray(binding.recipient_indices)) continue;
 
       for (const recipientIndex of binding.recipient_indices) {
         const idx = Number(recipientIndex);
         if (Number.isNaN(idx) || idx < 0) continue;
-        const logId = deliveryLogId(walletId, authorityId, idx);
+        const dedupeKey = `${walletId.toLowerCase()}|${authorityId}|${triggerPlanId}|${idx}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+        const logId = deliveryLogId(walletId, authorityId, idx, triggerPlanId);
         const log = await db.rwaDeliveryLog.findById(logId).catch(() => null);
         candidates.push({
           wallet_id: walletId,
+          plan_id: triggerPlanId,
           recipient_index: idx,
           delivery_status: log?.status ?? null,
           trigger_id: trigger.trigger_id,

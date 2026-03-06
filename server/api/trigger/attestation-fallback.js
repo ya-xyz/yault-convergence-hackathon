@@ -20,9 +20,13 @@ const router = Router();
 router.post('/', authorityAuthMiddleware, async (req, res) => {
   try {
     const { wallet_id, recipient_index, decision, reason_code, evidence_hash } = req.body || {};
+    const plan_id = req.body?.plan_id ? String(req.body.plan_id).trim() : null;
 
     if (!wallet_id || recipient_index == null) {
       return res.status(400).json({ error: 'wallet_id and recipient_index are required' });
+    }
+    if (!plan_id || !String(plan_id).trim()) {
+      return res.status(400).json({ error: 'plan_id is required' });
     }
     if (!['release', 'hold', 'reject'].includes(decision)) {
       return res.status(400).json({ error: 'decision must be release, hold, or reject' });
@@ -39,6 +43,7 @@ router.post('/', authorityAuthMiddleware, async (req, res) => {
       (b) =>
         b.authority_id === authorityId &&
         b.status === 'active' &&
+        b.plan_id === plan_id &&
         Array.isArray(b.recipient_indices) &&
         b.recipient_indices.some((idx) => Number(idx) === recIndex)
     );
@@ -62,6 +67,7 @@ router.post('/', authorityAuthMiddleware, async (req, res) => {
       decision,
       reasonCode: reason_code,
       evidenceHash: evidence_hash,
+      planId: plan_id,
     });
 
     // When decision is release, deliver the stored RWA credential NFT to the recipient (POST rwa_upload_body to upload-and-mint). Only then can the recipient see the NFT in Yallet.
@@ -77,6 +83,7 @@ router.post('/', authorityAuthMiddleware, async (req, res) => {
 
     return res.json({
       status: 'submitted',
+      plan_id: plan_id || null,
       tx_hash: result.txHash,
       block_number: result.blockNumber,
       message: 'Fallback attestation submitted on-chain.',

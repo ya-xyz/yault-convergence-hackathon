@@ -188,24 +188,35 @@ async function processDueAllowances() {
     // ── Finalize cooldown triggers ──
     try {
       const allTriggers = await db.triggers.findAll();
-      const cooldownTriggers = allTriggers.filter(
-        (t) => t.status === 'cooldown' && t.effective_at && t.effective_at <= now
+
+      // Retry attestation_blocked triggers: reset to cooldown so they can be re-evaluated.
+      // This handles the case where attestation was expired/missing at first check but has
+      // since been refreshed (e.g. simulate-chainlink re-submitted a fresh attestation).
+      // Limit retries: don't infinitely reset — max 3 automatic resets, then leave blocked.
+      const MAX_BLOCKED_RESETS = 3;
+      const blockedTriggers = allTriggers.filter(
+        (t) => t.status === 'attestation_blocked' && t.effective_at && t.effective_at <= now &&
+               (t.blocked_reset_count || 0) < MAX_BLOCKED_RESETS
       );
-      let finalizedCount = 0;
-      for (const trigger of cooldownTriggers) {
+      for (const trigger of blockedTriggers) {
         try {
-          const decisionRouter = require('../api/trigger/decision');
-          if (typeof decisionRouter._maybeFinalizeDecision === 'function') {
-            const updated = await decisionRouter._maybeFinalizeDecision(trigger.trigger_id, trigger);
-            if (updated && updated.status === 'released') finalizedCount++;
-          }
-        } catch (tErr) {
-          console.error(`[scheduler] Finalize trigger ${trigger.trigger_id} error:`, tErr.message);
+          trigger.status = 'cooldown';
+          trigger.blocked_reset_count = (trigger.blocked_reset_count || 0) + 1;
+          trigger.blocked_reason_code = null;
+          trigger.blocked_reason_detail = null;
+          trigger.blocked_at = null;
+          // Add a 2-minute delay before next retry (exponential backoff)
+          trigger.effective_at = now + trigger.blocked_reset_count * 120000;
+          await db.triggers.update(trigger.trigger_id, trigger);
+          console.log(`[scheduler] Reset attestation_blocked trigger ${trigger.trigger_id} → cooldown for retry (attempt ${trigger.blocked_reset_count}/${MAX_BLOCKED_RESETS})`);
+        } catch (rErr) {
+          console.error(`[scheduler] Reset blocked trigger ${trigger.trigger_id} error:`, rErr.message);
         }
       }
-      if (finalizedCount > 0) {
-        console.log(`[scheduler] Finalized ${finalizedCount} cooldown trigger(s) → released`);
-      }
+
+      // NOTE: Cooldown trigger finalization is handled by the dedicated cooldown-finalizer
+      // in pending.js (runs every 30s). Removed from scheduler to prevent duplicate
+      // finalization causing duplicate NFT deliveries.
     } catch (tErr) {
       console.error('[scheduler] Trigger finalization error:', tErr.message);
     }
@@ -222,7 +233,10 @@ async function processDueAllowances() {
           (d.attempts || 0) >= 5 &&
           /[Mm]erkle tree|fetch manifest|fetch payload|InsufficientMintCapacity|not enough unapproved mints left|Error Number:\s*6017/i.test(d.error || '')
         ) {
-          const resetId = `${String(d.wallet_id).trim().toLowerCase()}_${String(d.authority_id).trim()}_${d.recipient_index}`;
+          const dPlanId = d.plan_id || null;
+          const resetId = dPlanId
+            ? `${String(d.wallet_id).trim().toLowerCase()}_${String(d.authority_id).trim()}_${d.recipient_index}_${dPlanId}`
+            : `${String(d.wallet_id).trim().toLowerCase()}_${String(d.authority_id).trim()}_${d.recipient_index}`;
           await db.rwaDeliveryLog.create(resetId, { ...d, status: 'pending', attempts: 0, updated_at: Date.now() }).catch(() => {});
           console.log(`[scheduler] Reset failed delivery ${resetId} for retry (was: ${d.error})`);
           didReset = true;
@@ -232,18 +246,32 @@ async function processDueAllowances() {
       const retryable = pendingDeliveries.filter(
         (d) => (d.status === 'failed' || d.status === 'pending') && (d.attempts || 0) < 5
       );
-      if (retryable.length > 0) {
+      // Skip entries that were recently rate-limited (wait at least 5 minutes)
+      const RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
+      const retryNow = retryable.filter((d) => {
+        if (/rate.?limit|Too many requests/i.test(d.error || '')) {
+          return (d.updated_at || 0) + RATE_LIMIT_COOLDOWN_MS < now;
+        }
+        return true;
+      });
+      if (retryNow.length > 0) {
         let retrySucceeded = 0;
         let retryFailed = 0;
-        for (const delivery of retryable) {
+        let rateLimited = false;
+        for (const delivery of retryNow) {
+          // If a previous delivery in this batch was rate-limited, stop retrying this tick
+          if (rateLimited) break;
           try {
             const { deliverRwaPackageForRecipient } = require('./deliverRwaRelease');
             // Normalize: try both with and without 0x prefix
             const dwid = delivery.wallet_id;
             const dwidAlt = dwid.startsWith('0x') ? dwid.slice(2) : `0x${dwid}`;
+            const deliveryPlanId = delivery.plan_id || null;
+            if (!deliveryPlanId) continue;
             const walletBindings = [...(await db.bindings.findByWallet(dwid)), ...(await db.bindings.findByWallet(dwidAlt))];
             const binding = walletBindings.find(
-              (b) => b.authority_id === delivery.authority_id && b.status === 'active'
+              (b) => b.authority_id === delivery.authority_id && b.status === 'active' &&
+                     b.plan_id === deliveryPlanId
             );
             if (binding) {
               const result = await deliverRwaPackageForRecipient(binding, delivery.recipient_index);
@@ -251,7 +279,10 @@ async function processDueAllowances() {
                 retrySucceeded++;
               } else {
                 retryFailed++;
-                if (result && result.error) {
+                if (result && result.rateLimited) {
+                  rateLimited = true;
+                  console.warn(`[scheduler] Mint API rate limited — stopping delivery retries for this tick`);
+                } else if (result && result.error) {
                   console.warn(
                     `[scheduler] RWA delivery retry failed for ${delivery.wallet_id}/${delivery.recipient_index}: ${result.error}`
                   );
@@ -268,7 +299,9 @@ async function processDueAllowances() {
             console.error(`[scheduler] RWA delivery retry error for ${delivery.wallet_id}/${delivery.recipient_index}:`, dErr.message);
           }
         }
-        console.log(`[scheduler] Retried ${retryable.length} RWA deliveries: ${retrySucceeded} succeeded, ${retryFailed} failed`);
+        if (retryNow.length > 0) {
+          console.log(`[scheduler] Retried ${retrySucceeded + retryFailed} RWA deliveries: ${retrySucceeded} succeeded, ${retryFailed} failed${rateLimited ? ' (stopped: rate limited)' : ''}`);
+        }
       }
     } catch (dErr) {
       console.error('[scheduler] RWA retry error:', dErr.message);

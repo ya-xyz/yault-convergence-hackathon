@@ -64,7 +64,9 @@ async function checkInactivity() {
       if (now - lastActivity < thresholdMs) continue;
 
       const walletId = String(pathConfig.wallet_id).trim();
+      const planId = pathConfig.plan_id || null;
       if (!walletId) continue;
+      if (!planId) continue;
 
       // Process each recipient path
       const paths = Array.isArray(pathConfig.paths) ? pathConfig.paths : [];
@@ -72,7 +74,7 @@ async function checkInactivity() {
         const recipientIndex = path.index;
         if (!Number.isInteger(recipientIndex) || recipientIndex < 1) continue;
 
-        const queueKey = `${walletId}_${recipientIndex}`;
+        const queueKey = `${walletId}_${recipientIndex}_${planId}`;
 
         // Skip if already queued this cycle
         if (_queuedKeys.has(queueKey)) continue;
@@ -83,6 +85,7 @@ async function checkInactivity() {
           const hasActive = existingTriggers?.some(
             (t) =>
               Number(t.recipient_index) === recipientIndex &&
+              t.plan_id === planId &&
               (t.status === 'pending' || t.status === 'cooldown' || t.status === 'released')
           );
           if (hasActive) {
@@ -104,6 +107,7 @@ async function checkInactivity() {
           await db.auditLog.create(`inactivity_${walletId}_${recipientIndex}_${now}`, {
             type: 'INACTIVITY_THRESHOLD_REACHED',
             wallet_id: walletId,
+            plan_id: planId,
             recipient_index: recipientIndex,
             trigger_type: 'activity_drand',
             tlock_duration_months: pathConfig.tlock_duration_months,
@@ -119,6 +123,7 @@ async function checkInactivity() {
           if (pendingQueue && pendingQueue.length < 1000) {
             pendingQueue.push({
               wallet_id: walletId,
+              plan_id: planId,
               recipient_index: recipientIndex,
               decision: 'release',
               evidence_hash: evidenceHash,

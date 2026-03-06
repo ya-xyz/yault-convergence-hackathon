@@ -391,15 +391,18 @@ function createCollection(name, options = {}) {
 // #16 FIX: Add allowedJsonFields so findByField can be used for verified/region/pubkey lookups
 const authorities = createCollection('authorities', { allowedJsonFields: ['verified', 'region', 'pubkey'] });
 
-const bindings = createCollection('bindings', { allowedJsonFields: ['wallet_id', 'authority_id'] });
+const bindings = createCollection('bindings', { allowedJsonFields: ['wallet_id', 'authority_id', 'plan_id'] });
 bindings.findByWallet = async function (walletId) {
   return this.findByField('wallet_id', walletId);
 };
 bindings.findByAuthority = async function (authorityId) {
   return this.findByField('authority_id', authorityId);
 };
+bindings.findByPlan = async function (planId) {
+  return this.findByField('plan_id', planId);
+};
 
-const triggers = createCollection('triggers', { allowedJsonFields: ['authority_id', 'wallet_id'] });
+const triggers = createCollection('triggers', { allowedJsonFields: ['authority_id', 'wallet_id', 'plan_id'] });
 triggers.findByAuthority = async function (authorityId) {
   return this.findByField('authority_id', authorityId);
 };
@@ -468,9 +471,11 @@ allowances.findByWallet = async function (walletId) {
 // Trial applications
 const trialApplications = createCollection('trialApplications');
 
-// Recipient path configurations (id = SHA-256(wallet_id))
-const recipientPaths = createCollection('recipientPaths');
+// Recipient path configurations (id = SHA-256(wallet_id) legacy, SHA-256(wallet_id:plan_id) plan-scoped)
+const recipientPaths = createCollection('recipientPaths', { allowedJsonFields: ['wallet_id', 'plan_id'] });
 recipientPaths.findByWallet = async function (walletId) {
+  const byWallet = await this.findByField('wallet_id', walletId);
+  if (byWallet.length > 0) return byWallet;
   const crypto = require('crypto');
   const id = crypto.createHash('sha256').update(String(walletId)).digest('hex');
   let r = await this.findById(id);
@@ -481,9 +486,13 @@ recipientPaths.findByWallet = async function (walletId) {
   }
   return r ? [r] : [];
 };
+recipientPaths.findByWalletPlan = async function (walletId, planId) {
+  const rows = await this.findByWallet(walletId);
+  return rows.filter((row) => (planId ? row.plan_id === planId : !row.plan_id));
+};
 
 // Released admin factors for claims
-const releasedFactors = createCollection('releasedFactors', { allowedJsonFields: ['wallet_id'] });
+const releasedFactors = createCollection('releasedFactors', { allowedJsonFields: ['wallet_id', 'trigger_id', 'plan_id'] });
 releasedFactors.findByWallet = async function (walletId) {
   return this.findByField('wallet_id', walletId);
 };
@@ -539,7 +548,7 @@ const rwaReleaseRegistry = createCollection('rwaReleaseRegistry');
 
 // RWA delivery log: tracks delivery attempts so failed deliveries can be retried.
 // id = `${wallet_id}_${authority_id}_${recipient_index}`, data = { wallet_id, authority_id, recipient_index, status, txId?, error?, attempts, created_at, updated_at }
-const rwaDeliveryLog = createCollection('rwaDeliveryLog', { allowedJsonFields: ['wallet_id', 'status'] });
+const rwaDeliveryLog = createCollection('rwaDeliveryLog', { allowedJsonFields: ['wallet_id', 'status', 'plan_id'] });
 rwaDeliveryLog.findPending = async function () {
   const pending = await this.findByField('status', 'pending');
   const superseded = await this.findByField('status', 'superseded');
@@ -580,28 +589,54 @@ walletAdminFactors.findByWallet = async function (walletId) {
 
 // Reverse index: recipient_evm_address → wallet_id (for /claim/me, avoids full table scan)
 // id = `${normalizedRecipientAddress}_${normalizedWalletId}`, data = { recipient_address, wallet_id }
-const recipientPathIndex = createCollection('recipientPathIndex', { allowedJsonFields: ['recipient_address', 'wallet_id'] });
+const recipientPathIndex = createCollection('recipientPathIndex', { allowedJsonFields: ['recipient_address', 'wallet_id', 'plan_id'] });
 recipientPathIndex.findByRecipientAddress = async function (address) {
   return this.findByField('recipient_address', address);
 };
 recipientPathIndex.deleteByWalletId = async function (walletId) {
   const entries = await this.findByField('wallet_id', walletId);
   for (const entry of entries) {
-    const id = `${entry.recipient_address}_${walletId}`;
+    const id = entry.plan_id
+      ? `${entry.recipient_address}_${walletId}_${entry.plan_id}`
+      : `${entry.recipient_address}_${walletId}`;
+    await this.delete(id);
+  }
+};
+recipientPathIndex.deleteByWalletPlan = async function (walletId, planId) {
+  const entries = await this.findByField('wallet_id', walletId);
+  for (const entry of entries) {
+    const entryPlanId = entry.plan_id || null;
+    if ((planId || null) !== entryPlanId) continue;
+    const id = entryPlanId
+      ? `${entry.recipient_address}_${walletId}_${entryPlanId}`
+      : `${entry.recipient_address}_${walletId}`;
     await this.delete(id);
   }
 };
 
 // Reverse index: mnemonic_hash → wallet_id (for /claim/by-mnemonic-hash, avoids full table scan)
 // id = `${mnemonicHash}_${normalizedWalletId}`, data = { mnemonic_hash, wallet_id, recipient_address, path_index }
-const mnemonicHashIndex = createCollection('mnemonicHashIndex', { allowedJsonFields: ['mnemonic_hash', 'wallet_id'] });
+const mnemonicHashIndex = createCollection('mnemonicHashIndex', { allowedJsonFields: ['mnemonic_hash', 'wallet_id', 'plan_id'] });
 mnemonicHashIndex.findByHash = async function (hash) {
   return this.findByField('mnemonic_hash', hash);
 };
 mnemonicHashIndex.deleteByWalletId = async function (walletId) {
   const entries = await this.findByField('wallet_id', walletId);
   for (const entry of entries) {
-    const id = `${entry.mnemonic_hash}_${walletId}`;
+    const id = entry.plan_id
+      ? `${entry.mnemonic_hash}_${walletId}_${entry.plan_id}`
+      : `${entry.mnemonic_hash}_${walletId}`;
+    await this.delete(id);
+  }
+};
+mnemonicHashIndex.deleteByWalletPlan = async function (walletId, planId) {
+  const entries = await this.findByField('wallet_id', walletId);
+  for (const entry of entries) {
+    const entryPlanId = entry.plan_id || null;
+    if ((planId || null) !== entryPlanId) continue;
+    const id = entryPlanId
+      ? `${entry.mnemonic_hash}_${walletId}_${entryPlanId}`
+      : `${entry.mnemonic_hash}_${walletId}`;
     await this.delete(id);
   }
 };

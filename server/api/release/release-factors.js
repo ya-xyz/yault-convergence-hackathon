@@ -28,6 +28,9 @@ const db = require('../../db');
 const { encryptAdminFactor } = require('../../services/adminFactorCrypto');
 
 const router = Router();
+function matchPlanId(rowPlanId, planId) {
+  return planId ? rowPlanId === planId : !rowPlanId;
+}
 
 router.post('/', async (req, res) => {
   try {
@@ -85,6 +88,13 @@ router.post('/', async (req, res) => {
     // authority is allowed to submit, since the oracle itself doesn't hold AdminFactors —
     // it only triggers the release; the entity authority holds and submits the factors.
     const callerAuthorityId = req.auth?.authority_id;
+    const triggerPlanId = trigger.plan_id || null;
+    if (!triggerPlanId) {
+      return res.status(400).json({
+        error: 'plan_id required',
+        detail: 'Trigger has no plan_id. Legacy planless release-factors are no longer supported.',
+      });
+    }
     let isAllowed = callerAuthorityId && callerAuthorityId === trigger.authority_id;
 
     if (!isAllowed && trigger.trigger_type === 'oracle' && callerAuthorityId) {
@@ -94,8 +104,9 @@ router.post('/', async (req, res) => {
         // Also try lowercase
         walletPaths = await db.recipientPaths.findByWallet(wallet_id.toLowerCase());
       }
-      if (walletPaths.length > 0) {
-        const boundAuthorityId = walletPaths[0].authority_id;
+      const pathConfig = walletPaths.find((p) => matchPlanId(p.plan_id, triggerPlanId));
+      if (pathConfig) {
+        const boundAuthorityId = pathConfig.authority_id;
         if (boundAuthorityId && callerAuthorityId === boundAuthorityId) {
           isAllowed = true;
         }
@@ -112,13 +123,12 @@ router.post('/', async (req, res) => {
     // Verify fingerprints match stored config (if available)
     // Try exact match first, then case-insensitive
     let pathConfigs = await db.recipientPaths.findByWallet(wallet_id);
-    if (pathConfigs.length === 0) {
-      pathConfigs = await db.recipientPaths.findByWallet(wallet_id.toLowerCase());
-    }
+    if (pathConfigs.length === 0) pathConfigs = await db.recipientPaths.findByWallet(wallet_id.toLowerCase());
+    const pathConfig = pathConfigs.find((p) => matchPlanId(p.plan_id, triggerPlanId)) || null;
     let verified = false;
 
-    if (pathConfigs.length > 0) {
-      const storedPaths = pathConfigs[0].paths;
+    if (pathConfig) {
+      const storedPaths = pathConfig.paths;
       verified = admin_factors.every(af => {
         const fingerprint = crypto.createHash('sha256')
           .update(Buffer.from(af.admin_factor_hex, 'hex'))
@@ -129,11 +139,12 @@ router.post('/', async (req, res) => {
     }
 
     // Store released factors (optional blob_hex; recipient_mnemonic_hash from path config so authority knows blob ↔ wallet)
-    const storedPaths = pathConfigs.length > 0 ? pathConfigs[0].paths : [];
+    const storedPaths = pathConfig ? pathConfig.paths : [];
     const recordId = crypto.randomBytes(16).toString('hex');
     const record = {
       wallet_id,
       trigger_id,
+      plan_id: triggerPlanId,
       factors: admin_factors.map(af => {
         const fingerprint = crypto.createHash('sha256')
           .update(Buffer.from(af.admin_factor_hex, 'hex'))

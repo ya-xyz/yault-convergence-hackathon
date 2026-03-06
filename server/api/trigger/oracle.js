@@ -78,7 +78,8 @@ function parseRecipientIndexStrict(raw) {
  */
 router.get('/attestation', dualAuthMiddleware, async (req, res) => {
   try {
-    const { wallet_id, recipient_index } = req.query;
+    const { wallet_id, recipient_index, plan_id } = req.query;
+    const queryPlanId = plan_id ? String(plan_id).trim() : null;
     const oracleEnabled =
       config.oracle?.enabled && config.oracle?.releaseAttestationAddress;
 
@@ -105,6 +106,7 @@ router.get('/attestation', dualAuthMiddleware, async (req, res) => {
       contractAddress: config.oracle.releaseAttestationAddress,
       walletId: String(wallet_id).trim(),
       recipientIndex,
+      planId: queryPlanId,
     });
 
     return res.json({
@@ -125,7 +127,7 @@ router.get('/attestation', dualAuthMiddleware, async (req, res) => {
  */
 router.get('/attestation-check', authorityAuthMiddleware, async (req, res) => {
   try {
-    const { wallet_id, recipient_index } = req.query || {};
+    const { wallet_id, recipient_index, plan_id } = req.query || {};
     if (!wallet_id || recipient_index === undefined) {
       return res.status(400).json({
         error: 'Missing query parameters',
@@ -139,10 +141,12 @@ router.get('/attestation-check', authorityAuthMiddleware, async (req, res) => {
         detail: 'recipient_index must be a non-negative integer',
       });
     }
+    const checkPlanId = plan_id ? String(plan_id).trim() : null;
 
     const gate = await evaluateReleaseAttestationGate({
       walletId: String(wallet_id).trim(),
       recipientIndex: idx,
+      planId: checkPlanId,
     });
     return res.json({
       valid: gate.valid,
@@ -191,14 +195,18 @@ router.post('/from-oracle', async (req, res) => {
       });
     }
 
-    const { wallet_id, recipient_index } = req.body || {};
+    const { wallet_id, recipient_index, plan_id } = req.body || {};
     if (!wallet_id || recipient_index === undefined) {
       return res.status(400).json({
         error: 'Missing body fields',
         detail: 'wallet_id and recipient_index are required',
       });
     }
+    if (!plan_id || !String(plan_id).trim()) {
+      return res.status(400).json({ error: 'plan_id is required' });
+    }
     const walletIdTrimmed = String(wallet_id).trim();
+    const planId = plan_id ? String(plan_id).trim() : null;
     if (!walletIdTrimmed) {
       return res.status(400).json({
         error: 'Invalid wallet_id',
@@ -218,6 +226,7 @@ router.post('/from-oracle', async (req, res) => {
       contractAddress: config.oracle.releaseAttestationAddress,
       walletId: walletIdTrimmed,
       recipientIndex,
+      planId,
     });
 
     if (!attestation || attestation.source !== 'oracle') {
@@ -236,7 +245,7 @@ router.post('/from-oracle', async (req, res) => {
     }
 
     // Acquire lock to prevent TOCTOU race condition on concurrent trigger creation
-    const lockKey = `${walletIdTrimmed}_${recipientIndex}`;
+    const lockKey = planId ? `${walletIdTrimmed}_${recipientIndex}_${planId}` : `${walletIdTrimmed}_${recipientIndex}`;
     if (!acquireTriggerLock(lockKey)) {
       return res.status(409).json({
         error: 'Concurrent request',
@@ -244,14 +253,15 @@ router.post('/from-oracle', async (req, res) => {
       });
     }
 
-    // Duplicate check: same wallet/recipient with pending or cooldown (use trimmed wallet_id)
-    let triggerId, cooldownMs, effectiveAt;
+    // Duplicate check: same wallet/recipient/plan with pending or cooldown (use trimmed wallet_id)
+    let triggerId, cooldownMs, effectiveAt, now;
     try {
       const existing = await db.triggers.findByWallet(walletIdTrimmed);
       const duplicate = existing?.find(
         (t) =>
           t.recipient_index === recipientIndex &&
-          (t.status === 'pending' || t.status === 'cooldown')
+          (t.status === 'pending' || t.status === 'cooldown') &&
+          t.plan_id === planId
       );
       if (duplicate) {
         return res.status(409).json({
@@ -262,7 +272,7 @@ router.post('/from-oracle', async (req, res) => {
       }
 
       triggerId = crypto.randomBytes(16).toString('hex');
-      const now = Date.now();
+      now = Date.now();
       cooldownMs = getDefaultCooldownMs();
       effectiveAt = now + cooldownMs;
 
@@ -284,6 +294,7 @@ router.post('/from-oracle', async (req, res) => {
       const record = {
         ...triggerValidation.data,
         trigger_id: triggerId,
+        plan_id: planId,
         trigger_type: 'oracle',
         reason_code: 'authorized_request',
         matter_id: null,
@@ -313,6 +324,7 @@ router.post('/from-oracle', async (req, res) => {
       await db.auditLog.create(`from_oracle_${triggerId}`, {
         type: 'TRIGGER_FROM_ORACLE',
         trigger_id: triggerId,
+        plan_id: planId,
         wallet_id: walletIdTrimmed,
         authority_id: ORACLE_AUTHORITY_ID,
         recipient_index: recipientIndex,
@@ -326,7 +338,9 @@ router.post('/from-oracle', async (req, res) => {
 
     try {
       const bindings = await db.bindings.findByWallet(walletIdTrimmed);
-      const binding = bindings.find((b) => b.status === 'active');
+      const binding = bindings.find(
+        (b) => b.status === 'active' && b.plan_id === planId
+      );
       const emails = [];
       if (binding && binding.authority_id) {
         const authority = await db.authorities.findById(binding.authority_id);
@@ -347,6 +361,7 @@ router.post('/from-oracle', async (req, res) => {
 
     return res.status(201).json({
       trigger_id: triggerId,
+      plan_id: planId,
       status: 'cooldown',
       trigger_type: 'oracle',
       decision: 'release',
@@ -380,10 +395,15 @@ router.post('/simulate-chainlink', dualAuthMiddleware, async (req, res) => {
       return res.status(503).json({ error: 'Oracle not configured' });
     }
 
+    const { plan_id: reqPlanId } = req.body || {};
+    const simPlanId = reqPlanId ? String(reqPlanId).trim() : null;
+    if (!simPlanId) {
+      return res.status(400).json({ error: 'plan_id is required' });
+    }
     const pubkey = (req.auth.pubkey || '').replace(/^0x/i, '').toLowerCase();
     const walletId = '0x' + pubkey;
 
-    // Find active binding
+    // Find active binding — match by plan_id when present
     let walletBindings = await db.bindings.findByWallet(walletId);
     if (walletBindings.length === 0) {
       try {
@@ -394,7 +414,10 @@ router.post('/simulate-chainlink', dualAuthMiddleware, async (req, res) => {
         }
       } catch (_) {}
     }
-    const binding = walletBindings.find((b) => b.status === 'active');
+    const binding = walletBindings.find((b) =>
+      b.status === 'active' &&
+      b.plan_id === simPlanId
+    );
     if (!binding || !Array.isArray(binding.recipient_indices) || binding.recipient_indices.length === 0) {
       return res.status(404).json({ error: 'No active binding with recipient indices found for this wallet' });
     }
@@ -416,34 +439,61 @@ router.post('/simulate-chainlink', dualAuthMiddleware, async (req, res) => {
 
         let attestationTxHash = null;
         try {
-          // Skip if a RELEASE attestation already exists (idempotent retry guard)
-          const existingAttestation = await getAttestation({
-            rpcUrl: config.oracle.rpcUrl,
-            contractAddress: config.oracle.releaseAttestationAddress,
+          // Always write a fresh oracle attestation so the timestamp is current.
+          // Old attestations may have expired (>7 days) and block the gate check.
+          const atResult = await submitOracleAttestation(config, {
             walletId,
             recipientIndex,
+            decision: 'release',
+            reasonCode: null,
+            evidenceHash,
+            planId: simPlanId,
           });
-          if (existingAttestation && existingAttestation.decision === 'release') {
-            console.log(`[simulate-chainlink] RELEASE attestation already exists for ${walletId}/${recipientIndex}, skipping`);
-          } else {
-            const atResult = await submitOracleAttestation(config, {
+          attestationTxHash = atResult.txHash;
+          console.log(`[simulate-chainlink] Attestation submitted for ${walletId}/${recipientIndex}: ${attestationTxHash}`);
+        } catch (atErr) {
+          // Attestation write failed — check if a valid attestation already exists on-chain.
+          // The contract doesn't allow overwriting, so the write will fail if one already exists.
+          // If a valid (non-expired, decision=release) attestation exists, continue; otherwise FAIL LOUDLY.
+          console.warn(`[simulate-chainlink] Attestation write failed for index ${recipientIndex}: ${atErr.message}. Checking for existing valid attestation...`);
+          try {
+            const existing = await getAttestation({
+              rpcUrl: config.oracle.rpcUrl,
+              contractAddress: config.oracle.releaseAttestationAddress,
               walletId,
               recipientIndex,
-              decision: 'release',
-              reasonCode: null,
-              evidenceHash,
+              planId: simPlanId,
             });
-            attestationTxHash = atResult.txHash;
-            console.log(`[simulate-chainlink] Attestation submitted for ${walletId}/${recipientIndex}: ${attestationTxHash}`);
+            if (existing && existing.decision === 'release') {
+              const ts = Number(existing.timestamp || 0);
+              const maxAgeMs = Math.max(1, parseInt(process.env.ATTESTATION_MAX_AGE_SEC || `${7 * 24 * 60 * 60}`, 10)) * 1000;
+              const ageMs = ts > 0 ? Date.now() - ts * 1000 : Infinity;
+              if (ageMs < maxAgeMs) {
+                console.log(`[simulate-chainlink] Existing valid attestation found for index ${recipientIndex} (source=${existing.source}), continuing.`);
+                attestationTxHash = 'existing-on-chain';
+              } else {
+                console.error(`[simulate-chainlink] FATAL: Existing attestation for index ${recipientIndex} is EXPIRED (age=${Math.floor(ageMs / 1000)}s). Cannot proceed.`);
+                results.push({ recipientIndex, status: 'attestation_failed', error: `Attestation expired and write failed: ${atErr.message}` });
+                continue;
+              }
+            } else {
+              console.error(`[simulate-chainlink] FATAL: No valid release attestation on-chain for index ${recipientIndex}. Write failed: ${atErr.message}`);
+              results.push({ recipientIndex, status: 'attestation_failed', error: `No valid attestation and write failed: ${atErr.message}` });
+              continue;
+            }
+          } catch (checkErr) {
+            console.error(`[simulate-chainlink] FATAL: Cannot verify attestation for index ${recipientIndex}: ${checkErr.message}`);
+            results.push({ recipientIndex, status: 'attestation_failed', error: `Attestation write failed and check failed: ${atErr.message}` });
+            continue;
           }
-        } catch (atErr) {
-          console.warn(`[simulate-chainlink] Attestation submit failed for index ${recipientIndex} (continuing):`, atErr.message);
         }
 
-        // 2. Check for duplicate trigger
+        // 2. Check for duplicate trigger (plan-scoped)
         const existing = await db.triggers.findByWallet(walletId);
         const dup = existing?.find(
-          (t) => t.recipient_index === recipientIndex && (t.status === 'pending' || t.status === 'cooldown')
+          (t) => t.recipient_index === recipientIndex &&
+                 (t.status === 'pending' || t.status === 'cooldown') &&
+                 t.plan_id === simPlanId
         );
         if (dup) {
           results.push({ recipientIndex, status: 'duplicate', trigger_id: dup.trigger_id });
@@ -468,6 +518,7 @@ router.post('/simulate-chainlink', dualAuthMiddleware, async (req, res) => {
         const record = {
           ...triggerValidation.data,
           trigger_id: triggerId,
+          plan_id: simPlanId,
           trigger_type: 'oracle',
           reason_code: 'authorized_request',
           matter_id: null,
@@ -516,6 +567,7 @@ router.post('/simulate-chainlink', dualAuthMiddleware, async (req, res) => {
     return res.json({
       success: true,
       wallet_id: walletId,
+      plan_id: simPlanId,
       triggers: results,
       cooldown_ms: cooldownMs,
       cooldown_minutes: cooldownMinutes,
@@ -558,10 +610,13 @@ function oracleKeyGuard(req, res, next) {
 }
 
 oraclePendingRouter.post('/request-attestation', oracleKeyGuard, (req, res) => {
-  const { wallet_id, recipient_index, decision } = req.body;
+  const { wallet_id, recipient_index, decision, plan_id } = req.body;
 
   if (!wallet_id || recipient_index === undefined || !decision) {
     return res.status(400).json({ error: 'Missing wallet_id, recipient_index, or decision' });
+  }
+  if (!plan_id || !String(plan_id).trim()) {
+    return res.status(400).json({ error: 'Missing plan_id' });
   }
   const validDecisions = ['release', 'hold', 'reject'];
   if (!validDecisions.includes(decision)) {
@@ -574,6 +629,7 @@ oraclePendingRouter.post('/request-attestation', oracleKeyGuard, (req, res) => {
 
   const request = {
     wallet_id,
+    plan_id: plan_id || null,
     recipient_index: parseInt(recipient_index, 10),
     decision,
     // The oracle workflow expects an evidence_hash. We'll generate a dummy one for the demo.
@@ -582,7 +638,7 @@ oraclePendingRouter.post('/request-attestation', oracleKeyGuard, (req, res) => {
   };
 
   PENDING_ORACLE_REQUESTS.push(request);
-  console.log(`[trigger/oracle] Queued attestation request: ${wallet_id}/${request.recipient_index}`);
+  console.log(`[trigger/oracle] Queued attestation request: ${wallet_id}/${request.recipient_index} plan=${request.plan_id || 'legacy'}`);
 
   res.status(202).json({ message: 'Oracle attestation requested.', request });
 });
@@ -605,7 +661,7 @@ oraclePendingRouter.get('/pending', oracleKeyGuard, (_req, res) => {
     return res.json({ requests: [] });
   }
 
-  console.log(`[trigger/oracle] Dequeued attestation request for CRE: ${request.wallet_id}/${request.recipient_index}`);
+  console.log(`[trigger/oracle] Dequeued attestation request for CRE: ${request.wallet_id}/${request.recipient_index} plan=${request.plan_id || 'legacy'}`);
   // The oracle workflow expects an array of requests.
   return res.json({ requests: [request] });
 });

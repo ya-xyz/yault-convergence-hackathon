@@ -146,6 +146,7 @@ describe('GET /api/trigger/attestation', () => {
 
 describe('POST /api/trigger/from-oracle', () => {
   const oracleKeyHeader = { 'X-Oracle-Internal-Key': 'test-oracle-key' };
+  const planId = 'test-plan-1';
 
   test('returns 404 when no oracle attestation on chain', async () => {
     getAttestation.mockResolvedValue(null);
@@ -153,7 +154,7 @@ describe('POST /api/trigger/from-oracle', () => {
     const res = await request
       .post('/api/trigger/from-oracle')
       .set(oracleKeyHeader)
-      .send({ wallet_id: 'wallet-xyz', recipient_index: 0 })
+      .send({ wallet_id: 'wallet-xyz', recipient_index: 0, plan_id: planId })
       .expect(404);
 
     expect(res.body.error).toContain('No oracle attestation');
@@ -171,7 +172,7 @@ describe('POST /api/trigger/from-oracle', () => {
     await request
       .post('/api/trigger/from-oracle')
       .set(oracleKeyHeader)
-      .send({ wallet_id: 'w1', recipient_index: 0 })
+      .send({ wallet_id: 'w1', recipient_index: 0, plan_id: planId })
       .expect(400);
   });
 
@@ -188,7 +189,7 @@ describe('POST /api/trigger/from-oracle', () => {
     const res = await request
       .post('/api/trigger/from-oracle')
       .set(oracleKeyHeader)
-      .send({ wallet_id: 'wallet-release-1', recipient_index: 0 })
+      .send({ wallet_id: 'wallet-release-1', recipient_index: 0, plan_id: planId })
       .expect(201);
 
     expect(res.body.trigger_id).toBeTruthy();
@@ -214,15 +215,15 @@ describe('POST /api/trigger/from-oracle', () => {
       submitter: '0x1',
     });
 
-    const body = { wallet_id: 'dup-wallet', recipient_index: 2 };
+    const body = { wallet_id: 'dup-wallet', recipient_index: 2, plan_id: planId };
     await request.post('/api/trigger/from-oracle').set(oracleKeyHeader).send(body).expect(201);
     const res = await request.post('/api/trigger/from-oracle').set(oracleKeyHeader).send(body).expect(409);
     expect(res.body.error).toContain('Duplicate trigger');
   });
 
   test('returns 400 when wallet_id or recipient_index missing', async () => {
-    await request.post('/api/trigger/from-oracle').set(oracleKeyHeader).send({ wallet_id: 'w1' }).expect(400);
-    await request.post('/api/trigger/from-oracle').set(oracleKeyHeader).send({ recipient_index: 0 }).expect(400);
+    await request.post('/api/trigger/from-oracle').set(oracleKeyHeader).send({ wallet_id: 'w1', plan_id: planId }).expect(400);
+    await request.post('/api/trigger/from-oracle').set(oracleKeyHeader).send({ recipient_index: 0, plan_id: planId }).expect(400);
   });
 
   test('trims wallet_id and uses it consistently', async () => {
@@ -237,7 +238,7 @@ describe('POST /api/trigger/from-oracle', () => {
     const res = await request
       .post('/api/trigger/from-oracle')
       .set(oracleKeyHeader)
-      .send({ wallet_id: '  trimmed-wallet  ', recipient_index: 0 })
+      .send({ wallet_id: '  trimmed-wallet  ', recipient_index: 0, plan_id: planId })
       .expect(201);
 
     expect(res.body.trigger_id).toBeTruthy();

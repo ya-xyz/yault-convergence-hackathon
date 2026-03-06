@@ -51,6 +51,18 @@ function newPlanKey(walletId, chainKey, tokenSymbol) {
   return `${planPrefix(walletId, chainKey, tokenSymbol)}_${Date.now()}`;
 }
 
+/**
+ * Ensure a plan record has a plan_id. Legacy plans without one get a
+ * deterministic id derived from their storage key so downstream code
+ * can always rely on plan.plan_id being present.
+ */
+function ensurePlanId(plan, storageKey) {
+  if (plan && !plan.plan_id) {
+    plan.plan_id = crypto.createHash('sha256').update(storageKey || '').digest('hex').slice(0, 32);
+  }
+  return plan;
+}
+
 function stripAdminFactorFromLink(link) {
   if (!link || typeof link !== 'string') return '';
   try {
@@ -113,9 +125,12 @@ router.get('/', dualAuthMiddleware, async (req, res) => {
       }
     }
 
-    // Fetch all matching plans, filter out migration markers
+    // Fetch all matching plans, filter out migration markers, ensure plan_id
     const plans = (await Promise.all(
-      matchingIds.map((id) => db.walletPlans.findById(id))
+      matchingIds.map(async (id) => {
+        const p = await db.walletPlans.findById(id);
+        return p ? ensurePlanId(p, id) : null;
+      })
     )).filter((p) => p != null && !p._migratedToMulti);
 
     // Sort by createdAt descending (newest first)
@@ -145,7 +160,10 @@ router.get('/all', dualAuthMiddleware, async (req, res) => {
       (id) => id === walletId || id.startsWith(walletId + '_')
     );
     const plans = (await Promise.all(
-      matchingIds.map((id) => db.walletPlans.findById(id))
+      matchingIds.map(async (id) => {
+        const p = await db.walletPlans.findById(id);
+        return p ? ensurePlanId(p, id) : null;
+      })
     )).filter((p) => p != null && !p._migrated && !p._migratedToMulti);
 
     plans.sort((a, b) => {
@@ -172,7 +190,9 @@ router.put('/', dualAuthMiddleware, async (req, res) => {
     const tokenSym = (token_symbol || '').trim().toUpperCase() || 'ETH';
     const key = newPlanKey(walletId, chainKey, tokenSym);
 
+    const planId = crypto.randomBytes(16).toString('hex');
     const data = {
+      plan_id: planId,
       triggerTypes: triggerTypes || {},
       recipients: Array.isArray(recipients) ? recipients : [],
       triggerConfig: triggerConfig || {},
@@ -183,7 +203,7 @@ router.put('/', dualAuthMiddleware, async (req, res) => {
     };
 
     await db.walletPlans.create(key, data);
-    return res.json({ plan: data });
+    return res.json({ plan: data, plan_id: planId });
   } catch (err) {
     console.error('[wallet-plan] PUT error:', err);
     return res.status(500).json({ error: 'Internal server error' });

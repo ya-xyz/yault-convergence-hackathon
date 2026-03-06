@@ -161,6 +161,15 @@ function isAuthorized(callerPubkey, walletId, paths) {
     return recip && normalizeAddr(recip) === callerNorm;
   });
 }
+function matchPlanId(rowPlanId, planId) {
+  return planId ? rowPlanId === planId : !rowPlanId;
+}
+function pickPathConfig(configs, planId) {
+  if (!Array.isArray(configs) || configs.length === 0) return null;
+  if (planId) return configs.find((c) => c && c.plan_id === planId) || null;
+  if (configs.length === 1) return configs[0];
+  return configs.find((c) => !c.plan_id) || configs[0];
+}
 
 /**
  * POST /api/claim/register-mnemonic-hash
@@ -175,8 +184,12 @@ router.post('/register-mnemonic-hash', async (req, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
     const { wallet_id, path_index, mnemonic_hash } = req.body || {};
+    const plan_id = req.body?.plan_id ? String(req.body.plan_id).trim() : null;
     if (!wallet_id || path_index == null) {
       return res.status(400).json({ error: 'wallet_id and path_index are required' });
+    }
+    if (!plan_id) {
+      return res.status(400).json({ error: 'plan_id is required' });
     }
     if (!isValidMnemonicHash(mnemonic_hash)) {
       return res.status(400).json({ error: 'mnemonic_hash must be a 64-char hex string (e.g. SHA-256 of mnemonic)' });
@@ -187,7 +200,10 @@ router.post('/register-mnemonic-hash', async (req, res) => {
     if (pathConfigs.length === 0) {
       return res.status(404).json({ error: 'Wallet path config not found' });
     }
-    const rec = pathConfigs[0];
+    const rec = pickPathConfig(pathConfigs, plan_id);
+    if (!rec) {
+      return res.status(404).json({ error: 'Wallet path config not found for plan_id' });
+    }
     const paths = rec.paths || [];
     const pathIndex = Number(path_index);
     const pathEntry = paths.find(p => p.index === pathIndex);
@@ -200,7 +216,8 @@ router.post('/register-mnemonic-hash', async (req, res) => {
     }
 
     // Use full SHA-256 hash as record ID (not truncated) to prevent collision risk
-    const id = crypto.createHash('sha256').update(wallet_id).digest('hex');
+    const storageInput = plan_id ? `${rec.wallet_id}:${plan_id}` : rec.wallet_id;
+    const id = crypto.createHash('sha256').update(storageInput).digest('hex');
     const updatedPaths = paths.map(p => {
       if (p.index !== pathIndex) return p;
       return { ...p, recipient_mnemonic_hash: hashNorm };
@@ -210,9 +227,11 @@ router.post('/register-mnemonic-hash', async (req, res) => {
     // Update mnemonic hash reverse index for efficient /by-mnemonic-hash lookups
     const walletIdNorm = normalizeAddr(wallet_id);
     const recipAddrNorm = normalizeAddr(recipientAddr);
-    await db.mnemonicHashIndex.create(`${hashNorm}_${walletIdNorm}`, {
+    const idxId = plan_id ? `${hashNorm}_${walletIdNorm}_${plan_id}` : `${hashNorm}_${walletIdNorm}`;
+    await db.mnemonicHashIndex.create(idxId, {
       mnemonic_hash: hashNorm,
       wallet_id: walletIdNorm,
+      plan_id,
       recipient_address: recipAddrNorm,
       path_index: pathIndex,
     });
@@ -386,12 +405,15 @@ router.get('/me', async (req, res) => {
 
     // 1) Trigger flow: use recipientPathIndex for O(K) lookup instead of O(N) findAll
     const indexEntries = await db.recipientPathIndex.findByRecipientAddress(callerNorm);
-    const myWalletIds = [...new Set(indexEntries.map(e => e.wallet_id))];
+    const walletPlanKeys = [...new Set(indexEntries.filter((e) => !!e.plan_id).map((e) => `${e.wallet_id}|${e.plan_id || ''}`))];
 
-    for (const walletIdNorm of myWalletIds) {
+    for (const key of walletPlanKeys) {
+      const [walletIdNorm, planIdRaw] = key.split('|');
+      const planId = planIdRaw || null;
       const pathConfigs = await db.recipientPaths.findByWallet(walletIdNorm);
       if (pathConfigs.length === 0) continue;
-      const rec = pathConfigs[0];
+      const rec = pickPathConfig(pathConfigs, planId);
+      if (!rec) continue;
       const walletId = rec.wallet_id;
       const paths = rec.paths || [];
       const myPaths = paths.filter(p => {
@@ -401,13 +423,14 @@ router.get('/me', async (req, res) => {
       if (myPaths.length === 0) continue;
 
       const triggers = await db.triggers.findByWallet(walletId);
-      const releasedTrigger = triggers.find(t => t.status === 'released');
+      const releasedTrigger = triggers.find((t) => t.status === 'released' && matchPlanId(t.plan_id, rec.plan_id || null));
       if (!releasedTrigger) continue;
 
       const releasedRecords = await db.releasedFactors.findByWallet(walletId);
-      if (releasedRecords.length === 0) continue;
+      const releasedForPlan = releasedRecords.filter((r) => matchPlanId(r.plan_id, rec.plan_id || null));
+      if (releasedForPlan.length === 0) continue;
 
-      const latestRelease = releasedRecords[releasedRecords.length - 1];
+      const latestRelease = releasedForPlan[releasedForPlan.length - 1];
       for (const mp of myPaths) {
         const factor = latestRelease.factors.find(f => f.index === mp.index);
         if (!factor) continue;
@@ -425,6 +448,7 @@ router.get('/me', async (req, res) => {
           encrypted_admin_factor: encrypted,
           blob_hex: factor.blob_hex || null,
           recipient_mnemonic_hash: mp.recipient_mnemonic_hash || null,
+          plan_id: rec.plan_id || null,
           created_at: latestRelease.created_at || releasedTrigger.decided_at || null,
         });
       }
@@ -442,8 +466,29 @@ router.get('/me', async (req, res) => {
       }
     }
     for (const r of planLatest.values()) {
-      // Look up recipient index using wallet id variants (raw / normalized / 0x-prefixed).
-      const pathIndex = await findRecipientPathIndex(r.plan_wallet_id || '', r.evm_address || '');
+      // Look up recipient index and plan_id using wallet id variants (raw / normalized / 0x-prefixed).
+      const planWalletRaw = r.plan_wallet_id || '';
+      const planWalletNorm = normalizeAddr(planWalletRaw);
+      const planWalletCandidates = [...new Set([planWalletRaw, planWalletNorm, planWalletNorm ? `0x${planWalletNorm}` : ''].filter(Boolean))];
+      let resolvedPathIndex = null;
+      let resolvedPlanId = null;
+      for (const pwc of planWalletCandidates) {
+        const pConfigs = await db.recipientPaths.findByWallet(pwc);
+        for (const pc of pConfigs) {
+          const pp = Array.isArray(pc.paths) ? pc.paths : [];
+          const matchP = pp.find((p) => p && p.recipient_evm_address && normalizeAddr(p.recipient_evm_address) === callerNorm);
+          if (matchP && Number.isFinite(Number(matchP.index))) {
+            resolvedPathIndex = Number(matchP.index);
+            resolvedPlanId = pc.plan_id || null;
+            break;
+          }
+        }
+        if (resolvedPathIndex != null) break;
+      }
+      // Fallback: try the original function if path config lookup didn't match
+      if (resolvedPathIndex == null) {
+        resolvedPathIndex = await findRecipientPathIndex(planWalletRaw, r.evm_address || '');
+      }
       const encrypted = await ensureEncryptedAdminPayload(
         r,
         callerXidentity,
@@ -462,7 +507,8 @@ router.get('/me', async (req, res) => {
       if (!encrypted) continue;
       myEntries.push({
         wallet_id: r.plan_wallet_id || null,
-        path_index: pathIndex,
+        path_index: resolvedPathIndex,
+        plan_id: resolvedPlanId,
         label: r.label || 'Release',
         encrypted_admin_factor: encrypted,
         blob_hex: null,
@@ -513,6 +559,9 @@ router.get('/escrow-balance', async (req, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
     let walletId = (req.query.walletId || req.query.wallet_id || '').trim();
+    const planId = req.query.plan_id ? String(req.query.plan_id).trim() : null;
+    // plan_id is optional for escrow-balance — claim recipients may not have it available.
+    // When missing, pickPathConfig falls back to the first matching path config.
     const recipientIndex = parseInt(req.query.recipientIndex || req.query.recipient_index, 10);
     if (!walletId) {
       return res.status(400).json({ error: 'walletId is required' });
@@ -532,15 +581,23 @@ router.get('/escrow-balance', async (req, res) => {
       pathConfigs = await db.recipientPaths.findByWallet(walletKey);
       if (pathConfigs.length > 0) break;
     }
-    if (pathConfigs.length > 0 && pathConfigs[0]?.wallet_id) {
-      walletId = String(pathConfigs[0].wallet_id).trim();
+    const selectedPathConfig = pickPathConfig(pathConfigs, planId);
+    if (selectedPathConfig?.wallet_id) {
+      walletId = String(selectedPathConfig.wallet_id).trim();
     }
-    const paths = pathConfigs.length > 0 ? pathConfigs[0].paths || [] : [];
+    const paths = selectedPathConfig ? (selectedPathConfig.paths || []) : [];
     if (!isAuthorized(req.auth.pubkey, walletId, paths)) {
-      return res.status(403).json({
-        error: 'Forbidden',
-        detail: 'You can only view escrow balance for your own plan or as an authorized recipient',
-      });
+      // Fallback: check recipientMnemonicAdmin — plan flow recipients may not appear in recipientPaths
+      // but do have a recipientMnemonicAdmin record linking their evm_address to the plan_wallet_id.
+      const callerNorm = normalizeAddr(req.auth.pubkey);
+      const planRecords = await db.recipientMnemonicAdmin.findByEvmAddress(callerNorm);
+      const isRecipientViaPlan = planRecords.some((r) => normalizeAddr(r.plan_wallet_id) === walletNorm);
+      if (!isRecipientViaPlan) {
+        return res.status(403).json({
+          error: 'Forbidden',
+          detail: 'You can only view escrow balance for your own plan or as an authorized recipient',
+        });
+      }
     }
     // Ensure 0x prefix for EVM addresses — plan_wallet_id may be stored without it,
     // but the escrow contract hashes the 0x-prefixed address.
@@ -595,13 +652,15 @@ router.get('/by-mnemonic-hash', async (req, res) => {
 
     // Use mnemonicHashIndex for O(K) lookup instead of O(N) findAll
     const hashIndexEntries = await db.mnemonicHashIndex.findByHash(hashNorm);
-    const matchedWalletIds = [...new Set(hashIndexEntries.map(e => e.wallet_id))];
-
     const myEntries = [];
-    for (const walletIdNorm of matchedWalletIds) {
+    const walletPlanKeys = [...new Set(hashIndexEntries.filter((e) => !!e.plan_id).map((e) => `${e.wallet_id}|${e.plan_id || ''}`))];
+    for (const key of walletPlanKeys) {
+      const [walletIdNorm, planIdRaw] = key.split('|');
+      const planId = planIdRaw || null;
       const pathConfigs = await db.recipientPaths.findByWallet(walletIdNorm);
       if (pathConfigs.length === 0) continue;
-      const rec = pathConfigs[0];
+      const rec = pickPathConfig(pathConfigs, planId);
+      if (!rec) continue;
       const walletId = rec.wallet_id;
       const paths = rec.paths || [];
       // Security: hash lookup must still be bound to the logged-in recipient.
@@ -614,13 +673,14 @@ router.get('/by-mnemonic-hash', async (req, res) => {
       if (matchingPaths.length === 0) continue;
 
       const triggers = await db.triggers.findByWallet(walletId);
-      const releasedTrigger = triggers.find(t => t.status === 'released');
+      const releasedTrigger = triggers.find((t) => t.status === 'released' && matchPlanId(t.plan_id, rec.plan_id || null));
       if (!releasedTrigger) continue;
 
       const releasedRecords = await db.releasedFactors.findByWallet(walletId);
-      if (releasedRecords.length === 0) continue;
+      const releasedForPlan = releasedRecords.filter((r) => matchPlanId(r.plan_id, rec.plan_id || null));
+      if (releasedForPlan.length === 0) continue;
 
-      const latestRelease = releasedRecords[releasedRecords.length - 1];
+      const latestRelease = releasedForPlan[releasedForPlan.length - 1];
       for (const mp of matchingPaths) {
         const factor = latestRelease.factors.find(f => f.index === mp.index);
         if (!factor) continue;
@@ -634,6 +694,7 @@ router.get('/by-mnemonic-hash', async (req, res) => {
         myEntries.push({
           wallet_id: walletId,
           path_index: mp.index,
+          plan_id: rec.plan_id || null,
           label: mp.label || `Recipient #${mp.index}`,
           encrypted_admin_factor: encrypted,
           blob_hex: factor.blob_hex || null,
@@ -656,16 +717,25 @@ router.get('/:wallet_id', async (req, res) => {
     }
 
     // Security: verify caller is wallet owner or an authorized recipient
+    const planId = req.query.plan_id ? String(req.query.plan_id).trim() : null;
+    // plan_id is optional for claim lookup — recipients may not have it.
     const pathConfigs = await db.recipientPaths.findByWallet(wallet_id);
-    const paths = pathConfigs.length > 0 ? pathConfigs[0].paths : [];
+    const selectedPathConfig = pickPathConfig(pathConfigs, planId);
+    const paths = selectedPathConfig ? (selectedPathConfig.paths || []) : [];
     if (!req.auth || !req.auth.pubkey) {
       return res.status(401).json({ error: 'Authentication required' });
     }
     if (!isAuthorized(req.auth.pubkey, wallet_id, paths)) {
-      return res.status(403).json({
-        error: 'Forbidden',
-        detail: 'You can only view released factors for your own wallet or as an authorized recipient',
-      });
+      // Fallback: check recipientMnemonicAdmin — plan flow recipients may not appear in recipientPaths
+      const callerNormAuth = normalizeAddr(req.auth.pubkey);
+      const planRecords = await db.recipientMnemonicAdmin.findByEvmAddress(callerNormAuth);
+      const isRecipientViaPlan = planRecords.some((r) => normalizeAddr(r.plan_wallet_id) === normalizeAddr(wallet_id));
+      if (!isRecipientViaPlan) {
+        return res.status(403).json({
+          error: 'Forbidden',
+          detail: 'You can only view released factors for your own wallet or as an authorized recipient',
+        });
+      }
     }
     const callerNorm = normalizeAddr(req.auth.pubkey);
     const ownerNorm = normalizeAddr(wallet_id);
@@ -677,7 +747,7 @@ router.get('/:wallet_id', async (req, res) => {
 
     // Check if there are released triggers for this wallet
     const triggers = await db.triggers.findByWallet(wallet_id);
-    const releasedTrigger = triggers.find(t => t.status === 'released');
+    const releasedTrigger = triggers.find((t) => t.status === 'released' && matchPlanId(t.plan_id, selectedPathConfig?.plan_id || planId));
 
     if (!releasedTrigger) {
       return res.json({
@@ -698,6 +768,7 @@ router.get('/:wallet_id', async (req, res) => {
         const gate = await evaluateReleaseAttestationGate({
           walletId: wallet_id,
           recipientIndex: checkIndex,
+          planId: selectedPathConfig?.plan_id || planId || null,
           allowFallback: true, // allow fallback for claim (emergency recovery)
         });
         if (!gate.valid && gate.code !== 'ATTESTATION_MISSING') {
@@ -719,7 +790,8 @@ router.get('/:wallet_id', async (req, res) => {
 
     // Get released factors
     const releasedRecords = await db.releasedFactors.findByWallet(wallet_id);
-    if (releasedRecords.length === 0) {
+    const releasedForPlan = releasedRecords.filter((r) => matchPlanId(r.plan_id, selectedPathConfig?.plan_id || planId));
+    if (releasedForPlan.length === 0) {
       return res.json({
         wallet_id,
         released: true,
@@ -729,10 +801,10 @@ router.get('/:wallet_id', async (req, res) => {
     }
 
     // Reuse path config from auth check for labels/weights
-    const totalWeight = pathConfigs.length > 0 ? pathConfigs[0].total_weight : 0;
+    const totalWeight = selectedPathConfig ? selectedPathConfig.total_weight : 0;
 
     // Merge released factors with path config (include blob_hex when stored)
-    const latestRelease = releasedRecords[releasedRecords.length - 1];
+    const latestRelease = releasedForPlan[releasedForPlan.length - 1];
     const factorsRaw = latestRelease.factors.map(f => {
       const pathInfo = paths.find(p => p.index === f.index);
       // Security: recipient callers can only see their own path factor.

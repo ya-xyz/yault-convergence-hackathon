@@ -585,7 +585,7 @@ async function authorityAuthMiddleware(req, res, next) {
     }
     // Derive authority_id and verify it exists in the registry
     const crypto = require('crypto');
-    const derivedAuthorityId = crypto.createHash('sha256').update(req.auth.pubkey).digest('hex');
+    const derivedAuthorityId = crypto.createHash('sha256').update(req.auth.pubkey, 'hex').digest('hex');
     const authority = await db.authorities.findById(derivedAuthorityId);
     if (!authority) {
       return res.status(403).json({ error: 'Forbidden', detail: 'Caller is not a registered authority' });

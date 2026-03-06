@@ -4,7 +4,7 @@
  * Establish a pseudonymous user-authority binding.
  * The wallet_id is the only user identifier (no PII).
  *
- * Body: { wallet_id, authority_id, recipient_indices[] }
+ * Body: { wallet_id, authority_id, plan_id, recipient_indices[] }
  * Returns: { binding_id, status: "active" }
  */
 
@@ -59,15 +59,18 @@ router.post('/', authorityAuthMiddleware, async (req, res) => {
       });
     }
 
-    // Check for duplicate binding (same wallet + same authority)
+    // Check for duplicate binding (same wallet + same authority + same plan)
     const existingBindings = await db.bindings.findByWallet(bindingData.wallet_id);
     const duplicate = existingBindings.find(
-      (b) => b.authority_id === bindingData.authority_id && b.status === 'active'
+      (b) =>
+        b.authority_id === bindingData.authority_id &&
+        b.plan_id === bindingData.plan_id &&
+        b.status === 'active'
     );
     if (duplicate) {
       return res.status(409).json({
         error: 'Duplicate binding',
-        detail: 'An active binding already exists between this wallet and authority',
+        detail: 'An active binding already exists between this wallet, authority, and plan',
       });
     }
 

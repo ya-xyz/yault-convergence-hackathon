@@ -99,6 +99,7 @@ const vaultRouter = require('./api/vault');
 const activitiesRouter = require('./api/activities');
 const releasePrepareDistribute = require('./api/release/prepare-distribute');
 const insuranceRouter = require('./api/insurance');
+const portfolioRouter = require('./api/portfolio/tracker');
 const { adminRouter, kycSubmitRouter } = require('./api/admin');
 const trialRequest = require('./api/trial/request');
 
@@ -206,13 +207,14 @@ if (process.env.NODE_ENV !== 'production' && process.env.NODE_ENV !== 'test') {
 // ---------------------------------------------------------------------------
 
 // Global API rate limit: 200 requests per minute per IP
+// Skip for admin routes (already auth-gated) and test environment
 const globalLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 200,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests, please try again later.' },
-  skip: () => process.env.NODE_ENV === 'test', // disable in tests
+  skip: (req) => process.env.NODE_ENV === 'test' || req.path.startsWith('/admin/') || req.path.startsWith('/admin'),
 });
 app.use('/api/', globalLimiter);
 
@@ -483,6 +485,9 @@ app.use('/api/activities', activitiesRouter);
 
 // Insurance (DeFi insurance protocol integration)
 app.use('/api/insurance', insuranceRouter);
+
+// Portfolio tracking (Chainlink Data Feeds integration)
+app.use('/api/portfolio', portfolioRouter);
 
 // Sub-accounts (family members / corporate sub-accounts)
 app.use('/api/accounts/members', accountMembers);

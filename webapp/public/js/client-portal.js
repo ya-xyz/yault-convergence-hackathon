@@ -214,6 +214,7 @@ const state = {
   planSubmitConfirmModal: false, // After clicking Submit, show a modal warning about n signature prompts
   planForConfigure: null,
   savedPlan: null,         // { triggerTypes, recipients, triggerConfig } — latest plan for current chain+token
+  currentPlanId: null,     // plan_id from the server, used to scope bindings/triggers/delivery
   planHistory: [],          // all plans for current chain+token (newest first, includes savedPlan)
   generatedPathCredentials: null, // Deprecated: no longer displays plaintext, switched to RWA NFT
   credentialMintResults: null,     // [{ recipient, creds, success, txId?, error? }] — mint results, no plaintext included
@@ -236,6 +237,7 @@ const state = {
   escrowBalances: { shares: '0', value: '0', recipient_indices: [] },
   planRemaining: null, // { shares, value } from auto-query on Asset Plan overview; null = loading or not queried
   _planRemainingFetching: false,
+  recipientClaimStatus: {}, // { [recipientIndex]: { allocated, remaining, claimed } } from escrow contract
   vaultUnderlyingSymbol: 'USDC',  // from GET /vault/balance (VAULT_UNDERLYING_SYMBOL), e.g. 'WETH'
   // Global UI context: all balances/addresses below derive from this (Chain + Token cascading dropdowns in header)
   globalChainKey: 'ethereum',  // 'ethereum' | 'solana' | 'bitcoin'
@@ -267,7 +269,7 @@ const state = {
   newDeniableContext: '',  // e.g. "entity:domain:0"
   newDeniableLabel: '',
   // claim flow
-  claimStep: 1,           // 1: credentials, 2: status check, 3: activation, 4: balances, 5: transfer
+  claimStep: 0,           // 0: claims list, 1: credentials, 2: balance, 3: transfer result
   walletId: '',
   pathIndex: 1,
   mnemonic: '',
@@ -307,6 +309,10 @@ const state = {
   pathClaimLoading: false,
   pathClaimError: null,
   claimMeItems: [],              // GET /api/claim/me → items (released for this recipient)
+  claimedItems: [],              // [{wallet_id, path_index, plan_id, txHash, claimedAt}] — locally tracked successful claims (session)
+  claimEscrowStatuses: {},       // { "walletId:pathIndex": { claimed: bool } } — on-chain escrow status per claim item
+  _claimEscrowStatusesFetching: false,
+  claimPlanId: null,             // plan_id from the selected claim item (needed for escrow-balance query)
   selectedClaimItem: null,       // { wallet_id, path_index, label, admin_factor_hex, blob_hex? }
   claimPlanReleases: [],        // GET /api/claim/plan-releases → items (test flow: AdminFactor linked by evm)
   planAuthorityId: 'test-authority', // authority_id when sending release link (test)
@@ -326,6 +332,16 @@ const state = {
   // Profile (Client)
   clientProfile: null,   // { address, name, email, phone, address? }
   profileEditMode: false,
+  // Portfolio (Chainlink Integration)
+  portfolioSection: 'overview', // 'overview' | 'vaults' | 'history' | 'automation' | 'analytics'
+  portfolioData: null,          // { totalValueUSD, positions[], timestamp }
+  portfolioVaults: null,        // { vaults[], count }
+  portfolioHistory: null,       // { snapshots[], totalSnapshots }
+  portfolioAutomation: null,    // AutoHarvest status (Chainlink Automation)
+  portfolioAnalytics: null,     // Portfolio analytics (Chainlink Functions)
+  portfolioCcip: null,          // CCIP bridge status
+  portfolioLoading: false,
+  portfolioError: null,
 };
 
 // Tokens per chain for global context dropdown (cascading: Token options depend on Chain)
@@ -438,7 +454,7 @@ const REDEEM_DEFAULT_TOKENS = {
 
 // ─── Navigation ───
 
-const PAGES = ['wallet', 'accounts', 'protection', 'claim', 'profile', 'settings', 'activities'];
+const PAGES = ['wallet', 'accounts', 'protection', 'portfolio', 'claim', 'profile', 'settings', 'activities'];
 
 function navigate(page) {
   state.page = page;
@@ -460,11 +476,23 @@ function navigate(page) {
   } else if (page === 'protection') {
     Promise.all([loadReleases(), loadWalletPlan()]).then(() => render());
   } else if (page === 'claim') {
-    loadClaimMe().then(() => render());
+    loadClaimMe().then(() => {
+      render();
+      // After claims list is rendered, load on-chain escrow statuses (non-blocking)
+      if (!state._claimEscrowStatusesFetching) {
+        state._claimEscrowStatusesFetching = true;
+        loadClaimEscrowStatuses().then(() => {
+          state._claimEscrowStatusesFetching = false;
+          render();
+        }).catch(() => { state._claimEscrowStatusesFetching = false; });
+      }
+    });
   } else if (page === 'activities') {
     loadActivities();
   } else if (page === 'profile') {
     loadClientProfile().then(() => render());
+  } else if (page === 'portfolio') {
+    loadPortfolioData().then(() => render());
   } else if (page === 'settings') {
     Promise.all([loadKYCStatus(), loadWalletAddresses()]).then(() => render());
   }
@@ -531,6 +559,7 @@ function initWallet() {
     onDisconnect: () => {
       state.auth = null;
       state.page = 'login';
+      state._planTokenAutoDetected = false;
       render();
     },
     onError: (msg) => {
@@ -595,12 +624,51 @@ async function fetchPlanRemaining() {
   if (data.vault?.underlying_symbol) state.vaultUnderlyingSymbol = data.vault.underlying_symbol;
 }
 
+/**
+ * Load per-recipient escrow claim status for the current plan.
+ * Queries escrow-balance for each recipient and sets state.recipientClaimStatus.
+ */
+async function loadRecipientClaimStatus() {
+  const walletId = (state.auth?.address && state.auth.address.startsWith('0x'))
+    ? state.auth.address
+    : ('0x' + (state.auth?.pubkey || ''));
+  if (!walletId || walletId === '0x') return;
+  const recipients = state.savedPlan?.recipients || [];
+  if (recipients.length === 0) return;
+  const headers = await getAuthHeadersAsync().catch(() => ({}));
+  const planIdParam = state.currentPlanId ? '&plan_id=' + encodeURIComponent(state.currentPlanId) : '';
+  const results = {};
+  await Promise.all(recipients.map(async (r, i) => {
+    const idx = i + 1; // 1-based recipient index
+    try {
+      const resp = await apiFetch(
+        API_BASE + '/claim/escrow-balance?walletId=' + encodeURIComponent(walletId) +
+        '&recipientIndex=' + idx + planIdParam,
+        { headers }
+      );
+      if (resp.ok) {
+        const data = await resp.json();
+        const allocated = parseFloat(data.allocatedShares || '0');
+        const remaining = parseFloat(data.remainingShares || '0');
+        results[idx] = {
+          allocated: data.allocatedShares || '0',
+          remaining: data.remainingShares || '0',
+          claimed: allocated > 0 && remaining <= 0,
+          configured: !!data.configured,
+        };
+      }
+    } catch (_) { /* non-fatal */ }
+  }));
+  state.recipientClaimStatus = results;
+}
+
 async function loadBoundFirms() {
   try {
     const addr = (state.auth?.address && state.auth.address.startsWith('0x')) ? state.auth.address : ('0x' + (state.auth?.pubkey || ''));
     if (!addr || addr === '0x') return;
     const headers = await getAuthHeadersAsync().catch(() => ({}));
-    const resp = await apiFetch(`${API_BASE}/release/status/${encodeURIComponent(addr)}`, { headers });
+    const qsPlan = state.currentPlanId ? `?plan_id=${encodeURIComponent(state.currentPlanId)}` : '';
+    const resp = await apiFetch(`${API_BASE}/release/status/${encodeURIComponent(addr)}${qsPlan}`, { headers });
     if (resp.ok) {
       const data = await resp.json();
       const firms = data.firms || [];
@@ -641,6 +709,45 @@ async function loadClientProfile() {
   } catch (_) {
     state.clientProfile = { address: state.auth?.address || '', name: '', email: '', phone: '', physical_address: '' };
   }
+}
+
+// ─── Portfolio Data Loading ───
+
+async function loadPortfolioData() {
+  state.portfolioLoading = true;
+  state.portfolioError = null;
+  render();
+  try {
+    const address = state.auth?.address || '';
+    const [portfolioResp, vaultsResp, historyResp, automationResp, analyticsResp, ccipResp] = await Promise.all([
+      fetch(`${API_BASE}/portfolio/${encodeURIComponent(address)}`).catch(() => null),
+      fetch(`${API_BASE}/portfolio/vaults`).catch(() => null),
+      fetch(`${API_BASE}/portfolio/${encodeURIComponent(address)}/history`).catch(() => null),
+      fetch(`${API_BASE}/portfolio/automation/status`).catch(() => null),
+      fetch(`${API_BASE}/portfolio/analytics/${encodeURIComponent(address)}`).catch(() => null),
+      fetch(`${API_BASE}/portfolio/ccip/status`).catch(() => null),
+    ]);
+    if (portfolioResp && portfolioResp.ok) state.portfolioData = await portfolioResp.json();
+    else state.portfolioData = null;
+    if (vaultsResp && vaultsResp.ok) state.portfolioVaults = await vaultsResp.json();
+    else state.portfolioVaults = null;
+    if (historyResp && historyResp.ok) state.portfolioHistory = await historyResp.json();
+    else state.portfolioHistory = null;
+    if (automationResp && automationResp.ok) state.portfolioAutomation = await automationResp.json();
+    else state.portfolioAutomation = null;
+    if (analyticsResp && analyticsResp.ok) state.portfolioAnalytics = await analyticsResp.json();
+    else state.portfolioAnalytics = null;
+    if (ccipResp && ccipResp.ok) state.portfolioCcip = await ccipResp.json();
+    else state.portfolioCcip = null;
+    // If all failed, try to extract error message
+    if (!state.portfolioData && !state.portfolioVaults && !state.portfolioHistory) {
+      const errBody = portfolioResp ? await portfolioResp.json().catch(() => null) : null;
+      state.portfolioError = (errBody && errBody.error) || 'Portfolio tracker not available';
+    }
+  } catch (err) {
+    state.portfolioError = err.message || 'Failed to load portfolio data';
+  }
+  state.portfolioLoading = false;
 }
 
 /** Get recipient address for a given chain from account (uses account.addresses from recipient-addresses API). */
@@ -782,6 +889,33 @@ async function loadWalletPlan() {
   try {
     const headers = await getAuthHeadersAsync().catch(() => ({}));
     if (!headers.Authorization && !headers['X-Client-Session']) return;
+
+    // On first load (no plan history yet), auto-detect the latest plan's token so the
+    // dropdown defaults to the most recent plan rather than hard-coded 'ETH'.
+    if (state.planHistory.length === 0 && !state._planTokenAutoDetected) {
+      state._planTokenAutoDetected = true;
+      try {
+        const allResp = await apiFetch(`${API_BASE}/wallet-plan/all`, { headers });
+        if (allResp.ok) {
+          const allData = await allResp.json();
+          const allCandidates = (allData.plans || []).filter(p => p && !p._migrated && !p._migratedToMulti && p.createdAt);
+          if (allCandidates.length > 0) {
+            allCandidates.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+            const latestToken = (allCandidates[0].token_symbol || '').toUpperCase();
+            const latestChain = (allCandidates[0].chain_key || 'ethereum').toLowerCase();
+            if (latestToken && latestToken !== state.globalTokenKey) {
+              state.globalTokenKey = latestToken;
+              state.globalChainKey = latestChain;
+              const tokenSelect = document.getElementById('global-token-select');
+              if (tokenSelect) tokenSelect.value = latestToken;
+              const chainSelect = document.getElementById('global-chain-select');
+              if (chainSelect) chainSelect.value = latestChain;
+            }
+          }
+        }
+      } catch { /* non-fatal: fall through to normal load */ }
+    }
+
     const chain = encodeURIComponent(state.globalChainKey || 'ethereum');
     const token = encodeURIComponent(state.globalTokenKey || 'ETH');
     const resp = await apiFetch(`${API_BASE}/wallet-plan?chain=${chain}&token=${token}`, { headers });
@@ -796,6 +930,7 @@ async function loadWalletPlan() {
         triggerConfig: p.triggerConfig || {},
         chain_key: p.chain_key || '',
         token_symbol: p.token_symbol || '',
+        plan_id: p.plan_id || null,
         createdAt: p.createdAt,
       } : null;
     }).filter(Boolean);
@@ -807,11 +942,14 @@ async function loadWalletPlan() {
         triggerConfig: data.plan.triggerConfig || {},
         chain_key: data.plan.chain_key || '',
         token_symbol: data.plan.token_symbol || '',
+        plan_id: data.plan.plan_id || null,
         createdAt: data.plan.createdAt,
       });
     }
     state.planHistory = allPlans;
     state.savedPlan = allPlans.length > 0 ? allPlans[0] : null;
+    // Populate currentPlanId from the most recent plan
+    state.currentPlanId = (allPlans.length > 0 && allPlans[0].plan_id) ? allPlans[0].plan_id : null;
   } catch { /* non-fatal */ }
 }
 
@@ -975,6 +1113,7 @@ function applyClaimDecryptedPayloadToState(parsedPayload) {
   if (parsed.releaseKey) state.releaseKey = parsed.releaseKey;
   if (parsed.walletId) state.walletId = parsed.walletId;
   if (parsed.pathIndex) state.pathIndex = parsed.pathIndex;
+  if (parsed.planId) state.claimPlanId = parsed.planId;
 
   if (parsed.releaseKey) {
     const targetAF = normalizeHexLike(parsed.releaseKey);
@@ -987,6 +1126,7 @@ function applyClaimDecryptedPayloadToState(parsedPayload) {
       state.selectedClaimItem = match;
       if (match.wallet_id) state.walletId = match.wallet_id;
       if (match.path_index) state.pathIndex = match.path_index;
+      if (match.plan_id) state.claimPlanId = match.plan_id;
     }
   }
 }
@@ -1192,6 +1332,7 @@ async function loadClaimMe() {
       state.selectedClaimItem = items[0];
       state.walletId = items[0].wallet_id;
       state.pathIndex = items[0].path_index;
+      state.claimPlanId = items[0].plan_id || null;
       const pref = items[0].admin_factor_hex || items[0].blob_hex || '';
       state.releaseKey = (isPlainClaimAdminFactor(pref) || isPlainClaimBlob(pref)) ? pref : '';
     } else if (items.length > 1) {
@@ -1199,6 +1340,7 @@ async function loadClaimMe() {
       state.selectedClaimItem = latest;
       state.walletId = latest.wallet_id;
       state.pathIndex = latest.path_index;
+      state.claimPlanId = latest.plan_id || null;
       const pref = latest.admin_factor_hex || latest.blob_hex || '';
       state.releaseKey = (isPlainClaimAdminFactor(pref) || isPlainClaimBlob(pref)) ? pref : '';
     } else {
@@ -1220,6 +1362,46 @@ async function loadClaimMe() {
   } catch (err) {
     state.error = err.message || 'Cannot reach server.';
   }
+}
+
+/**
+ * Load on-chain escrow claim status for all items in claimMeItems.
+ * Queries escrow-balance for each unique (walletId, pathIndex) and caches result.
+ */
+async function loadClaimEscrowStatuses() {
+  const items = state.claimMeItems || [];
+  if (items.length === 0) return;
+  const headers = await getAuthHeadersAsync().catch(() => ({}));
+  if (!headers.Authorization && !headers['X-Client-Session']) return;
+  const seen = new Set();
+  const queries = [];
+  for (const item of items) {
+    const wId = item.wallet_id || item.plan_wallet_id || '';
+    const pIdx = item.path_index;
+    if (!wId || pIdx == null) continue;
+    const key = `${wId}:${pIdx}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const planIdParam = item.plan_id ? '&plan_id=' + encodeURIComponent(item.plan_id) : '';
+    queries.push({ key, wId, pIdx, planIdParam });
+  }
+  const results = {};
+  await Promise.all(queries.map(async (q) => {
+    try {
+      const resp = await apiFetch(
+        API_BASE + '/claim/escrow-balance?walletId=' + encodeURIComponent(q.wId) +
+        '&recipientIndex=' + encodeURIComponent(q.pIdx) + q.planIdParam,
+        { headers }
+      );
+      if (resp.ok) {
+        const data = await resp.json();
+        const allocated = parseFloat(data.allocatedShares || '0');
+        const remaining = parseFloat(data.remainingShares || '0');
+        results[q.key] = { claimed: allocated > 0 && remaining <= 0, configured: !!data.configured };
+      }
+    } catch (_) { /* non-fatal */ }
+  }));
+  state.claimEscrowStatuses = results;
 }
 
 // ─── Renderers ───
@@ -1294,7 +1476,7 @@ function renderLogin() {
 }
 
 function renderNav() {
-  var labels = { wallet: T('wallet'), accounts: 'Linked Accounts', protection: T('protection'), claim: T('claim'), profile: T('profile') || 'Profile', settings: T('settings'), activities: 'Activities' };
+  var labels = { wallet: T('wallet'), accounts: 'Linked Accounts', protection: T('protection'), portfolio: 'Portfolio', claim: T('claim'), profile: T('profile') || 'Profile', settings: T('settings'), activities: 'Activities' };
   const items = PAGES.map((p) => {
     var label = labels[p];
     if (label === p) label = p.charAt(0).toUpperCase() + p.slice(1);
@@ -1304,6 +1486,531 @@ function renderNav() {
     return `<div class="nav-item ${state.page === p ? 'active' : ''}" data-page="${p}">${label}${pendingBadge}</div>`;
   }).join('');
   return `<div class="nav">${items}</div>`;
+}
+
+// ─── Portfolio Page (Chainlink Integration) ───
+
+const PORTFOLIO_SECTIONS = [
+  { key: 'overview', label: 'Overview' },
+  { key: 'vaults', label: 'Vaults' },
+  { key: 'history', label: 'History' },
+  { key: 'automation', label: 'Automation' },
+  { key: 'analytics', label: 'Analytics' },
+];
+
+function renderPortfolio() {
+  if (!state.auth) return `<div class="alert alert-warning">Connect your wallet to view your portfolio.</div>`;
+  if (state.portfolioLoading) return `<div style="padding:24px;text-align:center;">Loading portfolio data&hellip;</div>`;
+  if (state.portfolioError) return `<div class="alert alert-warning">${esc(state.portfolioError)}</div>`;
+  switch (state.portfolioSection) {
+    case 'vaults': return renderPortfolioVaults();
+    case 'history': return renderPortfolioHistory();
+    case 'automation': return renderPortfolioAutomation();
+    case 'analytics': return renderPortfolioAnalytics();
+    default: return renderPortfolioOverview();
+  }
+}
+
+function renderPortfolioOverview() {
+  const d = state.portfolioData;
+  if (!d) return `<div class="alert alert-warning">No portfolio data available. The Chainlink price-feed tracker contract may not be deployed yet.</div>`;
+  const totalUSD = parseFloat(d.totalValueUSD || '0').toFixed(2);
+  const positions = d.positions || [];
+  const posRows = positions.length > 0
+    ? positions.map(p => `
+        <tr>
+          <td style="font-family:monospace;font-size:12px;">${esc(p.vault)}</td>
+          <td style="text-align:right;">${esc(p.shares)}</td>
+          <td style="text-align:right;">${esc(p.assetsUnderlying)}</td>
+          <td style="text-align:right;">$${parseFloat(p.valueUSD || '0').toFixed(2)}</td>
+        </tr>`).join('')
+    : '<tr><td colspan="4" style="text-align:center;color:#888;">No positions found</td></tr>';
+
+  const chainlinkBadge = `<span style="display:inline-flex;align-items:center;gap:6px;background:#375bd2;color:#fff;padding:4px 10px;border-radius:12px;font-size:11px;font-weight:600;">
+    <svg width="14" height="16" viewBox="0 0 37.8 43.6" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M18.9 0l-4 2.3L4 8.6l-4 2.3v21.8l4 2.3 10.9 6.3 4 2.3 4-2.3L33.8 35l4-2.3V10.9l-4-2.3L22.9 2.3 18.9 0zm0 5.5l10.9 6.3v12.6L18.9 30.7 8 24.4V11.8l10.9-6.3z" fill="white"/></svg>
+    Chainlink Data Feeds</span>`;
+
+  const trackerLink = d.trackerContract
+    ? `<a href="https://sepolia.etherscan.io/address/${esc(d.trackerContract)}" target="_blank" rel="noopener" style="color:#375bd2;font-family:monospace;font-size:12px;word-break:break-all;">${esc(d.trackerContract)}</a>`
+    : '<span style="color:#888;">—</span>';
+
+  return `
+    <div style="padding:8px 0;">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px;">
+        <h3 style="margin:0;">Portfolio Overview</h3>
+        ${chainlinkBadge}
+      </div>
+      <p style="color:#888;font-size:13px;margin:0 0 16px;">Real-time on-chain portfolio valuation via Chainlink decentralized oracle network</p>
+
+      <div style="background:var(--bg-secondary,#1a1a2e);border-radius:8px;padding:20px;margin-bottom:16px;">
+        <div style="font-size:13px;color:#888;">Total Value (USD)</div>
+        <div style="font-size:28px;font-weight:700;margin-top:4px;">$${esc(totalUSD)}</div>
+        <div style="font-size:11px;color:#888;margin-top:6px;">Source: ${esc(d.source || 'Chainlink Data Feeds')} &middot; Network: ${esc(d.network || 'Ethereum Sepolia')}</div>
+      </div>
+
+      <!-- Chainlink Data Flow -->
+      <div style="background:linear-gradient(135deg,#1a1a2e 0%,#1e2a4a 100%);border:1px solid #375bd2;border-radius:8px;padding:16px;margin-bottom:16px;">
+        <div style="font-size:12px;font-weight:600;color:#375bd2;margin-bottom:10px;">DATA FLOW</div>
+        <div style="display:flex;align-items:center;gap:0;flex-wrap:wrap;font-size:12px;">
+          <div style="background:#2a3a5e;padding:8px 12px;border-radius:6px;text-align:center;">
+            <div style="color:#7b8ec9;font-size:10px;">Step 1</div>
+            <div style="color:#fff;font-weight:600;">Chainlink Oracles</div>
+            <div style="color:#888;font-size:10px;">Decentralized price feeds</div>
+          </div>
+          <div style="color:#375bd2;padding:0 8px;font-size:16px;">&rarr;</div>
+          <div style="background:#2a3a5e;padding:8px 12px;border-radius:6px;text-align:center;">
+            <div style="color:#7b8ec9;font-size:10px;">Step 2</div>
+            <div style="color:#fff;font-weight:600;">AggregatorV3</div>
+            <div style="color:#888;font-size:10px;">On-chain price contract</div>
+          </div>
+          <div style="color:#375bd2;padding:0 8px;font-size:16px;">&rarr;</div>
+          <div style="background:#2a3a5e;padding:8px 12px;border-radius:6px;text-align:center;">
+            <div style="color:#7b8ec9;font-size:10px;">Step 3</div>
+            <div style="color:#fff;font-weight:600;">PriceFeedTracker</div>
+            <div style="color:#888;font-size:10px;">Yault valuation engine</div>
+          </div>
+          <div style="color:#375bd2;padding:0 8px;font-size:16px;">&rarr;</div>
+          <div style="background:#2a3a5e;padding:8px 12px;border-radius:6px;text-align:center;">
+            <div style="color:#7b8ec9;font-size:10px;">Step 4</div>
+            <div style="color:#fff;font-weight:600;">Portfolio UI</div>
+            <div style="color:#888;font-size:10px;">Real-time display</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Contract Info -->
+      <div style="background:var(--bg-secondary,#1a1a2e);border-radius:8px;padding:14px;margin-bottom:16px;font-size:12px;">
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+          <span style="color:#888;">Tracker Contract</span>
+          <span>${trackerLink}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;">
+          <span style="color:#888;">Network</span>
+          <span style="color:#aaa;">${esc(d.network || 'Ethereum Sepolia')} (Chain ID: 11155111)</span>
+        </div>
+      </div>
+
+      <!-- Chainlink CCIP Cross-Chain Capability -->
+      ${(function() {
+        const ccip = state.portfolioCcip;
+        if (!ccip) return '';
+        const ccipContract = ccip.contractAddress
+          ? '<a href="https://sepolia.etherscan.io/address/' + esc(ccip.contractAddress) + '" target="_blank" rel="noopener" style="color:#375bd2;font-family:monospace;font-size:11px;">' + esc(ccip.contractAddress) + '</a>'
+          : '<span style="color:#888;">Pending deployment</span>';
+        const caps = (ccip.capabilities || []).map(function(c) {
+          return '<div style="background:#2a3a5e;border-radius:6px;padding:8px 12px;"><div style="color:#fff;font-weight:600;font-size:12px;">' + esc(c.type) + '</div><div style="color:#888;font-size:10px;">' + esc(c.description) + '</div></div>';
+        }).join('');
+        return '<div style="background:linear-gradient(135deg,#1a1a2e 0%,#1e2a4a 100%);border:1px solid #375bd2;border-radius:8px;padding:16px;margin-bottom:16px;">'
+          + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">'
+          + '<svg width="14" height="16" viewBox="0 0 37.8 43.6" fill="none"><path d="M18.9 0l-4 2.3L4 8.6l-4 2.3v21.8l4 2.3 10.9 6.3 4 2.3 4-2.3L33.8 35l4-2.3V10.9l-4-2.3L22.9 2.3 18.9 0zm0 5.5l10.9 6.3v12.6L18.9 30.7 8 24.4V11.8l10.9-6.3z" fill="#375bd2"/></svg>'
+          + '<span style="font-size:12px;font-weight:600;color:#375bd2;">CHAINLINK CCIP — CROSS-CHAIN CAPABILITY</span>'
+          + '</div>'
+          + '<p style="color:#aaa;font-size:12px;margin:0 0 12px;">' + esc(ccip.description || 'Cross-chain vault operations via Chainlink CCIP') + '</p>'
+          + '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px;">' + caps + '</div>'
+          + '<div style="font-size:11px;color:#888;">Contract: ' + ccipContract + ' &middot; ' + esc(ccip.deployed ? 'Deployed' : 'Requires CCIP Router') + '</div>'
+          + '</div>';
+      })()}
+
+      <h4 style="margin:0 0 8px;">Positions</h4>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;">
+        <thead>
+          <tr style="border-bottom:1px solid #333;">
+            <th style="text-align:left;padding:6px 4px;">Vault</th>
+            <th style="text-align:right;padding:6px 4px;">Shares</th>
+            <th style="text-align:right;padding:6px 4px;">Underlying</th>
+            <th style="text-align:right;padding:6px 4px;">Value (USD)</th>
+          </tr>
+        </thead>
+        <tbody>${posRows}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderPortfolioVaults() {
+  const v = state.portfolioVaults;
+  if (!v || !v.vaults) return `<div class="alert alert-warning">No vault data available.</div>`;
+
+  const vaultCards = v.vaults.map(vault => {
+    const feed = vault.chainlinkFeed || {};
+    const feedAddr = feed.address || '';
+    const feedLink = feedAddr
+      ? `<a href="https://sepolia.etherscan.io/address/${esc(feedAddr)}" target="_blank" rel="noopener" style="color:#375bd2;font-family:monospace;font-size:11px;word-break:break-all;">${esc(feedAddr)}</a>`
+      : '<span style="color:#888;">—</span>';
+    const vaultLink = `<a href="https://sepolia.etherscan.io/address/${esc(vault.address)}" target="_blank" rel="noopener" style="color:#375bd2;font-family:monospace;font-size:11px;word-break:break-all;">${esc(vault.address)}</a>`;
+
+    const updatedAt = feed.updatedAt ? new Date(feed.updatedAt * 1000) : null;
+    const staleSec = updatedAt ? Math.floor((Date.now() - updatedAt.getTime()) / 1000) : null;
+    const stalenessColor = staleSec !== null ? (staleSec < 3600 ? '#4caf50' : staleSec < 86400 ? '#ff9800' : '#f44336') : '#888';
+    const stalenessLabel = staleSec !== null
+      ? (staleSec < 60 ? `${staleSec}s ago` : staleSec < 3600 ? `${Math.floor(staleSec/60)}m ago` : staleSec < 86400 ? `${Math.floor(staleSec/3600)}h ago` : `${Math.floor(staleSec/86400)}d ago`)
+      : '—';
+
+    const rawPrice = feed.answer ? (parseInt(feed.answer) / Math.pow(10, vault.feedDecimals || 8)).toFixed(2) : null;
+
+    return `
+      <div style="background:var(--bg-secondary,#1a1a2e);border:1px solid #333;border-radius:8px;padding:16px;margin-bottom:12px;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;">
+          <div>
+            <div style="font-size:11px;color:#888;margin-bottom:2px;">Vault</div>
+            <div>${vaultLink}</div>
+          </div>
+          <div style="text-align:right;">
+            <div style="font-size:24px;font-weight:700;">${vault.priceUSD !== null ? '$' + parseFloat(vault.priceUSD).toFixed(2) : '<span style="color:#f88;">N/A</span>'}</div>
+            <div style="font-size:11px;color:#888;">Asset Price (USD)</div>
+          </div>
+        </div>
+
+        <div style="background:#111827;border:1px solid #375bd2;border-radius:6px;padding:12px;margin-bottom:0;">
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:10px;">
+            <svg width="12" height="14" viewBox="0 0 37.8 43.6" fill="none"><path d="M18.9 0l-4 2.3L4 8.6l-4 2.3v21.8l4 2.3 10.9 6.3 4 2.3 4-2.3L33.8 35l4-2.3V10.9l-4-2.3L22.9 2.3 18.9 0zm0 5.5l10.9 6.3v12.6L18.9 30.7 8 24.4V11.8l10.9-6.3z" fill="#375bd2"/></svg>
+            <span style="font-size:11px;font-weight:600;color:#375bd2;">CHAINLINK PRICE FEED</span>
+            ${feed.description ? `<span style="font-size:11px;color:#aaa;margin-left:4px;">${esc(feed.description)}</span>` : ''}
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;">
+            <div>
+              <div style="color:#888;margin-bottom:2px;">Feed Contract</div>
+              <div>${feedLink}</div>
+            </div>
+            <div>
+              <div style="color:#888;margin-bottom:2px;">Raw Answer</div>
+              <div style="color:#fff;font-family:monospace;">${feed.answer ? esc(feed.answer) : '—'}${rawPrice ? ` <span style="color:#888;">($${rawPrice})</span>` : ''}</div>
+            </div>
+            <div>
+              <div style="color:#888;margin-bottom:2px;">Round ID</div>
+              <div style="color:#fff;font-family:monospace;">${feed.roundId ? esc(feed.roundId) : '—'}</div>
+            </div>
+            <div>
+              <div style="color:#888;margin-bottom:2px;">Last Updated</div>
+              <div style="color:${stalenessColor};font-weight:600;">${stalenessLabel}</div>
+              ${updatedAt ? `<div style="color:#888;font-size:10px;">${updatedAt.toLocaleString()}</div>` : ''}
+            </div>
+            <div>
+              <div style="color:#888;margin-bottom:2px;">Feed Decimals</div>
+              <div style="color:#fff;">${vault.feedDecimals != null ? vault.feedDecimals : '—'}</div>
+            </div>
+            <div>
+              <div style="color:#888;margin-bottom:2px;">Answered In Round</div>
+              <div style="color:#fff;font-family:monospace;">${feed.answeredInRound ? esc(feed.answeredInRound) : '—'}</div>
+            </div>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+
+  const trackerLink = v.trackerContract
+    ? `<a href="https://sepolia.etherscan.io/address/${esc(v.trackerContract)}" target="_blank" rel="noopener" style="color:#375bd2;font-family:monospace;font-size:11px;">${esc(v.trackerContract)}</a>`
+    : '';
+
+  return `
+    <div style="padding:8px 0;">
+      <h3 style="margin:0 0 4px;">Registered Vaults</h3>
+      <p style="color:#888;font-size:13px;margin:0 0 8px;">Vaults with Chainlink price feeds (${v.count} total) &middot; ${esc(v.network || 'Ethereum Sepolia')} (Chain ID: ${v.chainId || 11155111})</p>
+      ${trackerLink ? `<p style="font-size:11px;color:#888;margin:0 0 16px;">Tracker Contract: ${trackerLink}</p>` : ''}
+      ${vaultCards}
+    </div>`;
+}
+
+function renderPortfolioHistory() {
+  const h = state.portfolioHistory;
+  if (!h || !h.snapshots) return `<div class="alert alert-warning">No snapshot history available.</div>`;
+  if (h.snapshots.length === 0) return `<div class="alert alert-warning">No NAV snapshots recorded yet.</div>`;
+  const rows = h.snapshots.map(snap => {
+    const date = new Date(snap.timestamp * 1000);
+    return `
+      <tr>
+        <td>${date.toLocaleDateString()} ${date.toLocaleTimeString()}</td>
+        <td style="text-align:right;">$${parseFloat(snap.totalValueUSD || '0').toFixed(2)}</td>
+        <td style="text-align:right;">${snap.vaultCount}</td>
+      </tr>`;
+  }).join('');
+  return `
+    <div style="padding:8px 0;">
+      <h3 style="margin:0 0 4px;">NAV Snapshot History</h3>
+      <p style="color:#888;font-size:13px;margin:0 0 16px;">${h.totalSnapshots} total snapshots</p>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;">
+        <thead>
+          <tr style="border-bottom:1px solid #333;">
+            <th style="text-align:left;padding:6px 4px;">Date</th>
+            <th style="text-align:right;padding:6px 4px;">Total Value (USD)</th>
+            <th style="text-align:right;padding:6px 4px;">Vault Count</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderPortfolioAutomation() {
+  const a = state.portfolioAutomation;
+  if (!a) return `<div class="alert alert-warning">Automation data not available.</div>`;
+
+  const chainlinkBadge = `<span style="display:inline-flex;align-items:center;gap:6px;background:#375bd2;color:#fff;padding:4px 10px;border-radius:12px;font-size:11px;font-weight:600;">
+    <svg width="14" height="16" viewBox="0 0 37.8 43.6" fill="none"><path d="M18.9 0l-4 2.3L4 8.6l-4 2.3v21.8l4 2.3 10.9 6.3 4 2.3 4-2.3L33.8 35l4-2.3V10.9l-4-2.3L22.9 2.3 18.9 0zm0 5.5l10.9 6.3v12.6L18.9 30.7 8 24.4V11.8l10.9-6.3z" fill="white"/></svg>
+    Chainlink Automation</span>`;
+
+  const contractLink = a.contractAddress
+    ? `<a href="https://sepolia.etherscan.io/address/${esc(a.contractAddress)}" target="_blank" rel="noopener" style="color:#375bd2;font-family:monospace;font-size:11px;word-break:break-all;">${esc(a.contractAddress)}</a>`
+    : '<span style="color:#888;">Not deployed</span>';
+
+  const statusDot = a.deployed
+    ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#4caf50;margin-right:6px;"></span>Deployed`
+    : `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#ff9800;margin-right:6px;"></span>Not Deployed`;
+
+  // How it works section
+  const howItWorks = `
+    <div style="background:linear-gradient(135deg,#1a1a2e 0%,#1e2a4a 100%);border:1px solid #375bd2;border-radius:8px;padding:16px;margin-bottom:16px;">
+      <div style="font-size:12px;font-weight:600;color:#375bd2;margin-bottom:10px;">HOW CHAINLINK AUTOMATION WORKS</div>
+      <div style="display:flex;align-items:center;gap:0;flex-wrap:wrap;font-size:12px;">
+        <div style="background:#2a3a5e;padding:8px 12px;border-radius:6px;text-align:center;">
+          <div style="color:#7b8ec9;font-size:10px;">Step 1</div>
+          <div style="color:#fff;font-weight:600;">Keeper Nodes</div>
+          <div style="color:#888;font-size:10px;">Monitor yield off-chain</div>
+        </div>
+        <div style="color:#375bd2;padding:0 8px;font-size:16px;">&rarr;</div>
+        <div style="background:#2a3a5e;padding:8px 12px;border-radius:6px;text-align:center;">
+          <div style="color:#7b8ec9;font-size:10px;">Step 2</div>
+          <div style="color:#fff;font-weight:600;">checkUpkeep()</div>
+          <div style="color:#888;font-size:10px;">Yield &gt; threshold?</div>
+        </div>
+        <div style="color:#375bd2;padding:0 8px;font-size:16px;">&rarr;</div>
+        <div style="background:#2a3a5e;padding:8px 12px;border-radius:6px;text-align:center;">
+          <div style="color:#7b8ec9;font-size:10px;">Step 3</div>
+          <div style="color:#fff;font-weight:600;">performUpkeep()</div>
+          <div style="color:#888;font-size:10px;">Auto-harvest on-chain</div>
+        </div>
+        <div style="color:#375bd2;padding:0 8px;font-size:16px;">&rarr;</div>
+        <div style="background:#2a3a5e;padding:8px 12px;border-radius:6px;text-align:center;">
+          <div style="color:#7b8ec9;font-size:10px;">Step 4</div>
+          <div style="color:#fff;font-weight:600;">Yield Collected</div>
+          <div style="color:#888;font-size:10px;">User receives harvest</div>
+        </div>
+      </div>
+    </div>`;
+
+  // Features list
+  const features = (a.features || [
+    'Periodic off-chain condition checks via Chainlink Automation nodes',
+    'Batch-harvest for multiple users in a single transaction',
+    'Configurable yield threshold and harvest intervals',
+    'On-chain harvest history for transparency',
+  ]).map(f => `<li style="margin-bottom:4px;color:#ccc;">${esc(f)}</li>`).join('');
+
+  // Config section (if deployed)
+  let configSection = '';
+  if (a.deployed && a.config) {
+    const c = a.config;
+    const forwarderLink = c.automationForwarder && c.automationForwarder !== '0x0000000000000000000000000000000000000000'
+      ? `<a href="https://sepolia.etherscan.io/address/${esc(c.automationForwarder)}" target="_blank" rel="noopener" style="color:#375bd2;font-family:monospace;font-size:11px;">${esc(c.automationForwarder)}</a>`
+      : '<span style="color:#888;">Not configured</span>';
+    configSection = `
+      <div style="background:var(--bg-secondary,#1a1a2e);border-radius:8px;padding:14px;margin-bottom:16px;font-size:12px;">
+        <div style="font-size:12px;font-weight:600;color:#aaa;margin-bottom:8px;">CONFIGURATION</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+          <div><span style="color:#888;">Min Yield Threshold</span><br><span style="color:#fff;font-family:monospace;">${esc(c.minYieldThreshold)}</span></div>
+          <div><span style="color:#888;">Max Batch Size</span><br><span style="color:#fff;">${c.maxBatchSize}</span></div>
+          <div><span style="color:#888;">Min Harvest Interval</span><br><span style="color:#fff;">${Math.floor(c.minHarvestInterval / 3600)}h</span></div>
+          <div><span style="color:#888;">Upkeep Needed</span><br><span style="color:${a.upkeepNeeded ? '#4caf50' : '#888'};font-weight:600;">${a.upkeepNeeded ? 'Yes' : 'No'}</span></div>
+        </div>
+        <div style="margin-top:8px;"><span style="color:#888;">Automation Forwarder</span><br>${forwarderLink}</div>
+      </div>`;
+  }
+
+  // Targets section (if deployed)
+  let targetsSection = '';
+  if (a.deployed && a.targets && a.targets.length > 0) {
+    const targetRows = a.targets.map(t => `
+      <tr>
+        <td style="font-family:monospace;font-size:11px;">${esc(t.vault).slice(0,10)}...${esc(t.vault).slice(-6)}</td>
+        <td style="font-family:monospace;font-size:11px;">${esc(t.user).slice(0,10)}...${esc(t.user).slice(-6)}</td>
+        <td style="text-align:center;"><span style="color:${t.active ? '#4caf50' : '#f44336'};">${t.active ? 'Active' : 'Inactive'}</span></td>
+        <td style="text-align:center;"><span style="color:${t.harvestable ? '#4caf50' : '#888'};">${t.harvestable ? 'Ready' : 'No'}</span></td>
+        <td style="text-align:right;font-family:monospace;">${esc(t.estimatedYield)}</td>
+      </tr>`).join('');
+    targetsSection = `
+      <div style="margin-bottom:16px;">
+        <div style="font-size:12px;font-weight:600;color:#aaa;margin-bottom:8px;">HARVEST TARGETS (${a.totalTargets})</div>
+        <table style="width:100%;border-collapse:collapse;font-size:12px;">
+          <thead><tr style="border-bottom:1px solid #333;">
+            <th style="text-align:left;padding:4px;">Vault</th>
+            <th style="text-align:left;padding:4px;">User</th>
+            <th style="text-align:center;padding:4px;">Status</th>
+            <th style="text-align:center;padding:4px;">Harvestable</th>
+            <th style="text-align:right;padding:4px;">Est. Yield</th>
+          </tr></thead>
+          <tbody>${targetRows}</tbody>
+        </table>
+      </div>`;
+  }
+
+  // Harvest history (if deployed)
+  let historySection = '';
+  if (a.deployed && a.history && a.history.length > 0) {
+    const histRows = a.history.map(h => {
+      const d = new Date(h.timestamp * 1000);
+      return `<tr>
+        <td>${d.toLocaleDateString()} ${d.toLocaleTimeString()}</td>
+        <td style="font-family:monospace;font-size:11px;">${esc(h.user).slice(0,10)}...${esc(h.user).slice(-6)}</td>
+        <td style="text-align:center;color:${h.success ? '#4caf50' : '#f44336'};">${h.success ? 'Success' : 'Failed'}</td>
+      </tr>`;
+    }).join('');
+    historySection = `
+      <div style="margin-bottom:16px;">
+        <div style="font-size:12px;font-weight:600;color:#aaa;margin-bottom:8px;">HARVEST HISTORY (${a.totalHarvests} total)</div>
+        <table style="width:100%;border-collapse:collapse;font-size:12px;">
+          <thead><tr style="border-bottom:1px solid #333;">
+            <th style="text-align:left;padding:4px;">Date</th>
+            <th style="text-align:left;padding:4px;">User</th>
+            <th style="text-align:center;padding:4px;">Result</th>
+          </tr></thead>
+          <tbody>${histRows}</tbody>
+        </table>
+      </div>`;
+  }
+
+  return `
+    <div style="padding:8px 0;">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px;">
+        <h3 style="margin:0;">Auto-Harvest</h3>
+        ${chainlinkBadge}
+      </div>
+      <p style="color:#888;font-size:13px;margin:0 0 16px;">Automated yield harvesting powered by Chainlink Automation (Keepers)</p>
+      ${howItWorks}
+      <div style="background:var(--bg-secondary,#1a1a2e);border-radius:8px;padding:14px;margin-bottom:16px;font-size:12px;">
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+          <span style="color:#888;">Contract</span>
+          <span>${contractLink}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+          <span style="color:#888;">Status</span>
+          <span style="font-size:12px;">${statusDot}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;">
+          <span style="color:#888;">Network</span>
+          <span style="color:#aaa;">Ethereum Sepolia</span>
+        </div>
+      </div>
+      <ul style="font-size:13px;padding-left:20px;margin-bottom:16px;">${features}</ul>
+      ${configSection}
+      ${targetsSection}
+      ${historySection}
+    </div>`;
+}
+
+function renderPortfolioAnalytics() {
+  const a = state.portfolioAnalytics;
+  if (!a) return `<div class="alert alert-warning">Analytics data not available.</div>`;
+
+  const chainlinkBadge = `<span style="display:inline-flex;align-items:center;gap:6px;background:#375bd2;color:#fff;padding:4px 10px;border-radius:12px;font-size:11px;font-weight:600;">
+    <svg width="14" height="16" viewBox="0 0 37.8 43.6" fill="none"><path d="M18.9 0l-4 2.3L4 8.6l-4 2.3v21.8l4 2.3 10.9 6.3 4 2.3 4-2.3L33.8 35l4-2.3V10.9l-4-2.3L22.9 2.3 18.9 0zm0 5.5l10.9 6.3v12.6L18.9 30.7 8 24.4V11.8l10.9-6.3z" fill="white"/></svg>
+    Chainlink Functions</span>`;
+
+  const contractLink = a.contractAddress
+    ? `<a href="https://sepolia.etherscan.io/address/${esc(a.contractAddress)}" target="_blank" rel="noopener" style="color:#375bd2;font-family:monospace;font-size:11px;word-break:break-all;">${esc(a.contractAddress)}</a>`
+    : '<span style="color:#888;">Not deployed</span>';
+
+  const statusDot = a.deployed
+    ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#4caf50;margin-right:6px;"></span>Deployed`
+    : `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#ff9800;margin-right:6px;"></span>Not Deployed`;
+
+  // How it works
+  const howItWorks = `
+    <div style="background:linear-gradient(135deg,#1a1a2e 0%,#1e2a4a 100%);border:1px solid #375bd2;border-radius:8px;padding:16px;margin-bottom:16px;">
+      <div style="font-size:12px;font-weight:600;color:#375bd2;margin-bottom:10px;">HOW CHAINLINK FUNCTIONS WORKS</div>
+      <div style="display:flex;align-items:center;gap:0;flex-wrap:wrap;font-size:12px;">
+        <div style="background:#2a3a5e;padding:8px 12px;border-radius:6px;text-align:center;">
+          <div style="color:#7b8ec9;font-size:10px;">Step 1</div>
+          <div style="color:#fff;font-weight:600;">Request</div>
+          <div style="color:#888;font-size:10px;">requestAnalytics()</div>
+        </div>
+        <div style="color:#375bd2;padding:0 8px;font-size:16px;">&rarr;</div>
+        <div style="background:#2a3a5e;padding:8px 12px;border-radius:6px;text-align:center;">
+          <div style="color:#7b8ec9;font-size:10px;">Step 2</div>
+          <div style="color:#fff;font-weight:600;">DON Execution</div>
+          <div style="color:#888;font-size:10px;">JS runs off-chain</div>
+        </div>
+        <div style="color:#375bd2;padding:0 8px;font-size:16px;">&rarr;</div>
+        <div style="background:#2a3a5e;padding:8px 12px;border-radius:6px;text-align:center;">
+          <div style="color:#7b8ec9;font-size:10px;">Step 3</div>
+          <div style="color:#fff;font-weight:600;">Callback</div>
+          <div style="color:#888;font-size:10px;">Results on-chain</div>
+        </div>
+        <div style="color:#375bd2;padding:0 8px;font-size:16px;">&rarr;</div>
+        <div style="background:#2a3a5e;padding:8px 12px;border-radius:6px;text-align:center;">
+          <div style="color:#7b8ec9;font-size:10px;">Step 4</div>
+          <div style="color:#fff;font-weight:600;">Analytics</div>
+          <div style="color:#888;font-size:10px;">Risk, APY, Sharpe</div>
+        </div>
+      </div>
+    </div>`;
+
+  // Metrics cards
+  const metrics = a.metrics || [
+    { key: 'riskScore', label: 'Risk Score', description: 'Portfolio risk assessment (0-100%)' },
+    { key: 'apyBps', label: 'APY', description: 'Annualized yield in basis points' },
+    { key: 'sharpeRatio', label: 'Sharpe Ratio', description: 'Risk-adjusted return metric' },
+    { key: 'maxDrawdown', label: 'Max Drawdown', description: 'Largest peak-to-trough decline' },
+  ];
+
+  let analyticsCards = '';
+  if (a.deployed && a.analytics && a.analytics.valid) {
+    const an = a.analytics;
+    analyticsCards = `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+        <div style="background:var(--bg-secondary,#1a1a2e);border-radius:8px;padding:16px;text-align:center;">
+          <div style="font-size:11px;color:#888;">Risk Score</div>
+          <div style="font-size:24px;font-weight:700;color:${an.riskScore < 30 ? '#4caf50' : an.riskScore < 70 ? '#ff9800' : '#f44336'};">${an.riskScore.toFixed(1)}%</div>
+        </div>
+        <div style="background:var(--bg-secondary,#1a1a2e);border-radius:8px;padding:16px;text-align:center;">
+          <div style="font-size:11px;color:#888;">APY</div>
+          <div style="font-size:24px;font-weight:700;color:#4caf50;">${an.apyPercent.toFixed(2)}%</div>
+        </div>
+        <div style="background:var(--bg-secondary,#1a1a2e);border-radius:8px;padding:16px;text-align:center;">
+          <div style="font-size:11px;color:#888;">Sharpe Ratio</div>
+          <div style="font-size:24px;font-weight:700;">${an.sharpeRatio.toFixed(3)}</div>
+        </div>
+        <div style="background:var(--bg-secondary,#1a1a2e);border-radius:8px;padding:16px;text-align:center;">
+          <div style="font-size:11px;color:#888;">Max Drawdown</div>
+          <div style="font-size:24px;font-weight:700;color:#f44336;">${an.maxDrawdownPercent.toFixed(2)}%</div>
+        </div>
+      </div>`;
+  } else {
+    // Show metric descriptions when no live data
+    const metricCards = metrics.map(m => `
+      <div style="background:var(--bg-secondary,#1a1a2e);border:1px solid #333;border-radius:8px;padding:16px;text-align:center;">
+        <div style="font-size:11px;color:#888;">${esc(m.label)}</div>
+        <div style="font-size:24px;font-weight:700;color:#555;">—</div>
+        <div style="font-size:10px;color:#666;margin-top:4px;">${esc(m.description)}</div>
+      </div>`).join('');
+    analyticsCards = `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">${metricCards}</div>
+      <div style="background:#1a1a2e;border:1px dashed #375bd2;border-radius:8px;padding:12px;text-align:center;font-size:12px;color:#7b8ec9;margin-bottom:16px;">
+        Analytics data will populate once Chainlink Functions DON is configured and analytics are requested for this wallet.
+      </div>`;
+  }
+
+  return `
+    <div style="padding:8px 0;">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px;">
+        <h3 style="margin:0;">Portfolio Analytics</h3>
+        ${chainlinkBadge}
+      </div>
+      <p style="color:#888;font-size:13px;margin:0 0 16px;">Off-chain portfolio risk analysis powered by Chainlink Functions (DON)</p>
+      ${howItWorks}
+      <div style="background:var(--bg-secondary,#1a1a2e);border-radius:8px;padding:14px;margin-bottom:16px;font-size:12px;">
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+          <span style="color:#888;">Contract</span>
+          <span>${contractLink}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+          <span style="color:#888;">Status</span>
+          <span style="font-size:12px;">${statusDot}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;">
+          <span style="color:#888;">Network</span>
+          <span style="color:#aaa;">Ethereum Sepolia</span>
+        </div>
+      </div>
+      ${analyticsCards}
+    </div>`;
 }
 
 // ─── Asset Plan (Protection) Page ───
@@ -1360,6 +2067,7 @@ function renderProtectionOverview() {
         <h3>Latest Plan <span style="font-size:12px;color:var(--text-muted);font-weight:400;">[${esc(planChain)} — ${esc(planToken)}]</span>
           ${state.savedPlan.createdAt ? `<span style="font-size:11px;color:var(--text-muted);font-weight:400;margin-left:8px;">${new Date(state.savedPlan.createdAt).toLocaleDateString()}</span>` : ''}
         </h3>
+        ${state.currentPlanId ? `<div style="font-size:11px;color:var(--text-muted);margin:-8px 0 12px 0;font-family:monospace;">Plan ID: ${esc(state.currentPlanId)}</div>` : ''}
         ${isBalanceZero ? '<p style="font-size:14px;color:var(--warning);margin:0 0 10px 0;">This plan has been fully claimed.</p>' : ''}
         <h4 style="margin-top:12px;">Recipients</h4>
         <table class="table" style="width:100%;margin-top:8px;">
@@ -1367,19 +2075,29 @@ function renderProtectionOverview() {
             <tr>
               <th style="text-align:left;padding:8px;border-bottom:1px solid var(--border);">Recipient</th>
               <th style="text-align:right;padding:8px;border-bottom:1px solid var(--border);">Share</th>
+              <th style="text-align:center;padding:8px;border-bottom:1px solid var(--border);">Status</th>
               ${!isBalanceZero ? '<th style="text-align:right;padding:8px;border-bottom:1px solid var(--border);">Action</th>' : ''}
             </tr>
           </thead>
           <tbody>
-            ${(state.savedPlan.recipients || []).map((r, i) => `
+            ${(state.savedPlan.recipients || []).map((r, i) => {
+              const rIdx = i + 1;
+              const claimSt = (state.recipientClaimStatus || {})[rIdx];
+              const isClaimed = claimSt && claimSt.claimed;
+              return `
               <tr>
                 <td style="padding:8px;border-bottom:1px solid var(--border);">${esc(r.label || r.name || '')}</td>
                 <td style="padding:8px;border-bottom:1px solid var(--border);text-align:right;">${r.percentage}%</td>
+                <td style="padding:8px;border-bottom:1px solid var(--border);text-align:center;">
+                  ${isClaimed
+                    ? '<span class="badge badge-active" style="background:rgba(34,197,94,0.15);color:#16a34a;font-weight:600;">Claimed</span>'
+                    : (claimSt ? '<span class="badge badge-muted">Pending</span>' : '<span style="font-size:11px;color:var(--text-muted);">—</span>')}
+                </td>
                 ${!isBalanceZero ? `<td style="padding:8px;border-bottom:1px solid var(--border);text-align:right;">
-                  <button type="button" class="btn btn-secondary btn-sm" data-fix-enc-index="${i + 1}" title="Regenerate credentials for this recipient (fix wrong x25519 encryption)">Re-Generate Credential</button>
+                  ${!isClaimed ? `<button type="button" class="btn btn-secondary btn-sm" data-fix-enc-index="${rIdx}" title="Regenerate credentials for this recipient (fix wrong x25519 encryption)">Re-Generate Credential</button>` : ''}
                 </td>` : ''}
-              </tr>
-            `).join('')}
+              </tr>`;
+            }).join('')}
           </tbody>
         </table>
         ${(state.savedPlan.triggerConfig.legalAuthority?.selectedFirms || []).length > 0 ? `
@@ -1421,6 +2139,7 @@ function renderProtectionOverview() {
                 <span style="font-size:13px;font-weight:500;">Plan #${state.planHistory.length - idx}</span>
                 <span style="font-size:11px;color:var(--text-muted);">${esc(dateStr)}</span>
               </div>
+              ${plan.plan_id ? `<div style="font-size:10px;color:var(--text-muted);margin-bottom:4px;font-family:monospace;">ID: ${esc(plan.plan_id)}</div>` : ''}
               <div style="font-size:12px;color:var(--text-secondary);">
                 <span>Trigger: ${esc(ptText)}</span>
                 <span style="margin-left:16px;">Recipients: ${esc(recipientNames || 'None')}</span>
@@ -2065,6 +2784,7 @@ const WALLET_SECTIONS = [
   { key: 'balances', label: 'Balances' },
   { key: 'send', label: 'Transfer' },
   { key: 'vault', label: 'Vault' },
+  { key: 'crosschain', label: 'Cross-Chain' },
   { key: 'deniable', label: 'Deniable Accounts' },
 ];
 
@@ -2487,6 +3207,7 @@ function renderWallet() {
   const sectionContent =
     state.walletSection === 'balances' ? renderWalletBalancesSection() :
     state.walletSection === 'send' ? renderWalletSendSection() :
+    state.walletSection === 'crosschain' ? renderCrossChainSection() :
     state.walletSection === 'deniable' ? renderDeniableAccounts() :
     renderVaultSection();
 
@@ -2510,6 +3231,157 @@ function renderWallet() {
       </div>
     </div>
   `;
+}
+
+// ─── Cross-Chain Bridge (Chainlink CCIP) ───
+
+function renderCrossChainSection() {
+  const ccip = state.portfolioCcip;
+  // If data not yet loaded, trigger load
+  if (!ccip && !state._ccipLoading) {
+    state._ccipLoading = true;
+    fetch(`${API_BASE}/portfolio/ccip/status`).then(r => r.ok ? r.json() : null).then(data => {
+      state.portfolioCcip = data;
+      state._ccipLoading = false;
+      render();
+    }).catch(() => { state._ccipLoading = false; });
+    return `<div style="padding:24px;text-align:center;">Loading cross-chain data&hellip;</div>`;
+  }
+  if (!ccip) return `<div class="alert alert-warning">Cross-chain bridge data not available.</div>`;
+
+  const chainlinkBadge = `<span style="display:inline-flex;align-items:center;gap:6px;background:#375bd2;color:#fff;padding:4px 10px;border-radius:12px;font-size:11px;font-weight:600;">
+    <svg width="14" height="16" viewBox="0 0 37.8 43.6" fill="none"><path d="M18.9 0l-4 2.3L4 8.6l-4 2.3v21.8l4 2.3 10.9 6.3 4 2.3 4-2.3L33.8 35l4-2.3V10.9l-4-2.3L22.9 2.3 18.9 0zm0 5.5l10.9 6.3v12.6L18.9 30.7 8 24.4V11.8l10.9-6.3z" fill="white"/></svg>
+    Chainlink CCIP</span>`;
+
+  const contractLink = ccip.contractAddress
+    ? `<a href="https://sepolia.etherscan.io/address/${esc(ccip.contractAddress)}" target="_blank" rel="noopener" style="color:#375bd2;font-family:monospace;font-size:11px;word-break:break-all;">${esc(ccip.contractAddress)}</a>`
+    : '<span style="color:#888;">Pending deployment (requires CCIP Router)</span>';
+
+  const statusDot = ccip.deployed
+    ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#4caf50;margin-right:6px;"></span>Deployed`
+    : `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#ff9800;margin-right:6px;"></span>Pending`;
+
+  // Data flow
+  const dataFlow = `
+    <div style="background:linear-gradient(135deg,#1a1a2e 0%,#1e2a4a 100%);border:1px solid #375bd2;border-radius:8px;padding:16px;margin-bottom:16px;">
+      <div style="font-size:12px;font-weight:600;color:#375bd2;margin-bottom:10px;">HOW CHAINLINK CCIP WORKS</div>
+      <div style="display:flex;align-items:center;gap:0;flex-wrap:wrap;font-size:12px;">
+        <div style="background:#2a3a5e;padding:8px 12px;border-radius:6px;text-align:center;">
+          <div style="color:#7b8ec9;font-size:10px;">Step 1</div>
+          <div style="color:#fff;font-weight:600;">Source Chain</div>
+          <div style="color:#888;font-size:10px;">Initiate message</div>
+        </div>
+        <div style="color:#375bd2;padding:0 8px;font-size:16px;">&rarr;</div>
+        <div style="background:#2a3a5e;padding:8px 12px;border-radius:6px;text-align:center;">
+          <div style="color:#7b8ec9;font-size:10px;">Step 2</div>
+          <div style="color:#fff;font-weight:600;">CCIP Router</div>
+          <div style="color:#888;font-size:10px;">Chainlink network</div>
+        </div>
+        <div style="color:#375bd2;padding:0 8px;font-size:16px;">&rarr;</div>
+        <div style="background:#2a3a5e;padding:8px 12px;border-radius:6px;text-align:center;">
+          <div style="color:#7b8ec9;font-size:10px;">Step 3</div>
+          <div style="color:#fff;font-weight:600;">Dest Chain</div>
+          <div style="color:#888;font-size:10px;">Execute action</div>
+        </div>
+      </div>
+    </div>`;
+
+  // Capabilities
+  const capabilities = (ccip.capabilities || [
+    { type: 'Attestation Relay', description: 'Forward release attestations between chains for multi-chain asset plans' },
+    { type: 'Position Sync', description: 'Broadcast vault position data across chains for unified portfolio view' },
+    { type: 'Deposit Intent', description: 'Signal cross-chain deposit intentions — deposit on chain A, receive shares on chain B' },
+  ]);
+
+  const capCards = capabilities.map(c => `
+    <div style="background:var(--bg-secondary,#1a1a2e);border:1px solid #333;border-radius:8px;padding:14px;">
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+        <svg width="12" height="14" viewBox="0 0 37.8 43.6" fill="none"><path d="M18.9 0l-4 2.3L4 8.6l-4 2.3v21.8l4 2.3 10.9 6.3 4 2.3 4-2.3L33.8 35l4-2.3V10.9l-4-2.3L22.9 2.3 18.9 0zm0 5.5l10.9 6.3v12.6L18.9 30.7 8 24.4V11.8l10.9-6.3z" fill="#375bd2"/></svg>
+        <span style="font-size:13px;font-weight:600;color:#fff;">${esc(c.type)}</span>
+      </div>
+      <p style="font-size:12px;color:#aaa;margin:0;">${esc(c.description)}</p>
+    </div>`).join('');
+
+  // Supported chains (if deployed)
+  let chainsSection = '';
+  if (ccip.deployed && ccip.supportedChains && ccip.supportedChains.length > 0) {
+    const chainRows = ccip.supportedChains.map(ch => {
+      const lastMsg = ch.lastMessageTime ? new Date(ch.lastMessageTime * 1000).toLocaleString() : 'Never';
+      return `<tr>
+        <td style="font-family:monospace;font-size:11px;">${esc(ch.chainSelector)}</td>
+        <td style="font-family:monospace;font-size:11px;">${esc(ch.remoteBridge).slice(0,10)}...${esc(ch.remoteBridge).slice(-6)}</td>
+        <td style="text-align:center;color:${ch.allowed ? '#4caf50' : '#f44336'};">${ch.allowed ? 'Active' : 'Disabled'}</td>
+        <td style="text-align:right;font-size:11px;">${lastMsg}</td>
+      </tr>`;
+    }).join('');
+    chainsSection = `
+      <div style="margin-bottom:16px;">
+        <div style="font-size:12px;font-weight:600;color:#aaa;margin-bottom:8px;">SUPPORTED CHAINS (${ccip.totalChains})</div>
+        <table style="width:100%;border-collapse:collapse;font-size:12px;">
+          <thead><tr style="border-bottom:1px solid #333;">
+            <th style="text-align:left;padding:4px;">Chain Selector</th>
+            <th style="text-align:left;padding:4px;">Remote Bridge</th>
+            <th style="text-align:center;padding:4px;">Status</th>
+            <th style="text-align:right;padding:4px;">Last Message</th>
+          </tr></thead>
+          <tbody>${chainRows}</tbody>
+        </table>
+      </div>`;
+  }
+
+  // Stats (if deployed)
+  let statsSection = '';
+  if (ccip.deployed) {
+    statsSection = `
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px;">
+        <div style="background:var(--bg-secondary,#1a1a2e);border-radius:8px;padding:14px;text-align:center;">
+          <div style="font-size:11px;color:#888;">Outgoing Messages</div>
+          <div style="font-size:20px;font-weight:700;">${ccip.outgoingMessages || 0}</div>
+        </div>
+        <div style="background:var(--bg-secondary,#1a1a2e);border-radius:8px;padding:14px;text-align:center;">
+          <div style="font-size:11px;color:#888;">Connected Chains</div>
+          <div style="font-size:20px;font-weight:700;">${ccip.totalChains || 0}</div>
+        </div>
+        <div style="background:var(--bg-secondary,#1a1a2e);border-radius:8px;padding:14px;text-align:center;">
+          <div style="font-size:11px;color:#888;">Gas Limit</div>
+          <div style="font-size:20px;font-weight:700;">${ccip.config ? ccip.config.ccipGasLimit.toLocaleString() : '—'}</div>
+        </div>
+      </div>`;
+  }
+
+  return `
+    <div style="padding:8px 0;">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px;">
+        <h3 style="margin:0;">Cross-Chain Bridge</h3>
+        ${chainlinkBadge}
+      </div>
+      <p style="color:#888;font-size:13px;margin:0 0 16px;">Cross-chain vault operations powered by Chainlink CCIP (Cross-Chain Interoperability Protocol)</p>
+
+      ${dataFlow}
+
+      <div style="background:var(--bg-secondary,#1a1a2e);border-radius:8px;padding:14px;margin-bottom:16px;font-size:12px;">
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+          <span style="color:#888;">Contract</span>
+          <span>${contractLink}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+          <span style="color:#888;">Status</span>
+          <span style="font-size:12px;">${statusDot}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;">
+          <span style="color:#888;">Network</span>
+          <span style="color:#aaa;">Ethereum Sepolia</span>
+        </div>
+      </div>
+
+      ${statsSection}
+      ${chainsSection}
+
+      <div style="font-size:12px;font-weight:600;color:#aaa;margin-bottom:8px;">CAPABILITIES</div>
+      <div style="display:grid;grid-template-columns:1fr;gap:10px;margin-bottom:16px;">
+        ${capCards}
+      </div>
+    </div>`;
 }
 
 // ─── Accounts Page (Related Accounts, Invite, Transfer) ───
@@ -2648,6 +3520,118 @@ function renderAccounts() {
 
 // ─── Claim Flow (Step Wizard) ───
 
+/**
+ * Step 0: Claims list — shows all released claims as cards.
+ * Claimed items show "Claimed" badge; unclaimed show "Claim" button to enter the flow.
+ */
+function renderClaimsList() {
+  const rawItems = (state.claimMeItems || [])
+    .map((it, sourceIdx) => ({ it, sourceIdx }))
+    .filter(({ it }) => it.admin_factor_hex || it.blob_hex || getEncryptedAdminPayloadFromItem(it));
+  const seenAF = new Set();
+  const deduped = [];
+  for (const entry of rawItems) {
+    const item = entry.it;
+    const enc = getEncryptedAdminPayloadFromItem(item);
+    const afKey = item.admin_factor_hex || item.blob_hex || (enc ? (typeof enc === 'string' ? enc : JSON.stringify(enc)) : '');
+    if (afKey && seenAF.has(afKey)) continue;
+    if (afKey) seenAF.add(afKey);
+    deduped.push(entry);
+  }
+  const claims = deduped.map((entry, i) => {
+    const item = entry.it;
+    const wId = (item.wallet_id || item.plan_wallet_id || '').toLowerCase().replace(/^0x/i, '');
+    const pIdx = item.path_index || '';
+    const pId = item.plan_id || null;
+    // Check session-level claimed tracking
+    const isClaimedSession = (state.claimedItems || []).some(c =>
+      c.wallet_id === wId && c.path_index == pIdx && (c.plan_id || null) === pId
+    );
+    // Check on-chain escrow status (persists across sessions)
+    const escrowKey = `${item.wallet_id || item.plan_wallet_id || ''}:${pIdx}`;
+    const escrowStatus = (state.claimEscrowStatuses || {})[escrowKey];
+    const isClaimedOnChain = escrowStatus && escrowStatus.claimed;
+    const isClaimed = isClaimedSession || isClaimedOnChain;
+    return {
+      item,
+      sourceIdx: entry.sourceIdx,
+      label: item.label || ('Release #' + (item.path_index || '')),
+      walletId: item.wallet_id || item.plan_wallet_id || '',
+      pathIndex: pIdx,
+      af: item.admin_factor_hex || item.blob_hex || '',
+      hasEncryptedPayload: !!getEncryptedAdminPayloadFromItem(item),
+      created_at: item.created_at || null,
+      isClaimed,
+      _idx: i,
+    };
+  });
+  const pending = claims.filter(c => !c.isClaimed);
+  const claimed = claims.filter(c => c.isClaimed);
+
+  if (claims.length === 0 && !state.loading) {
+    return `
+      <div class="card" style="text-align:center;padding:40px 20px;">
+        <div style="font-size:32px;margin-bottom:12px;">📭</div>
+        <h3 style="margin-bottom:8px;">No Claims</h3>
+        <p style="color:var(--text-muted);font-size:14px;margin-bottom:16px;">No released claims found for your address.</p>
+        <button type="button" class="btn btn-secondary" id="btnClaimLoadMe" style="font-size:13px;">Refresh</button>
+      </div>
+    `;
+  }
+
+  return `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <h2 style="margin:0;">Your Claims</h2>
+      <button type="button" class="btn btn-secondary" id="btnClaimLoadMe" style="font-size:12px;padding:4px 12px;">Refresh</button>
+    </div>
+    ${state.loading ? '<p style="color:var(--text-muted);font-size:13px;">Loading claims...</p>' : ''}
+    ${pending.length > 0 ? `
+      <div style="display:flex;flex-direction:column;gap:12px;margin-bottom:${claimed.length > 0 ? '24px' : '0'};">
+        ${pending.map(c => `
+          <div class="card" style="padding:16px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+            <div style="flex:1;min-width:180px;">
+              <div style="font-weight:600;font-size:15px;margin-bottom:4px;">${esc(c.label)}</div>
+              <div style="font-size:12px;color:var(--text-muted);">
+                ${c.walletId ? '<span class="mono">' + esc(c.walletId.substring(0, 14)) + '...</span>' : ''}
+                ${c.created_at ? ' &middot; ' + esc(new Date(typeof c.created_at === 'number' ? c.created_at : c.created_at).toLocaleDateString()) : ''}
+              </div>
+              ${c.hasEncryptedPayload && !c.af ? '<div style="font-size:11px;color:var(--warning);margin-top:4px;">Encrypted — decrypt required</div>' : ''}
+            </div>
+            <button type="button" class="btn btn-primary btn-claim-start" data-claim-idx="${c._idx}" data-source-idx="${c.sourceIdx}" data-af="${esc(c.af || '')}" data-wallet-id="${esc(c.walletId || '')}" data-path-index="${esc(String(c.pathIndex || ''))}">Claim</button>
+          </div>
+        `).join('')}
+      </div>
+    ` : ''}
+    ${claimed.length > 0 ? `
+      <div style="margin-top:${pending.length > 0 ? '0' : '0'};">
+        <h3 style="font-size:14px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:12px;">Completed</h3>
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          ${claimed.map(c => {
+            const claimedEntry = (state.claimedItems || []).find(ci =>
+              ci.wallet_id === c.walletId.toLowerCase().replace(/^0x/i, '') && ci.path_index == c.pathIndex
+            );
+            const txHash = claimedEntry?.txHash || '';
+            return `
+            <div class="card" style="padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;opacity:0.7;">
+              <div style="flex:1;min-width:180px;">
+                <div style="font-weight:500;font-size:14px;">${esc(c.label)}</div>
+                <div style="font-size:12px;color:var(--text-muted);">
+                  ${c.walletId ? '<span class="mono">' + esc(c.walletId.substring(0, 14)) + '...</span>' : ''}
+                  ${c.created_at ? ' &middot; ' + esc(new Date(typeof c.created_at === 'number' ? c.created_at : c.created_at).toLocaleDateString()) : ''}
+                </div>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px;">
+                ${txHash ? `<a href="https://sepolia.etherscan.io/tx/${esc(txHash)}" target="_blank" rel="noopener" style="font-size:11px;color:var(--text-muted);" class="mono">${esc(txHash.substring(0, 10))}...</a>` : ''}
+                <span style="font-size:12px;color:#16a34a;font-weight:600;background:rgba(34,197,94,0.12);padding:2px 10px;border-radius:12px;">Claimed</span>
+              </div>
+            </div>`;
+          }).join('')}
+        </div>
+      </div>
+    ` : ''}
+  `;
+}
+
 function renderClaimStepIndicator() {
   const steps = [
     { num: 1, label: 'Credentials' },
@@ -2691,17 +3675,27 @@ function renderClaimStep1() {
       sourceIdx: entry.sourceIdx,
     });
   }
-  const merged = meItems.map((entry, i) => ({
-    item: entry.item,
-    sourceIdx: entry.sourceIdx,
-    label: entry.item.label || ('Release #' + (entry.item.path_index || '')),
-    walletId: entry.item.wallet_id || entry.item.plan_wallet_id || '',
-    pathIndex: entry.item.path_index || '',
-    af: entry.item.admin_factor_hex || entry.item.blob_hex || '',
-    hasEncryptedPayload: !!getEncryptedAdminPayloadFromItem(entry.item),
-    created_at: entry.item.created_at || null,
-    _mergedIdx: i,
-  }));
+  const merged = meItems.map((entry, i) => {
+    const wId = (entry.item.wallet_id || entry.item.plan_wallet_id || '').toLowerCase().replace(/^0x/i, '');
+    const pIdx = entry.item.path_index || '';
+    const pId = entry.item.plan_id || null;
+    const isClaimed = (state.claimedItems || []).some(c =>
+      c.wallet_id === wId && c.path_index == pIdx && (c.plan_id || null) === pId
+    );
+    return {
+      item: entry.item,
+      sourceIdx: entry.sourceIdx,
+      label: entry.item.label || ('Release #' + (entry.item.path_index || '')),
+      walletId: entry.item.wallet_id || entry.item.plan_wallet_id || '',
+      planId: pId,
+      pathIndex: pIdx,
+      af: entry.item.admin_factor_hex || entry.item.blob_hex || '',
+      hasEncryptedPayload: !!getEncryptedAdminPayloadFromItem(entry.item),
+      created_at: entry.item.created_at || null,
+      isClaimed,
+      _mergedIdx: i,
+    };
+  });
   const hasReleases = merged.length > 0;
   // Pre-fill admin_factor from selected release if available
   const prefilledAF = (isPlainClaimAdminFactor(state.releaseKey) || isPlainClaimBlob(state.releaseKey)) ? state.releaseKey : '';
@@ -2712,57 +3706,54 @@ function renderClaimStep1() {
     ? (typeof selectedEncryptedPayload === 'string' ? selectedEncryptedPayload : JSON.stringify(selectedEncryptedPayload))
     : '';
 
+  const selectedLabel = state.selectedClaimItem?.label || 'Release';
   return `
+    <div style="margin-bottom:12px;">
+      <button type="button" class="btn btn-secondary" id="btnClaimBackToList" style="font-size:12px;padding:4px 12px;">← Back to Claims</button>
+    </div>
     <div class="card">
-      <h2>Enter Credentials</h2>
+      <h2>Claim: ${esc(selectedLabel)}</h2>
       <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px;">
         Enter the 3 factors from your credential NFT to view your balance and claim assets.
       </p>
       ${hasReleases ? `
         <div style="margin-bottom:20px;padding:12px;background:var(--surface);border-radius:8px;border:1px solid var(--border);">
-          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;">
-            <div style="font-size:12px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;">Your Releases</div>
-            <button type="button" class="btn btn-secondary" id="btnClaimLoadMe" style="font-size:11px;padding:2px 8px;">Refresh Releases</button>
-          </div>
+          <div style="font-size:12px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;margin-bottom:4px;">Your Releases</div>
+          ${merged[0] ? `<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;">
+            <span>Owner: ${esc((merged[0].walletId || '').substring(0, 14))}${(merged[0].walletId || '').length > 14 ? '...' : ''}</span>
+            ${merged[0].planId ? '<span style="margin-left:12px;">Plan: ' + esc(merged[0].planId) + '</span>' : ''}
+          </div>` : ''}
           ${merged.map((item, i) => `
-            <div style="padding:6px 0;${i > 0 ? 'border-top:1px solid var(--border);' : ''}">
+            <div style="padding:6px 0;${i > 0 ? 'border-top:1px solid var(--border);' : ''}display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
               <span style="font-weight:500;">${esc(item.label || 'Release')}</span>
-              <span style="font-size:11px;color:var(--text-muted);margin-left:8px;">${item.walletId ? esc(item.walletId.substring(0, 12)) + '...' : ''}</span>
-              ${item.created_at ? '<span style="font-size:10px;color:var(--text-muted);margin-left:8px;">' + esc(new Date(typeof item.created_at === 'number' ? item.created_at : item.created_at).toLocaleString()) + '</span>' : ''}
-              ${!item.af && !item.hasEncryptedPayload ? '<span style="font-size:11px;color:var(--text-muted);margin-left:8px;">Pending</span>' : ''}
-              ${item.hasEncryptedPayload ? '<span style="font-size:11px;color:var(--warning);margin-left:8px;">Encrypted (decrypt required)</span>' : ''}
-              <button type="button" class="btn btn-secondary btn-use-release-af" data-release-idx="${item._mergedIdx}" data-release-source-idx="${item.sourceIdx}" data-release-af="${esc(item.af || '')}" data-wallet-id="${esc(item.walletId || '')}" data-path-index="${esc(String(item.pathIndex || ''))}" style="margin-left:8px;font-size:11px;padding:2px 8px;">Use</button>
+              ${item.created_at ? '<span style="font-size:10px;color:var(--text-muted);">' + esc(new Date(typeof item.created_at === 'number' ? item.created_at : item.created_at).toLocaleString()) + '</span>' : ''}
+              ${item.isClaimed ? '<span style="font-size:11px;color:var(--success);font-weight:600;background:rgba(34,197,94,0.1);padding:1px 6px;border-radius:4px;">Claimed</span>' : ''}
+              ${!item.isClaimed && !item.af && !item.hasEncryptedPayload ? '<span style="font-size:11px;color:var(--text-muted);">Pending</span>' : ''}
+              ${!item.isClaimed && item.hasEncryptedPayload ? '<span style="font-size:11px;color:var(--warning);">Encrypted (decrypt required)</span>' : ''}
             </div>
           `).join('')}
         </div>
       ` : !state.loading ? `
         <div style="margin-bottom:16px;padding:12px;background:var(--surface);border-radius:8px;border:1px solid var(--border);text-align:center;">
           <p style="font-size:13px;color:var(--text-muted);margin-bottom:8px;">No releases found for your address.</p>
-          <button type="button" class="btn btn-secondary" id="btnClaimLoadMe" style="font-size:12px;">Refresh Releases</button>
         </div>
       ` : ''}
+      <div class="form-group">
+        <label class="form-label">AdminFactor (hex)</label>
+        <input type="text" class="form-input" id="claimAdminFactor" placeholder="64-character hex from the credential NFT" value="${esc(prefilledAF)}"/>
+        <input type="hidden" id="claimDecryptedPayload" value="${esc(state.claimDecryptedPayloadText || '')}"/>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;">
+          <p class="form-hint" style="margin:0;">Mnemonic and passphrase must be entered manually.${canPromptDecrypt ? ' Or decrypt directly via Yallet.' : ''}</p>
+          ${canPromptDecrypt ? `<button type="button" class="btn btn-secondary" id="btnClaimDecryptWithYallet" style="font-size:12px;" data-encrypted='${esc(selectedEncryptedPayloadText)}' ${state.claimDecryptLoading ? 'disabled' : ''}>${state.claimDecryptLoading ? 'Decrypting...' : 'Decrypt via Yallet'}</button>` : ''}
+        </div>
+      </div>
       <div class="form-group">
         <label class="form-label">Mnemonic (24 words)</label>
         <textarea class="form-input form-textarea" id="claimMnemonic" rows="2" placeholder="Enter your 24-word mnemonic from the credential NFT...">${esc(state.mnemonic || '')}</textarea>
       </div>
       <div class="form-group">
-        <label class="form-label">Decrypted Payload (JSON, optional)</label>
-        <textarea class="form-input form-textarea" id="claimDecryptedPayload" rows="4" placeholder='Paste Yallet/wasm decrypted JSON (or {"content":"...json..."})'>${esc(state.claimDecryptedPayloadText || '')}</textarea>
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;">
-          <p class="form-hint" style="margin:0;">Auto-fills AdminFactor into claim state. Mnemonic and passphrase must be entered manually.${canPromptDecrypt ? ' Or decrypt directly via Yallet.' : ''}</p>
-          <div style="display:flex;align-items:center;gap:8px;">
-            ${canPromptDecrypt ? `<button type="button" class="btn btn-secondary" id="btnClaimDecryptWithYallet" style="font-size:12px;" data-encrypted='${esc(selectedEncryptedPayloadText)}' ${state.claimDecryptLoading ? 'disabled' : ''}>${state.claimDecryptLoading ? 'Decrypting...' : 'Decrypt via Yallet'}</button>` : ''}
-            <button type="button" class="btn btn-secondary" id="btnClaimApplyDecryptedPayload" style="font-size:12px;">Auto Fill</button>
-          </div>
-        </div>
-      </div>
-      <div class="form-group">
         <label class="form-label">Passphrase</label>
         <input type="password" class="form-input" id="claimPassphrase" placeholder="Passphrase from the credential NFT" value="${esc(state.passphrase || '')}" />
-      </div>
-      <div class="form-group">
-        <label class="form-label">AdminFactor (hex)</label>
-        <textarea class="form-input form-textarea" id="claimAdminFactor" rows="2" placeholder="64-character hex from the credential NFT">${esc(prefilledAF)}</textarea>
       </div>
       <button type="button" class="btn btn-primary" id="btnClaimContinue3F" ${state.loading ? 'disabled' : ''}>
         ${state.loading ? 'Deriving wallet...' : 'Continue'}
@@ -2830,6 +3821,13 @@ function renderClaimStep2() {
     balanceDisplay = `
       <div class="card" style="margin-top:16px;">
         <p style="color:var(--text-muted);font-size:13px;">Escrow not configured. ${esc(eb.error || '')}</p>
+      </div>
+    `;
+  } else if (state.escrowBalanceError) {
+    balanceDisplay = `
+      <div class="card" style="margin-top:16px;border:1px solid rgba(239,68,68,0.3);">
+        <p style="color:#dc2626;font-size:13px;margin-bottom:8px;">Failed to load balance: ${esc(state.escrowBalanceError)}</p>
+        <button type="button" class="btn btn-secondary btn-sm" id="btnRetryEscrowBalance">Retry</button>
       </div>
     `;
   } else {
@@ -2932,21 +3930,36 @@ function renderClaimStep3() {
         ${isSubmitted ? `<div style="margin-top:8px;"><span style="color:var(--text-muted);font-size:13px;">Tx Hash</span><br/>${explorerLink}</div>` : ''}
       </div>
       <p style="font-size:13px;color:var(--text-secondary);">${esc(r.message || '')}</p>
-      <button class="btn btn-secondary" id="btnClaimBackToBalance" style="margin-top:12px;">Back</button>
+      <div style="display:flex;gap:8px;margin-top:12px;">
+        ${isSubmitted ? `<button class="btn btn-primary" id="btnClaimDone">Done</button>` : ''}
+        <button class="btn btn-secondary" id="btnClaimBackToBalance">${isSubmitted ? 'View Balance' : 'Back'}</button>
+      </div>
     </div>
   `;
 }
 
 function renderClaim() {
-  const step = state.claimStep || 1;
+  const step = state.claimStep || 0;
+
+  // Step 0: Claims list (no step indicator)
+  if (step === 0) {
+    return renderClaimsList();
+  }
+
+  // Steps 1-3: Credential → Balance → Transfer flow (with step indicator)
   let stepContent = '';
   if (step === 1) stepContent = renderClaimStep1();
   else if (step === 2) stepContent = renderClaimStep2();
   else if (step === 3) stepContent = renderClaimStep3();
   else stepContent = renderClaimStep1();
 
+  const claimError = state.error
+    ? `<div class="alert alert-danger" style="margin-top:12px;padding:12px 16px;border-radius:8px;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);color:#dc2626;font-size:13px;">${esc(state.error)}</div>`
+    : '';
+
   return `
     ${renderClaimStepIndicator()}
+    ${claimError}
     <div style="margin-top:16px;">${stepContent}</div>
   `;
 }
@@ -3297,6 +4310,7 @@ function render() {
     case 'wallet': content = renderWallet(); break;
     case 'accounts': content = renderAccounts(); break;
     case 'protection': content = renderProtection(); break;
+    case 'portfolio': content = renderPortfolio(); break;
     case 'claim': content = renderClaim(); break;
     case 'activities': content = renderWalletActivities(); break;
     case 'profile': content = renderProfileContent(); break;
@@ -3306,6 +4320,7 @@ function render() {
 
   if (state.page !== 'protection') {
     state.planRemaining = null;
+    state.recipientClaimStatus = {};
   }
   // Pages with left sidebar (same layout as Wallet)
   if (state.page === 'wallet' && state.auth) {
@@ -3313,19 +4328,22 @@ function render() {
       state.walletSection === 'balances' ? renderWalletBalancesSection() :
       state.walletSection === 'send' ? renderWalletSendSection() :
       state.walletSection === 'activities' ? renderWalletActivities() :
+      state.walletSection === 'crosschain' ? renderCrossChainSection() :
       state.walletSection === 'deniable' ? renderDeniableAccounts() :
       renderVaultSection();
     app.innerHTML = renderPageWithSidebar(WALLET_SECTIONS, 'wallet-section', state.walletSection, sectionContent);
   } else if (state.page === 'accounts' && state.auth) {
     const sectionContent = state.accountsSection === 'invite' ? renderAccountsInviteSection() : renderAccountsRelatedSection();
     app.innerHTML = renderPageWithSidebar(ACCOUNTS_SECTIONS, 'accounts-section', state.accountsSection, sectionContent);
+  } else if (state.page === 'portfolio' && state.auth) {
+    app.innerHTML = renderPageWithSidebar(PORTFOLIO_SECTIONS, 'portfolio-section', state.portfolioSection, renderPortfolio());
   } else if (state.page === 'protection') {
     if (state.protectionStep !== 'overview') {
       state.planRemaining = null;
     }
     if (state.protectionStep === 'overview' && state.savedPlan && state.planRemaining === null && !state._planRemainingFetching) {
       state._planRemainingFetching = true;
-      fetchPlanRemaining().then(() => {
+      Promise.all([fetchPlanRemaining(), loadRecipientClaimStatus()]).then(() => {
         state._planRemainingFetching = false;
         render();
       }).catch(() => {
@@ -3396,7 +4414,8 @@ async function handleFixEncryptionClick(e) {
   fixBtn.disabled = true;
   try {
     const authHeaders = await getAuthHeadersAsync();
-    const configResp = await apiFetch(`${API_BASE}/release/configure?wallet_id=${encodeURIComponent(walletId)}`, { headers: authHeaders });
+    const qsPlan = state.currentPlanId ? `&plan_id=${encodeURIComponent(state.currentPlanId)}` : '';
+    const configResp = await apiFetch(`${API_BASE}/release/configure?wallet_id=${encodeURIComponent(walletId)}${qsPlan}`, { headers: authHeaders });
     if (!configResp.ok) {
       showToast('Release config not found for this wallet', 'error');
       return;
@@ -3489,6 +4508,7 @@ async function handleFixEncryptionClick(e) {
       body: JSON.stringify({
         wallet_id: walletId,
         authority_id: authorityId,
+        plan_id: state.currentPlanId || null,
         recipient_index: recipientIndex,
         recipient_solana_address: prepared.recipientSolanaAddress || solanaAddress,
         rwa_upload_body: prepared.body,
@@ -3641,7 +4661,7 @@ function attachAppEvents() {
         const resp = await apiFetch(`${API_BASE}/trigger/simulate-chainlink`, {
           method: 'POST',
           headers: { ...headers, 'Content-Type': 'application/json' },
-          body: '{}',
+          body: JSON.stringify({ plan_id: state.currentPlanId || undefined }),
         });
         if (!resp.ok) {
           const err = await resp.json().catch(() => ({}));
@@ -4189,6 +5209,11 @@ function attachAppEvents() {
           const err = await resp.json().catch(() => ({}));
           throw new Error(err.error || 'Failed to save plan');
         }
+        const planResp = await resp.json().catch(() => ({}));
+        // Capture plan_id from server response for plan-scoped bindings/triggers/delivery
+        if (planResp.plan_id) {
+          state.currentPlanId = planResp.plan_id;
+        }
         showToast('Plan saved', 'success');
         reportActivity('plan_created', null, null, {
           detail: (planData.recipients || []).length + ' recipients',
@@ -4584,7 +5609,7 @@ function attachAppEvents() {
                       const configureResp = await fetch(`${API_BASE}/release/configure`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json', ...authHeaders },
-                        body: JSON.stringify({ wallet_id: walletId, paths, trigger_type: triggerType }),
+                        body: JSON.stringify({ wallet_id: walletId, paths, trigger_type: triggerType, plan_id: state.currentPlanId || undefined }),
                       });
                       if (!configureResp.ok) {
                         const cfgErr = await configureResp.json().catch(() => ({}));
@@ -4603,6 +5628,7 @@ function attachAppEvents() {
                                 wallet_id: walletId,
                                 authority_id: oracleAuthority.id,
                                 encrypted_packages: packagesPerPath,
+                                plan_id: state.currentPlanId || undefined,
                               }),
                             });
                             if (distResp.ok) {
@@ -4703,7 +5729,7 @@ function attachAppEvents() {
         const resp = await apiFetch(`${API_BASE}/trigger/simulate-chainlink`, {
           method: 'POST',
           headers: { ...headers, 'Content-Type': 'application/json' },
-          body: '{}',
+          body: JSON.stringify({ plan_id: state.currentPlanId || undefined }),
         });
         if (!resp.ok) {
           const err = await resp.json().catch(() => ({}));
@@ -4894,6 +5920,7 @@ function attachAppEvents() {
           paths,
           trigger_type: plan?.triggerType || 'legal_event',
           authority_id: state.selectedFirms[0]?.id,
+          plan_id: state.currentPlanId || undefined,
         };
         if (plan?.triggerType === 'activity_drand' && plan.tlockMonths) {
           body.tlock_duration_months = plan.tlockMonths;
@@ -4926,6 +5953,7 @@ function attachAppEvents() {
               wallet_id: walletId,
               authority_id: firm.id,
               encrypted_packages: [pkg],
+              plan_id: state.currentPlanId || undefined,
             }),
           });
           if (!distResp.ok) {
@@ -5126,6 +6154,14 @@ function attachAppEvents() {
   app.querySelectorAll('[data-accounts-section]').forEach((el) => {
     el.addEventListener('click', () => {
       state.accountsSection = el.dataset.accountsSection;
+      render();
+    });
+  });
+
+  // Portfolio left sidebar (Overview / Vaults / History)
+  app.querySelectorAll('[data-portfolio-section]').forEach((el) => {
+    el.addEventListener('click', () => {
+      state.portfolioSection = el.dataset.portfolioSection;
       render();
     });
   });
@@ -5772,12 +6808,52 @@ function attachAppEvents() {
       state.loading = true;
       state.claimMeItems = [];
       state.selectedClaimItem = null;
+      state.claimEscrowStatuses = {};
       render();
       await loadClaimMe();
       state.loading = false;
       render();
+      // Reload on-chain escrow statuses (non-blocking)
+      loadClaimEscrowStatuses().then(() => render()).catch(() => {});
     });
   }
+  // Claims list → "Claim" button: select item and enter step 1
+  document.querySelectorAll('.btn-claim-start').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const rows = state.claimMeItems || [];
+      const sourceIdx = parseInt(btn.getAttribute('data-source-idx'), 10);
+      const walletId = (btn.getAttribute('data-wallet-id') || '').trim();
+      const pathIndex = parseInt(btn.getAttribute('data-path-index') || '', 10);
+      const af = (btn.getAttribute('data-af') || '').trim();
+      let selected = Number.isFinite(sourceIdx) && sourceIdx >= 0 && sourceIdx < rows.length
+        ? rows[sourceIdx] : null;
+      if (!selected) {
+        selected = rows.find((it) => {
+          const itWallet = String(it.wallet_id || it.plan_wallet_id || '').trim();
+          if (walletId && itWallet !== walletId) return false;
+          if (Number.isFinite(pathIndex) && pathIndex >= 0) return Number(it.path_index || 0) === pathIndex;
+          return true;
+        }) || null;
+      }
+      if (selected) {
+        state.selectedClaimItem = selected;
+        state.walletId = selected.wallet_id || selected.plan_wallet_id || walletId || '';
+        state.pathIndex = Number.isFinite(pathIndex) && pathIndex >= 0 ? pathIndex : (selected.path_index || 1);
+        state.claimPlanId = selected.plan_id || null;
+        if (af) state.releaseKey = af;
+      }
+      // Reset credential fields
+      state.mnemonic = '';
+      state.passphrase = '';
+      state.claimDecryptedPayloadText = '';
+      state.derivedKeys = null;
+      state.escrowBalance = null;
+      state.transferResult = null;
+      state.claimStep = 1;
+      render();
+    });
+  });
+
   // Plan releases: Load my releases (same as above, refreshes claimPlanReleases too)
   const btnClaimLoadMePlan = document.getElementById('btnClaimLoadMePlan');
   if (btnClaimLoadMePlan) {
@@ -5790,70 +6866,6 @@ function attachAppEvents() {
       render();
     });
   }
-  // "Use" button for releases → fill AdminFactor field + set walletId/pathIndex
-  document.querySelectorAll('.btn-use-release-af').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const rows = state.claimMeItems || [];
-      const idxRaw = btn.getAttribute('data-release-idx');
-      const sourceIdxRaw = btn.getAttribute('data-release-source-idx');
-      if (idxRaw != null) {
-        const idx = parseInt(idxRaw, 10);
-        const sourceIdx = parseInt(sourceIdxRaw, 10);
-        const walletId = (btn.getAttribute('data-wallet-id') || '').trim();
-        const pathIndexRaw = (btn.getAttribute('data-path-index') || '').trim();
-        const pathIndex = parseInt(pathIndexRaw, 10);
-        let selected = Number.isFinite(sourceIdx) && sourceIdx >= 0 && sourceIdx < rows.length
-          ? rows[sourceIdx]
-          : null;
-        if (!selected) {
-          selected = rows.find((it) => {
-            if (walletId && String(it.wallet_id || it.plan_wallet_id || '').trim() !== walletId) return false;
-            if (Number.isFinite(pathIndex) && pathIndex >= 0) return Number(it.path_index || 0) === pathIndex;
-            return true;
-          }) || (Number.isFinite(idx) && idx >= 0 && idx < rows.length ? rows[idx] : null);
-        }
-      if (selected) {
-          if (selected && selected.wallet_id) state.walletId = selected.wallet_id;
-          if (selected && selected.path_index != null) state.pathIndex = selected.path_index;
-          state.selectedClaimItem = selected;
-          const pref = selected ? (selected.admin_factor_hex || selected.blob_hex || '') : '';
-          state.releaseKey = (isPlainClaimAdminFactor(pref) || isPlainClaimBlob(pref)) ? pref : '';
-          const afInput = document.getElementById('claimAdminFactor');
-          if (afInput) afInput.value = state.releaseKey || '';
-          const encrypted = getEncryptedAdminPayloadFromItem(selected);
-          if (encrypted) {
-            state.claimDecryptedPayloadText = (typeof encrypted === 'string')
-              ? encrypted
-              : JSON.stringify(encrypted, null, 2);
-            const payloadInput = document.getElementById('claimDecryptedPayload');
-            if (payloadInput) payloadInput.value = state.claimDecryptedPayloadText;
-          }
-          if (encrypted && !state.releaseKey) {
-            showToast('Release selected. Please click "Decrypt via Yallet" to fill AdminFactor.', 'info');
-          }
-          render();
-          return;
-        }
-      }
-      const af = btn.getAttribute('data-release-af') || '';
-      if (af) {
-        const afInput = document.getElementById('claimAdminFactor');
-        if (afInput) afInput.value = (isPlainClaimAdminFactor(af) || isPlainClaimBlob(af)) ? af : '';
-        state.releaseKey = (isPlainClaimAdminFactor(af) || isPlainClaimBlob(af)) ? af : '';
-        // Find matching item from claimMeItems to set walletId/pathIndex
-        const match = rows.find(it =>
-          (it.blob_hex === af || it.admin_factor_hex === af)
-        );
-        if (match) {
-          state.walletId = match.wallet_id || '';
-          state.pathIndex = match.path_index || 1;
-        }
-      } else {
-        // No plain AF in the button payload and no selectable row found.
-        showToast('Release not found. Please refresh releases and try again.', 'error');
-      }
-    });
-  });
   const claimDecryptedPayloadInput = document.getElementById('claimDecryptedPayload');
   if (claimDecryptedPayloadInput) {
     claimDecryptedPayloadInput.addEventListener('input', () => {
@@ -6185,17 +7197,28 @@ function attachAppEvents() {
         state.pathClaimError = null;
         // Fetch escrow balance (non-blocking — show step 2 immediately, balance loads async)
         state.escrowBalance = null;
+        state.escrowBalanceError = null;
         state.claimStep = 2;
         // Query escrow balance in background
         if (state.walletId) {
           const recipientIdx = state.pathIndex || 1;
+          const claimPlanIdParam = state.claimPlanId ? '&plan_id=' + encodeURIComponent(state.claimPlanId) : '';
           getAuthHeadersAsync().catch(() => ({})).then(function (claimAuthHeaders) {
-            apiFetch(API_BASE + '/claim/escrow-balance?walletId=' + encodeURIComponent(state.walletId) + '&recipientIndex=' + encodeURIComponent(recipientIdx), { headers: claimAuthHeaders })
-              .then(r => r.ok ? r.json() : null)
-              .then(data => {
-                if (data) { state.escrowBalance = data; render(); }
+            apiFetch(API_BASE + '/claim/escrow-balance?walletId=' + encodeURIComponent(state.walletId) + '&recipientIndex=' + encodeURIComponent(recipientIdx) + claimPlanIdParam, { headers: claimAuthHeaders })
+              .then(function(r) {
+                if (r.ok) return r.json();
+                return r.json().catch(function() { return {}; }).then(function(body) {
+                  throw new Error(body.error || body.detail || ('HTTP ' + r.status));
+                });
               })
-              .catch(() => {});
+              .then(function(data) {
+                if (data) { state.escrowBalance = data; state.escrowBalanceError = null; render(); }
+              })
+              .catch(function(err) {
+                console.error('[claim] escrow-balance failed:', err.message || err);
+                state.escrowBalanceError = err.message || 'Failed to load balance';
+                render();
+              });
           });
         }
       } catch (err) {
@@ -6206,11 +7229,58 @@ function attachAppEvents() {
       }
     });
   }
+  // Retry escrow balance fetch
+  const btnRetryEscrowBalance = document.getElementById('btnRetryEscrowBalance');
+  if (btnRetryEscrowBalance) {
+    btnRetryEscrowBalance.addEventListener('click', function () {
+      state.escrowBalanceError = null;
+      state.escrowBalance = null;
+      render();
+      if (state.walletId) {
+        const recipientIdx = state.pathIndex || 1;
+        const claimPlanIdParam = state.claimPlanId ? '&plan_id=' + encodeURIComponent(state.claimPlanId) : '';
+        getAuthHeadersAsync().catch(function () { return {}; }).then(function (claimAuthHeaders) {
+          apiFetch(API_BASE + '/claim/escrow-balance?walletId=' + encodeURIComponent(state.walletId) + '&recipientIndex=' + encodeURIComponent(recipientIdx) + claimPlanIdParam, { headers: claimAuthHeaders })
+            .then(function(r) {
+              if (r.ok) return r.json();
+              return r.json().catch(function() { return {}; }).then(function(body) {
+                throw new Error(body.error || body.detail || ('HTTP ' + r.status));
+              });
+            })
+            .then(function(data) {
+              if (data) { state.escrowBalance = data; state.escrowBalanceError = null; render(); }
+            })
+            .catch(function(err) {
+              console.error('[claim] escrow-balance retry failed:', err.message || err);
+              state.escrowBalanceError = err.message || 'Failed to load balance';
+              render();
+            });
+        });
+      }
+    });
+  }
+  // Back to claims list from step 1
+  const btnClaimBackToList = document.getElementById('btnClaimBackToList');
+  if (btnClaimBackToList) {
+    btnClaimBackToList.addEventListener('click', () => {
+      state.claimStep = 0;
+      state.selectedClaimItem = null;
+      state.releaseKey = '';
+      state.mnemonic = '';
+      state.passphrase = '';
+      state.claimDecryptedPayloadText = '';
+      state.derivedKeys = null;
+      state.escrowBalance = null;
+      state.transferResult = null;
+      render();
+    });
+  }
   // Back button from step 2 → step 1
   const btnClaimBack = document.getElementById('btnClaimBack');
   if (btnClaimBack) {
     btnClaimBack.addEventListener('click', () => {
       state.claimStep = 1;
+      state.error = null;
       render();
     });
   }
@@ -6396,6 +7466,18 @@ function attachAppEvents() {
             throw new Error('Failed to derive plan owner address from mnemonic+passphrase+adminFactor.');
           }
 
+          // Verify derived address matches the plan owner wallet
+          const expectedWallet = (state.walletId || '').toLowerCase().replace(/^0x/, '');
+          const derivedWallet = ownerAddr.toLowerCase().replace(/^0x/, '');
+          if (expectedWallet && derivedWallet && expectedWallet !== derivedWallet) {
+            throw new Error(
+              'Credential mismatch: the mnemonic + passphrase + AdminFactor you provided derive a different wallet address (' +
+              ownerAddr.slice(0, 10) + '…) than the plan owner (' +
+              (state.walletId.startsWith('0x') ? state.walletId.slice(0, 10) : '0x' + state.walletId.slice(0, 8)) +
+              '…). Please go back and verify your credentials.'
+            );
+          }
+
           const claimEscrowHeaders = await getAuthHeadersAsync().catch(function () { return {}; });
           const cfg = await window.YaultEscrow.getConfig(API_BASE, { headers: claimEscrowHeaders });
           if (!cfg.enabled) throw new Error('Escrow not configured on server');
@@ -6508,6 +7590,48 @@ function attachAppEvents() {
         state.loading = false;
         render();
       }
+    });
+  }
+  // Done from step 3 → mark claimed → back to claims list (step 0)
+  const btnClaimDone = document.getElementById('btnClaimDone');
+  if (btnClaimDone) {
+    btnClaimDone.addEventListener('click', () => {
+      // Mark this claim item as claimed so it shows "Claimed" badge in the list
+      if (state.transferResult && state.transferResult.txHash) {
+        state.claimedItems.push({
+          wallet_id: (state.walletId || '').toLowerCase().replace(/^0x/i, ''),
+          path_index: state.pathIndex,
+          plan_id: state.claimPlanId || null,
+          txHash: state.transferResult.txHash,
+          claimedAt: Date.now(),
+        });
+      }
+      // Reset claim flow back to claims list
+      state.claimStep = 0;
+      state.transferResult = null;
+      state.escrowBalance = null;
+      state.releaseKey = '';
+      state.mnemonic = '';
+      state.passphrase = '';
+      state.claimDecryptedPayloadText = '';
+      state.derivedKeys = null;
+      state.selectedClaimItem = null;
+      // Immediately mark this item as claimed in escrow status cache
+      if (state.selectedClaimItem) {
+        const selItem = state.selectedClaimItem;
+        const selWId = selItem.wallet_id || selItem.plan_wallet_id || '';
+        const selPIdx = selItem.path_index;
+        if (selWId && selPIdx != null) {
+          const eKey = `${selWId}:${selPIdx}`;
+          state.claimEscrowStatuses = state.claimEscrowStatuses || {};
+          state.claimEscrowStatuses[eKey] = { claimed: true, configured: true };
+        }
+      }
+      // Reload releases
+      loadClaimMe().then(() => {
+        render();
+        loadClaimEscrowStatuses().then(() => render()).catch(() => {});
+      });
     });
   }
   // Back from step 3 → step 2
