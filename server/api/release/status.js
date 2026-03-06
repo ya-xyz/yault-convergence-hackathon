@@ -22,6 +22,10 @@ function normalizeAddr(addr) {
 router.get('/:wallet_id', async (req, res) => {
   try {
     const { wallet_id } = req.params;
+    const plan_id = req.query.plan_id ? String(req.query.plan_id).trim() : null;
+    if (!plan_id) {
+      return res.status(400).json({ error: 'plan_id query is required' });
+    }
     if (!wallet_id) {
       return res.status(400).json({ error: 'wallet_id is required' });
     }
@@ -39,7 +43,9 @@ router.get('/:wallet_id', async (req, res) => {
 
     // #8 FIX: Use findByWallet instead of findAll() + filter for better performance
     const walletBindingsAll = await db.bindings.findByWallet(wallet_id);
-    const walletBindings = walletBindingsAll.filter(b => b.status === 'active');
+    const walletBindings = walletBindingsAll.filter(
+      (b) => b.status === 'active' && b.plan_id === plan_id
+    );
 
     if (walletBindings.length === 0) {
       return res.json({ configured: false, firms: [] });

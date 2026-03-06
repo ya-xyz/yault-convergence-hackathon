@@ -217,7 +217,7 @@ describe('deliverRwaPackageForRecipient', () => {
 
     const result = await deliverRwaPackageForRecipient(noManifestBinding, 0);
     expect(result.delivered).toBe(true);
-    expect(getManifestTxIdFromRegistry).toHaveBeenCalledWith('wallet1', 'auth1');
+    expect(getManifestTxIdFromRegistry).toHaveBeenCalledWith('wallet1', 'auth1', null);
   });
 
   test('marks status as failed after MAX_RETRY_ATTEMPTS', async () => {

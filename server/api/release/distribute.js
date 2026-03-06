@@ -34,10 +34,10 @@ function normalizeAddr(addr) {
   return addr.replace(/^0x/i, '').toLowerCase();
 }
 
-async function updateRegistryAndSaveWithRetry(walletId, authorityId, manifestTxId, maxAttempts = 3) {
+async function updateRegistryAndSaveWithRetry(walletId, authorityId, manifestTxId, planId, maxAttempts = 3) {
   const { updateRegistryAndSave } = require('../../services/arweaveReleaseStorage');
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const txId = await updateRegistryAndSave(walletId, authorityId, manifestTxId);
+    const txId = await updateRegistryAndSave(walletId, authorityId, manifestTxId, planId || null);
     if (txId) return txId;
     if (attempt < maxAttempts) {
       await new Promise((r) => setTimeout(r, 500 * attempt));
@@ -49,6 +49,10 @@ async function updateRegistryAndSaveWithRetry(walletId, authorityId, manifestTxI
 router.post('/', async (req, res) => {
   try {
     const { wallet_id, authority_id, encrypted_packages } = req.body || {};
+    const plan_id = req.body?.plan_id ? String(req.body.plan_id).trim() : null;
+    if (!plan_id) {
+      return res.status(400).json({ error: 'plan_id is required' });
+    }
     // Note: memo is embedded client-side into rwa_upload_body before sending; no server-side memo handling needed.
 
     // Validation
@@ -100,23 +104,35 @@ router.post('/', async (req, res) => {
 
     // Look up recipient path config to get fingerprints
     const pathConfigs = await db.recipientPaths.findByWallet(wallet_id);
-    const fingerprints = pathConfigs.length > 0
-      ? pathConfigs[0].paths.map(p => p.admin_factor_fingerprint)
+    const pathConfig = pathConfigs.find((p) => p.plan_id === plan_id) || null;
+    if (!pathConfig) {
+      return res.status(400).json({
+        error: 'Release config not found',
+        detail: 'No release path config found for this wallet and plan_id',
+      });
+    }
+    const fingerprints = Array.isArray(pathConfig.paths)
+      ? pathConfig.paths.map(p => p.admin_factor_fingerprint)
       : [];
 
     // #8 FIX: Use findByWallet instead of findAll() + filter for better performance
     const walletBindings = await db.bindings.findByWallet(wallet_id);
 
-    // Replace any existing active bindings for this wallet (both same and different authority).
-    // This allows creating a new plan that supersedes the previous one.
+    // Replace existing active bindings for the SAME plan only (or all planless for backward compat).
+    // Different plans coexist as separate active bindings.
     for (const old of walletBindings) {
       if (old.status === 'active') {
+        const samePlan = old.plan_id === plan_id;
+        if (!samePlan) continue;
         await db.bindings.update(old.binding_id, { ...old, status: 'replaced', terminated_at: Date.now() });
         // Reset delivery log for all recipients of the replaced binding so the new binding
         // can deliver fresh NFTs without being blocked by stale "delivered" records.
         if (Array.isArray(old.recipient_indices) && old.authority_id) {
+          const oldPlanId = old.plan_id || null;
           for (const idx of old.recipient_indices) {
-            const logId = `${String(old.wallet_id).trim().toLowerCase()}_${String(old.authority_id).trim()}_${idx}`;
+            const logId = oldPlanId
+              ? `${String(old.wallet_id).trim().toLowerCase()}_${String(old.authority_id).trim()}_${idx}_${oldPlanId}`
+              : `${String(old.wallet_id).trim().toLowerCase()}_${String(old.authority_id).trim()}_${idx}`;
             try {
               const existingLog = await db.rwaDeliveryLog.findById(logId);
               if (existingLog) {
@@ -130,7 +146,7 @@ router.post('/', async (req, res) => {
                   attempts: 0,
                   updated_at: Date.now(),
                 });
-                console.log('[release/distribute] Reset delivery log for replaced binding: wallet=%s recipient=%s', old.wallet_id, idx);
+                console.log('[release/distribute] Reset delivery log for replaced binding: wallet=%s recipient=%s plan=%s', old.wallet_id, idx, oldPlanId);
               }
             } catch (err) { console.warn('[release/distribute] Non-fatal: failed to reset delivery log for recipient %s: %s', idx, err.message); }
           }
@@ -171,14 +187,14 @@ router.post('/', async (req, res) => {
 
     if (hasRwaPackages) {
       // RWA path: store payloads on Arweave only; platform stores only manifest tx id (deterministic, untraceable mapping).
-      const arweaveResult = await uploadPayloadsAndManifest(wallet_id, authority_id, rwaPackages);
+      const arweaveResult = await uploadPayloadsAndManifest(wallet_id, authority_id, rwaPackages, plan_id || null);
       if (arweaveResult.error || !arweaveResult.manifest_arweave_tx_id) {
         return res.status(503).json({
           error: 'Arweave storage failed',
           detail: arweaveResult.error || 'Could not upload payloads or manifest. Ensure ARWEAVE_WALLET_JWK is set.',
         });
       }
-      registryTxId = await updateRegistryAndSaveWithRetry(wallet_id, authority_id, arweaveResult.manifest_arweave_tx_id);
+      registryTxId = await updateRegistryAndSaveWithRetry(wallet_id, authority_id, arweaveResult.manifest_arweave_tx_id, plan_id || null);
       if (!registryTxId) {
         return res.status(503).json({
           error: 'Registry update failed',
@@ -189,6 +205,7 @@ router.post('/', async (req, res) => {
         binding_id: bindingId,
         wallet_id,
         authority_id,
+        plan_id: plan_id || null,
         recipient_indices: encrypted_packages.map(p => p.index),
         release_model: 'per-path',
         admin_factor_fingerprints: fingerprints,
@@ -204,6 +221,7 @@ router.post('/', async (req, res) => {
         binding_id: bindingId,
         wallet_id,
         authority_id,
+        plan_id: plan_id || null,
         recipient_indices: encrypted_packages.map(p => p.index),
         release_model: 'per-path',
         admin_factor_fingerprints: fingerprints,
@@ -228,6 +246,7 @@ router.post('/', async (req, res) => {
       binding_id: bindingRecord.binding_id,
       status: 'active',
       packages_stored: encrypted_packages.length,
+      plan_id: bindingRecord.plan_id || null,
     };
     if (hasRwaPackages) {
       responsePayload.manifest_arweave_tx_id = bindingRecord.manifest_arweave_tx_id;

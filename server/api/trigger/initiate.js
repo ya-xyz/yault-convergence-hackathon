@@ -51,7 +51,9 @@ router.post('/', authorityAuthMiddleware, async (req, res) => {
       evidence_hash,
       signature,
       notes,
+      plan_id,
     } = req.body || {};
+    const planId = plan_id ? String(plan_id).trim() : '';
 
     // ── Validation ──────────────────────────────────────────────────────
 
@@ -59,6 +61,9 @@ router.post('/', authorityAuthMiddleware, async (req, res) => {
 
     if (!wallet_id || typeof wallet_id !== 'string') {
       errors.push('wallet_id is required and must be a non-empty string');
+    }
+    if (!planId) {
+      errors.push('plan_id is required and must be a non-empty string');
     }
     if (!Number.isInteger(recipient_index) || recipient_index < 0) {
       errors.push('recipient_index must be a non-negative integer');
@@ -116,6 +121,7 @@ router.post('/', authorityAuthMiddleware, async (req, res) => {
         contractAddress: config.oracle.releaseAttestationAddress,
         walletId: wallet_id,
         recipientIndex: recipient_index,
+        planId,
       });
       if (attestation?.source === 'oracle' && attestation?.decision === 'release') {
         return res.status(409).json({
@@ -133,6 +139,7 @@ router.post('/', authorityAuthMiddleware, async (req, res) => {
       (b) =>
         b.authority_id === authorityId &&
         b.status === 'active' &&
+        b.plan_id === planId &&
         Array.isArray(b.recipient_indices) &&
         b.recipient_indices.some((idx) => Number(idx) === Number(recipient_index))
     );
@@ -169,6 +176,7 @@ router.post('/', authorityAuthMiddleware, async (req, res) => {
     const record = {
       ...triggerValidation.data,
       trigger_id: triggerId,
+      plan_id: planId,
       trigger_type: 'legal_event', // Distinguish from legacy tlock triggers
       reason_code,
       matter_id: matter_id ? String(matter_id).trim() : null,
@@ -199,6 +207,7 @@ router.post('/', authorityAuthMiddleware, async (req, res) => {
               t.authority_id === authorityId &&
               t.wallet_id === wallet_id &&
               t.recipient_index === recipient_index &&
+              t.plan_id === planId &&
               (t.status === 'pending' || t.status === 'cooldown')
             ) {
               throw new Error('DUPLICATE_TRIGGER');
@@ -225,6 +234,7 @@ router.post('/', authorityAuthMiddleware, async (req, res) => {
     const auditRecord = {
       type: 'TRIGGER_INITIATED',
       trigger_id: triggerId,
+      plan_id: planId,
       wallet_id,
       authority_id: authorityId,
       recipient_index,
@@ -261,6 +271,7 @@ router.post('/', authorityAuthMiddleware, async (req, res) => {
 
     return res.status(201).json({
       trigger_id: triggerId,
+      plan_id: planId,
       status: 'pending',
       trigger_type: 'legal_event',
       reason_code,

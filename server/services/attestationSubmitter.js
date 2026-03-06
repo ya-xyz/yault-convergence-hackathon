@@ -43,10 +43,11 @@ function toBytes32(hex) {
  * @param {string} params.decision - 'release' | 'hold' | 'reject'
  * @param {string} [params.reasonCode] - optional hex bytes32 (e.g. keccak256 of "verified_death"))
  * @param {string} params.evidenceHash - hex bytes32 (e.g. SHA-256 of evidence bundle)
+ * @param {string} [params.planId] - plan_id for multi-plan scoping
  * @returns {Promise<{ txHash: string }>}
  */
 async function submitFallbackAttestation(config, params) {
-  const { walletId, recipientIndex, decision, reasonCode, evidenceHash } = params;
+  const { walletId, recipientIndex, decision, reasonCode, evidenceHash, planId } = params;
   const contractAddress = config?.oracle?.releaseAttestationAddress;
   const rpcUrl = config?.oracle?.rpcUrl;
   const relayerKey = config?.oracle?.releaseAttestationRelayerPrivateKey;
@@ -65,7 +66,7 @@ async function submitFallbackAttestation(config, params) {
   const wallet = new ethers.Wallet(relayerKey.trim(), provider);
   const contract = new ethers.Contract(contractAddress, SUBMIT_ABI, wallet);
 
-  const hash = walletIdHash(walletId);
+  const hash = walletIdHash(walletId, planId);
   const decisionU8 = decisionToUint8(decision);
   const reasonBytes = toBytes32(reasonCode || '0');
   const evidenceBytes = toBytes32(evidenceHash);
@@ -87,7 +88,7 @@ async function submitFallbackAttestation(config, params) {
  * Same as submitFallbackAttestation but with source=0 (oracle).
  */
 async function submitOracleAttestation(config, params) {
-  const { walletId, recipientIndex, decision, reasonCode, evidenceHash } = params;
+  const { walletId, recipientIndex, decision, reasonCode, evidenceHash, planId } = params;
   const contractAddress = config?.oracle?.releaseAttestationAddress;
   const rpcUrl = config?.oracle?.rpcUrl;
   const relayerKey = config?.oracle?.releaseAttestationRelayerPrivateKey;
@@ -106,7 +107,7 @@ async function submitOracleAttestation(config, params) {
   const wallet = new ethers.Wallet(relayerKey.trim(), provider);
   const contract = new ethers.Contract(contractAddress, SUBMIT_ABI, wallet);
 
-  const hash = walletIdHash(walletId);
+  const hash = walletIdHash(walletId, planId);
   const decisionU8 = decisionToUint8(decision);
   const reasonBytes = toBytes32(reasonCode || '0');
   const evidenceBytes = toBytes32(evidenceHash);

@@ -38,7 +38,13 @@ const state = {
   userDetail: null,       // { address, kyc, bindings, triggers } when viewing a user
   selectedAuthority: null, // full authority object when viewing an authority
   redeliverCandidates: [], // flat list for Redeliver button index
-  redeliverPlans: [],      // [{ wallet_id, authority_id, trigger_id, recipients: [{ recipient_index, delivery_status, name }] }]
+  redeliverPlans: [],      // [{ wallet_id, authority_id, trigger_id, plan_status, recipients: [...] }]
+  redeliverTotal: 0,
+  redeliverPage: 1,
+  redeliverLimit: 20,
+  redeliverTotalPages: 1,
+  redeliverSearch: '',
+  redeliverStatusFilter: '',  // '' = all, 'distributed', 'cooldown', 'released', 'delivered', etc.
 };
 
 let wallet = null; // WalletConnector instance
@@ -65,8 +71,8 @@ function normalizeText(value) {
   return String(value).trim();
 }
 
-function redeliverCandidateKey(walletId, authorityId, recipientIndex) {
-  return `${normalizeHexAddress(walletId)}|${normalizeText(authorityId)}|${Number(recipientIndex)}`;
+function redeliverCandidateKey(walletId, authorityId, recipientIndex, planId) {
+  return `${normalizeHexAddress(walletId)}|${normalizeText(authorityId)}|${Number(recipientIndex)}|${normalizeText(planId)}`;
 }
 
 function showToast(msg, type) {
@@ -144,7 +150,7 @@ function renderLogin() {
 // ─── Nav ───
 
 function renderNav() {
-  var labels = { dashboard: T('dashboard'), users: T('users'), authorities: T('authorities'), triggers: T('triggers'), redeliver: 'Redeliver NFT', kyc: T('kyc'), revenue: T('revenue'), vault: 'Vault', campaigns: 'Campaigns' };
+  var labels = { dashboard: T('dashboard'), users: T('users'), authorities: T('authorities'), triggers: T('triggers'), redeliver: 'Asset Plans', kyc: T('kyc'), revenue: T('revenue'), vault: 'Vault', campaigns: 'Campaigns' };
   return `<div class="nav">${PAGES.map(p =>
     `<div class="nav-item ${state.page === p ? 'active' : ''}" data-page="${p}">${labels[p]}</div>`
   ).join('')}</div>`;
@@ -414,21 +420,89 @@ function renderTriggers() {
   `;
 }
 
-// ─── Redeliver NFT (admin: one card per plan) ───
+// ─── Asset Plans (admin: one card per plan, all plans shown) ───
+
+function planStatusBadge(status) {
+  var map = {};
+  map.created = { label: 'Created', cls: 'badge-muted', style: 'background:rgba(168,85,247,0.12);color:#7c3aed;' };
+  map.distributed = { label: 'Distributed', cls: 'badge-pending', style: 'background:rgba(59,130,246,0.12);color:#2563eb;' };
+  map.cooldown = { label: 'Cooldown', cls: 'badge-pending', style: 'background:rgba(245,158,11,0.12);color:#d97706;' };
+  map.attestation_blocked = { label: 'Attestation Blocked', cls: 'badge-pending', style: 'background:rgba(239,68,68,0.12);color:#dc2626;' };
+  map.released = { label: 'Released', cls: 'badge-active', style: 'background:rgba(34,197,94,0.12);color:#16a34a;' };
+  map.delivered = { label: 'Credential Delivered', cls: 'badge-active', style: 'background:rgba(59,130,246,0.12);color:#2563eb;' };
+  map.delivered_unclaimed = { label: 'Credential Delivered', cls: 'badge-active', style: 'background:rgba(59,130,246,0.12);color:#2563eb;' };
+  map.claimed = { label: 'Claimed', cls: 'badge-active', style: 'background:rgba(34,197,94,0.15);color:#16a34a;font-weight:600;' };
+  map.revoked = { label: 'Revoked', cls: 'badge-muted', style: 'background:rgba(107,114,128,0.12);color:#6b7280;' };
+  var m = map[status] || { label: status || '\u2014', cls: 'badge-muted', style: '' };
+  return '<span class="badge ' + m.cls + '" style="' + m.style + '">' + esc(m.label) + '</span>';
+}
 
 function renderRedeliver() {
   const plans = state.redeliverPlans || [];
+  const total = state.redeliverTotal || 0;
+  const currentPage = state.redeliverPage || 1;
+  const totalPages = state.redeliverTotalPages || 1;
   let candidateIndex = 0;
+
+  // Search and filter controls
+  const searchBar = `
+    <div style="display:flex;gap:12px;margin-bottom:16px;align-items:center;flex-wrap:wrap;">
+      <input type="text" id="redeliverSearchInput" placeholder="Search wallet, plan ID, recipient..." value="${esc(state.redeliverSearch)}"
+        style="flex:1;min-width:200px;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text-primary);font-size:13px;">
+      <select id="redeliverStatusFilter" style="padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text-primary);font-size:13px;">
+        <option value="" ${!state.redeliverStatusFilter ? 'selected' : ''}>All statuses</option>
+        <option value="created" ${state.redeliverStatusFilter === 'created' ? 'selected' : ''}>Created</option>
+        <option value="distributed" ${state.redeliverStatusFilter === 'distributed' ? 'selected' : ''}>Distributed</option>
+        <option value="cooldown" ${state.redeliverStatusFilter === 'cooldown' ? 'selected' : ''}>Cooldown</option>
+        <option value="attestation_blocked" ${state.redeliverStatusFilter === 'attestation_blocked' ? 'selected' : ''}>Attestation Blocked</option>
+        <option value="released" ${state.redeliverStatusFilter === 'released' ? 'selected' : ''}>Released</option>
+        <option value="delivered" ${state.redeliverStatusFilter === 'delivered' ? 'selected' : ''}>Delivered</option>
+        <option value="revoked" ${state.redeliverStatusFilter === 'revoked' ? 'selected' : ''}>Revoked</option>
+      </select>
+      <button class="btn btn-sm btn-primary" id="redeliverSearchBtn">Search</button>
+    </div>
+  `;
 
   const cards = plans.map((plan) => {
     const walletShort = (plan.wallet_id || '').substring(0, 14) + (plan.wallet_id && plan.wallet_id.length > 14 ? '...' : '');
     const authorityDisplay = plan.authority_id != null && String(plan.authority_id).trim() !== ''
       ? (plan.authority_id.substring(0, 10) + (plan.authority_id.length > 10 ? '...' : ''))
       : '—';
+    const planDisplay = plan.plan_id ? String(plan.plan_id) : '—';
+    const planStatus = plan.plan_status || 'distributed';
+    const isReleased = planStatus === 'released' || planStatus === 'delivered';
+    const isBlocked = planStatus === 'attestation_blocked';
+    const isCooldown = planStatus === 'cooldown';
+
+    // Status-specific info bar
+    var statusInfoHtml = '';
+    if (isBlocked) {
+      var reasonCode = plan.blocked_reason_code || 'UNKNOWN';
+      var reasonDetail = plan.blocked_reason_detail || 'Attestation check failed';
+      statusInfoHtml = '<div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.2);border-radius:6px;padding:10px 14px;margin-bottom:12px;font-size:13px;">'
+        + '<strong style="color:#dc2626;">Blocked:</strong> '
+        + '<span style="color:var(--text-secondary);">' + esc(reasonCode) + ' — ' + esc(reasonDetail) + '</span>'
+        + '</div>';
+    } else if (isCooldown && plan.effective_at) {
+      var effectiveDate = new Date(plan.effective_at);
+      var remaining = plan.effective_at - Date.now();
+      var remainLabel = remaining > 0 ? (Math.ceil(remaining / 60000) + ' min remaining') : 'Expiring soon...';
+      statusInfoHtml = '<div style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.2);border-radius:6px;padding:10px 14px;margin-bottom:12px;font-size:13px;">'
+        + '<strong style="color:#d97706;">Cooldown:</strong> '
+        + '<span style="color:var(--text-secondary);">Effective at ' + esc(effectiveDate.toLocaleString()) + ' (' + esc(remainLabel) + ')</span>'
+        + '</div>';
+    }
+
+    // Derive effective plan status including claim info
+    var allRecsClaimed = plan.recipients.length > 0 && plan.recipients.every(function(r) { return r.escrow_claimed === true; });
+    var someRecsClaimed = plan.recipients.some(function(r) { return r.escrow_claimed === true; });
+    var effectivePlanStatus = planStatus;
+    if (planStatus === 'delivered' && allRecsClaimed) effectivePlanStatus = 'claimed';
+    else if (planStatus === 'delivered' && !someRecsClaimed) effectivePlanStatus = 'delivered_unclaimed';
 
     const rows = (plan.recipients || []).map((rec) => {
-      const status = rec.delivery_status || '—';
-      const statusClass = status === 'delivered' ? 'badge-active' : (status === 'failed' || status === 'pending' ? 'badge-pending' : 'badge-muted');
+      const rawStatus = rec.delivery_status || null;
+      const escrowClaimed = rec.escrow_claimed === true;
       const txShort = rec.delivery_tx_id ? (rec.delivery_tx_id.substring(0, 12) + (rec.delivery_tx_id.length > 12 ? '...' : '')) : '—';
       const idx = candidateIndex++;
       const candidate = state.redeliverCandidates[idx] || null;
@@ -441,27 +515,65 @@ function renderRedeliver() {
       const approvalHint = pendingApprovalId
         ? `<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Approval: ${esc(pendingApprovalId.slice(0, 10))}... (${candidate?.pending_current || 1}/${candidate?.pending_required || 2})</div>`
         : '';
+      // Status badge: show claim state alongside delivery state
+      var statusBadgeHtml = '';
+      if (escrowClaimed) {
+        statusBadgeHtml = '<span class="badge badge-active" style="background:rgba(34,197,94,0.15);color:#16a34a;font-weight:600;">Claimed</span>';
+      } else if (rawStatus === 'delivered') {
+        statusBadgeHtml = '<span class="badge badge-active" style="background:rgba(59,130,246,0.12);color:#2563eb;">Delivered</span>'
+          + ' <span class="badge badge-muted" style="background:rgba(245,158,11,0.10);color:#d97706;font-size:10px;">Unclaimed</span>';
+      } else if (rawStatus) {
+        var sc = rawStatus === 'failed' || rawStatus === 'pending' ? 'badge-pending' : 'badge-muted';
+        statusBadgeHtml = '<span class="badge ' + sc + '">' + esc(rawStatus) + '</span>';
+      } else {
+        statusBadgeHtml = '<span style="font-size:12px;color:var(--text-muted);">\u2014</span>';
+      }
+      // Show appropriate action based on plan status
+      var actionHtml = '<span style="font-size:12px;color:var(--text-muted);">\u2014</span>';
+      if (escrowClaimed) {
+        actionHtml = '<span style="font-size:12px;color:var(--text-muted);">\u2014</span>';
+      } else if (isReleased) {
+        actionHtml = '<button class="btn btn-sm btn-primary" data-action="redeliver-one" data-candidate-index="' + idx + '" ' + disabledAttr + '>' + actionLabel + '</button>' + approvalHint;
+      } else if (isBlocked) {
+        actionHtml = '<button class="btn btn-sm" style="background:rgba(239,68,68,0.12);color:#dc2626;border:1px solid rgba(239,68,68,0.3);" data-action="retry-trigger" data-plan-id="' + esc(plan.plan_id || '') + '" data-wallet-id="' + esc(plan.wallet_id || '') + '">Retry Trigger</button>';
+      }
       return `
         <tr>
           <td>${esc(rec.name || 'Recipient ' + rec.recipient_index)}</td>
-          <td><span class="badge ${statusClass}">${esc(status)}</span></td>
+          <td>${statusBadgeHtml}</td>
           <td style="font-size:11px;color:var(--text-muted);" class="mono" title="${esc(rec.delivery_tx_id || '')}">${esc(txShort)}</td>
-          <td>
-            <button class="btn btn-sm btn-primary" data-action="redeliver-one" data-candidate-index="${idx}" ${disabledAttr}>${actionLabel}</button>
-            ${approvalHint}
-          </td>
+          <td>${actionHtml}</td>
         </tr>
       `;
     }).join('');
 
+    const recipientCount = (plan.recipients || []).length;
+
     return `
       <div class="card" style="margin-bottom:16px;">
-        <div class="card-header" style="border-bottom:1px solid var(--border);padding-bottom:8px;margin-bottom:12px;">
-          <div style="font-weight:600;">Wallet</div>
-          <div class="mono" style="font-size:13px;color:var(--text-secondary);">${esc(walletShort)}</div>
-          <div style="font-weight:600;margin-top:8px;">Authority</div>
-          <div class="mono" style="font-size:13px;color:var(--text-secondary);">${esc(authorityDisplay)}</div>
+        <div class="card-header" style="border-bottom:1px solid var(--border);padding-bottom:8px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;">
+          <div style="flex:1;min-width:200px;">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+              <span style="font-weight:600;">Plan</span>
+              ${planStatusBadge(effectivePlanStatus)}
+            </div>
+            <div class="mono" style="font-size:13px;color:var(--text-secondary);" title="${esc(plan.plan_id || '')}">${esc(planDisplay)}</div>
+          </div>
+          <div style="flex:1;min-width:150px;">
+            <div style="font-weight:600;">Wallet</div>
+            <div class="mono" style="font-size:13px;color:var(--text-secondary);" title="${esc(plan.wallet_id || '')}">${esc(walletShort)}</div>
+          </div>
+          <div style="flex:1;min-width:120px;">
+            <div style="font-weight:600;">Authority</div>
+            <div class="mono" style="font-size:13px;color:var(--text-secondary);">${esc(authorityDisplay)}</div>
+          </div>
+          <div style="text-align:right;">
+            <div style="font-size:11px;color:var(--text-muted);">${recipientCount} recipient${recipientCount !== 1 ? 's' : ''}</div>
+            ${plan.created_at ? `<div style="font-size:11px;color:var(--text-muted);">${new Date(plan.created_at).toLocaleDateString()}</div>` : ''}
+          </div>
         </div>
+        ${statusInfoHtml}
+        ${recipientCount > 0 ? `
         <div style="overflow-x:auto;">
           <table class="table">
             <thead>
@@ -475,21 +587,31 @@ function renderRedeliver() {
             <tbody>${rows}</tbody>
           </table>
         </div>
+        ` : '<p style="color:var(--text-muted);font-size:13px;padding:8px 0;">No recipients configured yet.</p>'}
       </div>
     `;
   }).join('');
 
+  // Pagination controls
+  const pagination = totalPages > 1 ? `
+    <div style="display:flex;justify-content:center;align-items:center;gap:12px;margin-top:16px;">
+      <button class="btn btn-sm" data-action="redeliver-page" data-page="${currentPage - 1}" ${currentPage <= 1 ? 'disabled' : ''}>&laquo; Prev</button>
+      <span style="font-size:13px;color:var(--text-secondary);">Page ${currentPage} of ${totalPages} (${total} plans)</span>
+      <button class="btn btn-sm" data-action="redeliver-page" data-page="${currentPage + 1}" ${currentPage >= totalPages ? 'disabled' : ''}>Next &raquo;</button>
+    </div>
+  ` : (total > 0 ? `<div style="text-align:center;font-size:13px;color:var(--text-muted);margin-top:8px;">${total} plan${total !== 1 ? 's' : ''}</div>` : '');
+
   return `
-    <h2>Redeliver RWA NFT</h2>
+    <h2>Asset Plans</h2>
     <p style="color:var(--text-secondary);margin-bottom:16px;font-size:14px;">
-      One card per released plan. Use when a beneficiary did not receive the RWA credential (e.g. plan created without an authority). Click Redeliver to re-send the same payload; no plan regeneration or re-signing needed.
+      All asset plans across the platform. Plans progress through: Created → Distributed → Cooldown → Released → Delivered.
+      Use Redeliver when a beneficiary did not receive the credential.
     </p>
-    <p style="font-size:12px;color:var(--text-muted);margin-bottom:16px;">
-      After each Redeliver, the result and tx are shown below. If only one recipient receives: verify the payload’s leafOwner matches that recipient’s wallet and check whether the RWA upload-and-mint API treats duplicate sends as no-op.
-    </p>
+    ${searchBar}
     ${plans.length === 0
-    ? '<div class="card"><p style="color:var(--text-muted);">No released plans with recipients. Release a trigger first; then they appear here.</p></div>'
+    ? '<div class="card"><p style="color:var(--text-muted);">No plans found. Plans appear here after an owner distributes a plan.</p></div>'
     : cards}
+    ${pagination}
     <p id="redeliverResult" style="margin-top:12px;font-size:13px;display:none;"></p>
   `;
 }
@@ -821,14 +943,23 @@ async function loadPage() {
         state.campaigns = await api('/admin/campaigns');
         break;
       case 'redeliver': {
-        const data = await api('/admin/release/redeliver-candidates');
+        const qs = new URLSearchParams();
+        if (state.redeliverSearch) qs.set('search', state.redeliverSearch);
+        if (state.redeliverStatusFilter) qs.set('status', state.redeliverStatusFilter);
+        qs.set('page', String(state.redeliverPage || 1));
+        qs.set('limit', String(state.redeliverLimit || 20));
+        const data = await api(`/admin/release/redeliver-candidates?${qs.toString()}`);
         state.redeliverPlans = Array.isArray(data.plans) ? data.plans : [];
+        state.redeliverTotal = data.total || 0;
+        state.redeliverPage = data.page || 1;
+        state.redeliverTotalPages = data.totalPages || 1;
         state.redeliverCandidates = [];
         for (const plan of state.redeliverPlans) {
           for (const rec of plan.recipients || []) {
             state.redeliverCandidates.push({
               wallet_id: plan.wallet_id,
               authority_id: plan.authority_id == null ? '' : plan.authority_id,
+              plan_id: plan.plan_id || null,
               recipient_index: rec.recipient_index,
               delivery_status: rec.delivery_status,
               trigger_id: plan.trigger_id,
@@ -850,13 +981,14 @@ async function loadPage() {
             const key = redeliverCandidateKey(
               approval.params.wallet_id,
               approval.params.authority_id,
-              approval.params.recipient_index
+              approval.params.recipient_index,
+              approval.params.plan_id
             );
             byKey.set(key, approval);
           }
           const currentAdmin = normalizeHexAddress(state.auth?.address || '');
           for (const c of state.redeliverCandidates) {
-            const key = redeliverCandidateKey(c.wallet_id, c.authority_id, c.recipient_index);
+            const key = redeliverCandidateKey(c.wallet_id, c.authority_id, c.recipient_index, c.plan_id);
             const approval = byKey.get(key);
             if (!approval) continue;
             const signers = Array.isArray(approval.current_approvals) ? approval.current_approvals : [];
@@ -1212,6 +1344,7 @@ function attachEvents() {
           : {
               wallet_id: c.wallet_id,
               authority_id: c.authority_id,
+              plan_id: c.plan_id,
               recipient_index: c.recipient_index,
               force_redeliver: true,
             };
@@ -1254,6 +1387,55 @@ function attachEvents() {
         }
       } finally {
         btn.disabled = false;
+      }
+    });
+  });
+
+  // Retry Trigger: reset attestation_blocked triggers back to cooldown for re-evaluation
+  app.querySelectorAll('[data-action="retry-trigger"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      var planId = btn.dataset.planId;
+      var walletId = btn.dataset.walletId;
+      if (!planId || !walletId) return;
+      btn.disabled = true;
+      btn.textContent = 'Retrying...';
+      try {
+        var data = await apiPost('/admin/trigger/retry-blocked', { plan_id: planId, wallet_id: walletId });
+        showToast(data.message || 'Triggers reset to cooldown for retry', 'success');
+        loadPage();
+      } catch (err) {
+        showToast(err.message || 'Retry failed', 'error');
+        btn.disabled = false;
+        btn.textContent = 'Retry Trigger';
+      }
+    });
+  });
+
+  // Asset Plans: search, filter, pagination
+  const redeliverSearchBtn = document.getElementById('redeliverSearchBtn');
+  if (redeliverSearchBtn) {
+    const doSearch = () => {
+      state.redeliverSearch = (document.getElementById('redeliverSearchInput') || {}).value || '';
+      state.redeliverStatusFilter = (document.getElementById('redeliverStatusFilter') || {}).value || '';
+      state.redeliverPage = 1;
+      loadPage();
+    };
+    redeliverSearchBtn.addEventListener('click', doSearch);
+    const searchInput = document.getElementById('redeliverSearchInput');
+    if (searchInput) {
+      searchInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
+    }
+    const statusSelect = document.getElementById('redeliverStatusFilter');
+    if (statusSelect) {
+      statusSelect.addEventListener('change', doSearch);
+    }
+  }
+  app.querySelectorAll('[data-action="redeliver-page"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const p = parseInt(btn.dataset.page, 10);
+      if (p >= 1 && p <= (state.redeliverTotalPages || 1)) {
+        state.redeliverPage = p;
+        loadPage();
       }
     });
   });

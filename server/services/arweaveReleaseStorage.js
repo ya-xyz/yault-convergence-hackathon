@@ -101,15 +101,36 @@ function getArweaveClient() {
 }
 
 /**
- * Deterministic key for manifest: same (wallet_id, authority_id, recipient_index) → same key.
+ * Deterministic key for manifest: same (wallet_id, authority_id, recipient_index, plan_id) → same key.
  * No PII in the key value itself (hash only); manifest on Arweave does not reveal identity.
+ *
+ * @param {string} walletId
+ * @param {string} authorityId
+ * @param {number|string} recipientIndex
+ * @param {string|null} planId
+ * @returns {string} 64-char hex
+ */
+function manifestKey(walletId, authorityId, recipientIndex, planId) {
+  const payload = JSON.stringify([
+    String(walletId || '').trim().toLowerCase(),
+    String(authorityId || '').trim(),
+    String(recipientIndex),
+    planId ? String(planId).trim() : '',
+  ]);
+  return crypto.createHash('sha256').update(payload).digest('hex');
+}
+
+/**
+ * Legacy 3-element manifest key (pre-plan_id era).
+ * Manifests uploaded before plan_id was introduced used this format.
+ * Used as fallback when the 4-element key is not found in a manifest.
  *
  * @param {string} walletId
  * @param {string} authorityId
  * @param {number|string} recipientIndex
  * @returns {string} 64-char hex
  */
-function manifestKey(walletId, authorityId, recipientIndex) {
+function manifestKeyLegacy(walletId, authorityId, recipientIndex) {
   const payload = JSON.stringify([
     String(walletId || '').trim().toLowerCase(),
     String(authorityId || '').trim(),
@@ -118,8 +139,21 @@ function manifestKey(walletId, authorityId, recipientIndex) {
   return crypto.createHash('sha256').update(payload).digest('hex');
 }
 
-/** Deterministic key for global registry: (wallet_id, authority_id) → manifest_tx_id (one manifest per binding). */
-function registryKey(walletId, authorityId) {
+/** Deterministic key for global registry: (wallet_id, authority_id, plan_id) → manifest_tx_id. */
+function registryKey(walletId, authorityId, planId) {
+  const payload = JSON.stringify([
+    String(walletId || '').trim().toLowerCase(),
+    String(authorityId || '').trim(),
+    planId ? String(planId).trim() : '',
+  ]);
+  return crypto.createHash('sha256').update(payload).digest('hex');
+}
+
+/**
+ * Legacy 2-element registry key (pre-plan_id era).
+ * Used as fallback when the 3-element key is not found in the registry.
+ */
+function registryKeyLegacy(walletId, authorityId) {
   const payload = JSON.stringify([
     String(walletId || '').trim().toLowerCase(),
     String(authorityId || '').trim(),
@@ -276,11 +310,11 @@ async function fetchFromArweave(txId, { skipExtendedRetry = false } = {}) {
  * @param {Array<{ index: number, rwa_upload_body: object }>} packages - Each has index and rwa_upload_body
  * @returns {Promise<{ manifest_arweave_tx_id: string | null, payload_tx_ids: string[], error?: string }>}
  */
-async function uploadPayloadsAndManifest(walletId, authorityId, packages) {
+async function uploadPayloadsAndManifest(walletId, authorityId, packages, planId) {
   const manifest = {};
   for (const pkg of packages) {
     if (!pkg.rwa_upload_body || typeof pkg.rwa_upload_body !== 'object') continue;
-    const key = manifestKey(walletId, authorityId, pkg.index);
+    const key = manifestKey(walletId, authorityId, pkg.index, planId || null);
     const dataStr = JSON.stringify(pkg.rwa_upload_body);
     const txId = await uploadToArweave(dataStr, { type: 'payload' });
     if (!txId) {
@@ -318,7 +352,7 @@ async function uploadPayloadsAndManifest(walletId, authorityId, packages) {
  * @param {string} currentManifestTxId - Current manifest Arweave tx id (from binding or registry)
  * @returns {Promise<{ manifest_arweave_tx_id: string | null, error?: string }>}
  */
-async function replacePathPayload(walletId, authorityId, recipientIndex, rwaUploadBody, currentManifestTxId) {
+async function replacePathPayload(walletId, authorityId, recipientIndex, rwaUploadBody, currentManifestTxId, planId) {
   if (!currentManifestTxId || typeof rwaUploadBody !== 'object' || !rwaUploadBody.data || !rwaUploadBody.leafOwner) {
     return { manifest_arweave_tx_id: null, error: 'currentManifestTxId and rwa_upload_body (data, leafOwner) are required' };
   }
@@ -344,7 +378,7 @@ async function replacePathPayload(walletId, authorityId, recipientIndex, rwaUplo
       return { manifest_arweave_tx_id: null, error: 'Invalid current manifest JSON' };
     }
   }
-  const key = manifestKey(walletId, authorityId, recipientIndex);
+  const key = manifestKey(walletId, authorityId, recipientIndex, planId || null);
   const dataStr = JSON.stringify(rwaUploadBody);
   const newPayloadTxId = await uploadToArweave(dataStr, { type: 'payload' });
   if (!newPayloadTxId) {
@@ -392,7 +426,7 @@ async function setRegistryTxId(txId) {
 }
 
 /**
- * Update the global registry on Arweave with (wallet_id, authority_id) → manifest_tx_id, then save new registry tx id.
+ * Update the global registry on Arweave with (wallet_id, authority_id, plan_id) → manifest_tx_id, then save new registry tx id.
  * Call after uploading a new manifest in distribute.
  *
  * @param {string} walletId
@@ -400,9 +434,9 @@ async function setRegistryTxId(txId) {
  * @param {string} manifestTxId - Arweave tx id of the manifest just uploaded
  * @returns {Promise<string|null>} New registry Arweave tx id, or null on failure
  */
-async function updateRegistryAndSave(walletId, authorityId, manifestTxId) {
+async function updateRegistryAndSave(walletId, authorityId, manifestTxId, planId) {
   return withRegistryLock(async () => {
-    const key = registryKey(walletId, authorityId);
+    const key = registryKey(walletId, authorityId, planId || null);
     let registry = {};
     const currentTxId = await getRegistryTxId();
     if (currentTxId) {
@@ -426,17 +460,34 @@ async function updateRegistryAndSave(walletId, authorityId, manifestTxId) {
  *
  * @param {string} walletId
  * @param {string} authorityId
+ * @param {string|null} [planId]
  * @returns {Promise<string|null>}
  */
-async function getManifestTxIdFromRegistry(walletId, authorityId) {
+async function getManifestTxIdFromRegistry(walletId, authorityId, planId) {
   const registryTxId = await getRegistryTxId();
   if (!registryTxId) return null;
   const text = await fetchFromArweave(registryTxId);
   if (!text) return null;
   try {
     const registry = JSON.parse(text);
-    const key = registryKey(walletId, authorityId);
-    return registry[key] || null;
+    const key = registryKey(walletId, authorityId, planId || null);
+    const result = registry[key];
+    if (result) return result;
+    // Backward compat: try legacy 2-element key (pre-plan_id era)
+    if (planId) {
+      const legacyKey = registryKeyLegacy(walletId, authorityId);
+      const legacyResult = registry[legacyKey];
+      if (legacyResult) {
+        console.log('[arweaveReleaseStorage] Used legacy registry key for wallet=%s authority=%s (pre-plan_id registry)', walletId, authorityId);
+        return legacyResult;
+      }
+      // Also try 3-element key with empty planId
+      const emptyPlanKey = registryKey(walletId, authorityId, null);
+      if (emptyPlanKey !== key && registry[emptyPlanKey]) {
+        return registry[emptyPlanKey];
+      }
+    }
+    return null;
   } catch (_) {
     return null;
   }
@@ -444,6 +495,7 @@ async function getManifestTxIdFromRegistry(walletId, authorityId) {
 
 module.exports = {
   manifestKey,
+  manifestKeyLegacy,
   registryKey,
   uploadToArweave,
   fetchFromArweave,

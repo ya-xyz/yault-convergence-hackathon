@@ -23,25 +23,30 @@ const DECISION_HOLD = 1;
 const DECISION_REJECT = 2;
 
 /**
- * Compute walletIdHash as in ReleaseAttestation contract (keccak256 of wallet_id string).
+ * Compute walletIdHash for the ReleaseAttestation contract.
+ * Plan-scoped: hash = keccak256(walletId + ":" + planId)
+ * so each plan gets an independent attestation namespace on-chain.
  * @param {string} walletId
+ * @param {string} planId - plan identifier (required)
  * @returns {string} 0x-prefixed hex bytes32
  */
-function walletIdHash(walletId) {
-  return ethers.keccak256(ethers.toUtf8Bytes(walletId));
+function walletIdHash(walletId, planId) {
+  if (!planId) throw new Error('walletIdHash: planId is required');
+  return ethers.keccak256(ethers.toUtf8Bytes(`${walletId}:${planId}`));
 }
 
 /**
- * Get attestation from chain for (wallet_id, recipient_index).
+ * Get attestation from chain for (wallet_id, recipient_index), optionally scoped by plan_id.
  * @param {object} options
  * @param {string} options.rpcUrl - EVM RPC URL
  * @param {string} options.contractAddress - ReleaseAttestation contract address
  * @param {string} options.walletId - wallet_id (pseudonymous)
  * @param {number} options.recipientIndex - recipient path index
+ * @param {string} [options.planId] - plan_id for multi-plan scoping
  * @param {boolean} [options.throwOnError=false] - Throw RPC/contract read errors instead of returning null.
  * @returns {Promise<{ source: 'oracle'|'fallback', decision: 'release'|'hold'|'reject', reasonCode: string, evidenceHash: string, timestamp: number, submitter: string } | null>}
  */
-async function getAttestation({ rpcUrl, contractAddress, walletId, recipientIndex, throwOnError = false }) {
+async function getAttestation({ rpcUrl, contractAddress, walletId, recipientIndex, planId, throwOnError = false }) {
   if (!contractAddress || typeof contractAddress !== 'string') return null;
   try {
     if (ethers.getAddress(contractAddress) === ethers.ZeroAddress) return null;
@@ -51,7 +56,7 @@ async function getAttestation({ rpcUrl, contractAddress, walletId, recipientInde
   try {
     const provider = new ethers.JsonRpcProvider(rpcUrl);
     const contract = new ethers.Contract(contractAddress, RELEASE_ATTESTATION_ABI, provider);
-    const hash = walletIdHash(walletId);
+    const hash = walletIdHash(walletId, planId);
 
     // #SUGGESTION: Call the contract and destructure the returned struct.
     const attestation = await contract.getAttestation(hash, recipientIndex);
@@ -80,7 +85,7 @@ async function getAttestation({ rpcUrl, contractAddress, walletId, recipientInde
 /**
  * Check if an attestation exists (any source).
  */
-async function hasAttestation({ rpcUrl, contractAddress, walletId, recipientIndex }) {
+async function hasAttestation({ rpcUrl, contractAddress, walletId, recipientIndex, planId }) {
   if (!contractAddress || typeof contractAddress !== 'string') return false;
   try {
     if (ethers.getAddress(contractAddress) === ethers.ZeroAddress) return false;
@@ -90,7 +95,7 @@ async function hasAttestation({ rpcUrl, contractAddress, walletId, recipientInde
   try {
     const provider = new ethers.JsonRpcProvider(rpcUrl);
     const contract = new ethers.Contract(contractAddress, RELEASE_ATTESTATION_ABI, provider);
-    const hash = walletIdHash(walletId);
+    const hash = walletIdHash(walletId, planId);
     return await contract.hasAttestation(hash, recipientIndex);
   } catch (err) {
     console.error('[attestationClient] hasAttestation error:', err.message);

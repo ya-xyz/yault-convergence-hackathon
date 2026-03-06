@@ -202,6 +202,7 @@ class AuthorityUserBinding {
 
     requireString(data, 'wallet_id', errors);
     requireString(data, 'authority_id', errors);
+    requireString(data, 'plan_id', errors);
     requireArray(data, 'recipient_indices', errors, true);
 
     // Validate each recipient index is a non-negative integer
@@ -220,6 +221,7 @@ class AuthorityUserBinding {
       data: {
         wallet_id: data.wallet_id,
         authority_id: data.authority_id,
+        plan_id: data.plan_id.trim(),
         recipient_indices: data.recipient_indices,
         status: 'active',
         created_at: Date.now(),

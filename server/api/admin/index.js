@@ -23,6 +23,7 @@ const crypto = require('crypto');
 const db = require('../../db');
 const config = require('../../config');
 const vaultContract = require('../../services/vaultContract');
+const escrowContract = require('../../services/escrowContract');
 const { deliverByRegistry } = require('../../services/deliverRwaRelease');
 const { verifySignature, verifyClientSessionToken, dualAuthMiddleware } = require('../../middleware/auth');
 
@@ -522,88 +523,232 @@ router.get('/triggers', async (_req, res) => {
   }
 });
 
-// ─── GET /release/redeliver-candidates — All recipients for released plans (admin; grouped by plan) ───
+// ─── GET /release/redeliver-candidates — All plans (bindings) with trigger/delivery status (admin; grouped by plan) ───
 
-function deliveryLogId(walletId, authorityId, recipientIndex) {
-  return `${String(walletId).trim().toLowerCase()}_${String(authorityId || '').trim()}_${recipientIndex}`;
+function deliveryLogId(walletId, authorityId, recipientIndex, planId) {
+  const base = `${String(walletId).trim().toLowerCase()}_${String(authorityId || '').trim()}_${recipientIndex}`;
+  return planId ? `${base}_${String(planId).trim()}` : base;
 }
 
-router.get('/release/redeliver-candidates', async (_req, res) => {
+/**
+ * Derive an overall plan status from binding + trigger state.
+ *  - distributed: binding exists, no trigger yet
+ *  - cooldown: trigger in cooldown phase
+ *  - attestation_blocked: trigger blocked on attestation
+ *  - released: trigger released, delivery may be pending
+ *  - delivered: all recipients delivered
+ *  - revoked: binding revoked
+ */
+function derivePlanStatus(binding, trigger, recipients) {
+  if (!binding || binding.status === 'revoked') return 'revoked';
+  if (!trigger) return 'distributed';
+  if (trigger.status === 'released') {
+    const allDelivered = recipients.length > 0 && recipients.every((r) => r.delivery_status === 'delivered');
+    return allDelivered ? 'delivered' : 'released';
+  }
+  if (trigger.status === 'cooldown') return 'cooldown';
+  if (trigger.status === 'attestation_blocked') return 'attestation_blocked';
+  return trigger.status || 'distributed';
+}
+
+router.get('/release/redeliver-candidates', async (req, res) => {
   try {
-    const triggers = await db.triggers.findAll();
-    const released = (Array.isArray(triggers) ? triggers : []).filter((t) => t.status === 'released');
-    const bindings = await db.bindings.findAll();
-    const activeBindings = (Array.isArray(bindings) ? bindings : []).filter((b) => b.status === 'active');
-    const bindingKey = (walletId, authorityId) => `${(walletId || '').toLowerCase()}_${authorityId || ''}`;
-    const bindingMap = new Map();
-    for (const b of activeBindings) {
-      bindingMap.set(bindingKey(b.wallet_id, b.authority_id ?? ''), b);
+    // Query params: search, page, limit, status
+    const search = (req.query.search || '').trim().toLowerCase();
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const statusFilter = (req.query.status || '').trim().toLowerCase(); // '', 'all', 'distributed', 'cooldown', 'released', 'delivered', etc.
+
+    // Fetch all bindings, triggers, and wallet-plan records
+    const [allBindings, allTriggers, walletPlanIds] = await Promise.all([
+      db.bindings.findAll(),
+      db.triggers.findAll(),
+      db.walletPlans.findAllIds(),
+    ]);
+
+    // Index triggers by (wallet_id, plan_id) — pick latest per plan
+    const triggerByPlan = new Map();
+    for (const t of (Array.isArray(allTriggers) ? allTriggers : [])) {
+      if (!t.wallet_id || !t.plan_id) continue;
+      const key = `${t.wallet_id.toLowerCase()}|${t.plan_id}`;
+      const existing = triggerByPlan.get(key);
+      if (!existing || (t.created_at || '') > (existing.created_at || '')) {
+        triggerByPlan.set(key, t);
+      }
     }
 
     const pathCacheByWallet = new Map();
-    async function getRecipientLabel(walletId, recipientIndex) {
-      const w = (walletId || '').toLowerCase();
+    async function getRecipientLabel(walletId, planId, recipientIndex) {
+      const w = `${(walletId || '').toLowerCase()}|${planId || ''}`;
       if (!pathCacheByWallet.has(w)) {
         const pathRecs = await db.recipientPaths.findByWallet(walletId);
-        pathCacheByWallet.set(w, pathRecs?.[0]?.paths || []);
+        const selected = planId
+          ? pathRecs.find((p) => p.plan_id === planId)
+          : (pathRecs.find((p) => !p.plan_id) || pathRecs?.[0]);
+        pathCacheByWallet.set(w, selected?.paths || []);
       }
       const paths = pathCacheByWallet.get(w);
       const path = paths.find((p) => Number(p.index) === recipientIndex || Number(p.index) === recipientIndex + 1);
       return (path && path.label) || `Recipient ${recipientIndex}`;
     }
 
-    const planMap = new Map();
-    const recipientSeen = new Set();
-    for (const trigger of released) {
-      const walletId = trigger.wallet_id;
+    // Build plan entries from ALL bindings
+    const allPlans = [];
+    for (const binding of (Array.isArray(allBindings) ? allBindings : [])) {
+      const walletId = binding.wallet_id;
       if (!walletId) continue;
-      const authorityId = trigger.authority_id ?? '';
-      const binding = bindingMap.get(bindingKey(walletId, authorityId));
-      if (!binding || !Array.isArray(binding.recipient_indices)) continue;
+      const planId = binding.plan_id || null;
+      if (!planId) continue;
+      const authorityId = binding.authority_id ?? '';
+      const triggerKey = `${walletId.toLowerCase()}|${planId}`;
+      const trigger = triggerByPlan.get(triggerKey) || null;
 
-      const planKey = bindingKey(walletId, authorityId);
-      if (!planMap.has(planKey)) {
-        planMap.set(planKey, {
-          wallet_id: walletId,
-          authority_id: authorityId === '' ? null : authorityId,
-          trigger_id: trigger.trigger_id,
-          recipients: [],
-        });
+      // Build recipients
+      const recipients = [];
+      if (Array.isArray(binding.recipient_indices)) {
+        for (const ri of binding.recipient_indices) {
+          const idx = Number(ri);
+          if (Number.isNaN(idx) || idx < 0) continue;
+          const logId = deliveryLogId(walletId, authorityId, idx, planId);
+          const log = await db.rwaDeliveryLog.findById(logId).catch(() => null);
+          const name = await getRecipientLabel(walletId, planId, idx);
+          recipients.push({
+            recipient_index: idx,
+            delivery_status: log?.status ?? null,
+            delivery_tx_id: log?.txId ?? null,
+            name,
+          });
+        }
       }
-      const plan = planMap.get(planKey);
 
-      for (const ri of binding.recipient_indices) {
-        const idx = Number(ri);
-        if (Number.isNaN(idx) || idx < 0) continue;
-        const recipientKey = `${planKey}_${idx}`;
-        if (recipientSeen.has(recipientKey)) continue;
-        recipientSeen.add(recipientKey);
-        const logId = deliveryLogId(walletId, authorityId, idx);
-        const log = await db.rwaDeliveryLog.findById(logId).catch(() => null);
-        const name = await getRecipientLabel(walletId, idx);
-        plan.recipients.push({
-          recipient_index: idx,
-          delivery_status: log?.status ?? null,
-          delivery_tx_id: log?.txId ?? null,
-          name,
-        });
-      }
+      const planStatus = derivePlanStatus(binding, trigger, recipients);
+      const createdAt = binding.created_at || trigger?.created_at || null;
+
+      allPlans.push({
+        wallet_id: walletId,
+        authority_id: authorityId === '' ? null : authorityId,
+        plan_id: planId,
+        trigger_id: trigger?.trigger_id || null,
+        trigger_status: trigger?.status || null,
+        plan_status: planStatus,
+        binding_status: binding.status || 'active',
+        blocked_reason_code: trigger?.blocked_reason_code || null,
+        blocked_reason_detail: trigger?.blocked_reason_detail || null,
+        effective_at: trigger?.effective_at || null,
+        cooldown_ms: trigger?.cooldown_ms || null,
+        created_at: createdAt,
+        recipients,
+      });
     }
 
-    const plans = Array.from(planMap.values());
+    // Include wallet-plan records that don't have bindings yet (status = "created")
+    const bindingPlanIds = new Set(allPlans.map((p) => p.plan_id));
+    for (const wpId of walletPlanIds) {
+      try {
+        const wp = await db.walletPlans.findById(wpId);
+        if (!wp || wp._migrated || wp._migratedToMulti) continue;
+        const wpPlanId = wp.plan_id;
+        if (!wpPlanId || bindingPlanIds.has(wpPlanId)) continue;
+
+        // Extract wallet_id from storage key: format is "walletHex_chain_token_timestamp"
+        const keyParts = wpId.split('_');
+        const wpWalletId = keyParts.length > 0 && /^[0-9a-f]{40}$/i.test(keyParts[0]) ? '0x' + keyParts[0] : null;
+        const recipientEntries = (wp.recipients || []).map((r, i) => ({
+          recipient_index: i + 1,
+          delivery_status: null,
+          delivery_tx_id: null,
+          name: r.label || r.name || ('Recipient ' + (i + 1)),
+        }));
+        const wpCreatedAt = wp.createdAt ? new Date(wp.createdAt).getTime() : null;
+
+        allPlans.push({
+          wallet_id: wpWalletId,
+          authority_id: null,
+          plan_id: wpPlanId,
+          trigger_id: null,
+          trigger_status: null,
+          plan_status: 'created',
+          binding_status: null,
+          blocked_reason_code: null,
+          blocked_reason_detail: null,
+          effective_at: null,
+          cooldown_ms: null,
+          created_at: wpCreatedAt,
+          recipients: recipientEntries,
+        });
+        bindingPlanIds.add(wpPlanId); // prevent duplicates
+      } catch (_) { /* skip on error */ }
+    }
+
+    // Sort by created_at descending (newest first)
+    allPlans.sort((a, b) => {
+      const ta = a.created_at || '';
+      const tb = b.created_at || '';
+      return tb < ta ? -1 : tb > ta ? 1 : 0;
+    });
+
+    // Apply search filter (wallet_id, plan_id, authority_id, recipient name)
+    let filtered = allPlans;
+    if (search) {
+      filtered = allPlans.filter((p) => {
+        if ((p.wallet_id || '').toLowerCase().includes(search)) return true;
+        if ((p.plan_id || '').toLowerCase().includes(search)) return true;
+        if ((p.authority_id || '').toLowerCase().includes(search)) return true;
+        if ((p.plan_status || '').toLowerCase().includes(search)) return true;
+        if (p.recipients.some((r) => (r.name || '').toLowerCase().includes(search))) return true;
+        return false;
+      });
+    }
+
+    // Apply status filter
+    if (statusFilter && statusFilter !== 'all') {
+      filtered = filtered.filter((p) => p.plan_status === statusFilter);
+    }
+
+    const total = filtered.length;
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+    const safePage = Math.min(page, totalPages);
+    const paged = filtered.slice((safePage - 1) * limit, safePage * limit);
+
+    // Enrich recipients with escrow claim status (best-effort, non-blocking)
+    try {
+      for (const plan of paged) {
+        const wId = plan.wallet_id;
+        const prefixed = /^[0-9a-fA-F]{40}$/.test(wId) ? '0x' + wId : wId;
+        const wHash = escrowContract.walletIdHash(prefixed);
+        await Promise.all(plan.recipients.map(async (rec) => {
+          try {
+            const [allocated, remaining] = await Promise.all([
+              escrowContract.getAllocatedShares(config, wHash, rec.recipient_index),
+              escrowContract.getRemainingShares(config, wHash, rec.recipient_index),
+            ]);
+            const alloc = parseFloat(allocated || '0');
+            const rem = parseFloat(remaining || '0');
+            rec.escrow_claimed = alloc > 0 && rem <= 0;
+          } catch (_) {
+            rec.escrow_claimed = null; // unknown
+          }
+        }));
+      }
+    } catch (_) { /* non-fatal: page still works without claim status */ }
+
+    // Build flat candidates list (for redeliver button indexing)
     const candidates = [];
-    for (const plan of plans) {
+    for (const plan of paged) {
       for (const rec of plan.recipients) {
         candidates.push({
           wallet_id: plan.wallet_id,
           authority_id: plan.authority_id == null ? '' : plan.authority_id,
+          plan_id: plan.plan_id || null,
           recipient_index: rec.recipient_index,
           delivery_status: rec.delivery_status,
           trigger_id: plan.trigger_id,
+          escrow_claimed: rec.escrow_claimed ?? null,
         });
       }
     }
-    return res.json({ plans, candidates });
+
+    return res.json({ plans: paged, candidates, total, page: safePage, totalPages, limit });
   } catch (err) {
     console.error('[admin/release/redeliver-candidates] Error:', err);
     return res.status(500).json({ error: err.message || 'Internal server error' });
@@ -615,11 +760,16 @@ router.get('/release/redeliver-candidates', async (_req, res) => {
 router.post('/release/redeliver', requireMultisig('force-redeliver'), async (req, res) => {
   try {
     const { wallet_id, authority_id, recipient_index, force_redeliver } = req.body || {};
+    const plan_id = req.body?.plan_id ? String(req.body.plan_id).trim() : null;
     if (!wallet_id || recipient_index == null) {
       return res.status(400).json({ error: 'wallet_id and recipient_index are required' });
     }
+    if (!plan_id || !String(plan_id).trim()) {
+      return res.status(400).json({ error: 'plan_id is required' });
+    }
     const result = await deliverByRegistry(wallet_id, authority_id || '', Number(recipient_index), {
       forceRedeliver: !!force_redeliver,
+      planId: plan_id || null,
     });
     if (result.delivered) {
       return res.json({ delivered: true, txId: result.txId, message: 'RWA NFT redelivered successfully.' });
@@ -786,16 +936,65 @@ router.post('/trigger/:id/resume', requireMultisig('trigger-resume'), async (req
   }
 });
 
+// ─── POST /trigger/retry-blocked — Reset attestation_blocked triggers back to cooldown for retry ───
+
+router.post('/trigger/retry-blocked', async (req, res) => {
+  try {
+    const { wallet_id, plan_id } = req.body || {};
+    if (!wallet_id || !plan_id) {
+      return res.status(400).json({ error: 'wallet_id and plan_id are required' });
+    }
+    const walletId = String(wallet_id).trim();
+    const planId = String(plan_id).trim();
+
+    // Find all triggers for this wallet/plan that are attestation_blocked
+    const allTriggers = await db.triggers.findByWallet(walletId);
+    const blocked = (allTriggers || []).filter(
+      (t) => t.plan_id === planId && t.status === 'attestation_blocked'
+    );
+
+    if (blocked.length === 0) {
+      return res.status(404).json({ error: 'No blocked triggers found for this wallet/plan' });
+    }
+
+    // Reset each blocked trigger to cooldown with a fresh effective_at (30s from now)
+    const now = Date.now();
+    const retryMs = 30 * 1000; // 30 seconds
+    let resetCount = 0;
+    for (const t of blocked) {
+      await db.triggers.update(t.trigger_id, {
+        ...t,
+        status: 'cooldown',
+        effective_at: now + retryMs,
+        blocked_at: null,
+        blocked_reason_code: null,
+        blocked_reason_detail: null,
+        attestation_gate_checked_at: null,
+      });
+      resetCount++;
+    }
+
+    return res.json({
+      message: `Reset ${resetCount} blocked trigger(s) to cooldown. They will be re-evaluated in ~30 seconds.`,
+      reset_count: resetCount,
+    });
+  } catch (err) {
+    console.error('[admin/trigger/retry-blocked] Error:', err);
+    return res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
 // ─── POST /trigger/emergency-release — Manual emergency release via fallback attestation ───
 
 router.post('/trigger/emergency-release', requireMultisig('emergency-release'), async (req, res) => {
   try {
-    const { wallet_id, recipient_index, evidence_hash } = req.body || {};
+    const { wallet_id, recipient_index, evidence_hash, plan_id } = req.body || {};
     const walletId = (wallet_id || '').trim();
+    const planId = typeof plan_id === 'string' ? plan_id.trim() : '';
     const recipientIndex = parseInt(recipient_index, 10);
     let evidenceHash = (evidence_hash || '').trim().replace(/^0x/i, '');
-    if (!walletId || !Number.isInteger(recipientIndex) || recipientIndex < 0) {
-      return res.status(400).json({ error: 'wallet_id and recipient_index (non-negative integer) are required' });
+    if (!walletId || !Number.isInteger(recipientIndex) || recipientIndex < 0 || !planId) {
+      return res.status(400).json({ error: 'wallet_id, plan_id, and recipient_index (non-negative integer) are required' });
     }
     if (!evidenceHash || evidenceHash.length !== 64 || !/^[0-9a-fA-F]+$/.test(evidenceHash)) {
       return res.status(400).json({ error: 'evidence_hash must be a 64-char hex SHA-256 hash' });
@@ -820,12 +1019,13 @@ router.post('/trigger/emergency-release', requireMultisig('emergency-release'), 
       (t) =>
         normalizeWalletId(t.wallet_id) === walletIdNo0x &&
         Number(t.recipient_index) === recipientIndex &&
+        (t.plan_id || null) === planId &&
         (t.status === 'pending' || t.status === 'cooldown')
     );
     if (dup) {
       return res.status(409).json({
         error: 'Duplicate trigger',
-        detail: 'An active trigger already exists for this wallet/recipient',
+        detail: 'An active trigger already exists for this wallet/recipient/plan',
         trigger_id: dup.trigger_id,
       });
     }
@@ -850,6 +1050,7 @@ router.post('/trigger/emergency-release', requireMultisig('emergency-release'), 
         recipientIndex,
         decision: 'release',
         evidenceHash,
+        planId,
       });
       attestationTxHash = atResult.txHash;
     } catch (atErr) {
@@ -861,6 +1062,7 @@ router.post('/trigger/emergency-release', requireMultisig('emergency-release'), 
     const record = {
       ...triggerValidation.data,
       trigger_id: triggerId,
+      plan_id: planId,
       trigger_type: 'oracle',
       emergency_recovery: true,
       reason_code: 'authorized_request',
@@ -884,7 +1086,7 @@ router.post('/trigger/emergency-release', requireMultisig('emergency-release'), 
     await db.triggers.create(triggerId, record);
     try {
       const bindings = await db.bindings.findByWallet(walletIdNorm);
-      const binding = bindings.find((b) => b.status === 'active');
+      const binding = bindings.find((b) => b.status === 'active' && (b.plan_id || null) === planId);
       const emails = [];
       if (binding && binding.authority_id) {
         const authority = await db.authorities.findById(binding.authority_id);
@@ -904,6 +1106,7 @@ router.post('/trigger/emergency-release', requireMultisig('emergency-release'), 
     }
     return res.status(201).json({
       trigger_id: triggerId,
+      plan_id: planId,
       status: 'cooldown',
       emergency_recovery: true,
       attestation_tx: attestationTxHash,

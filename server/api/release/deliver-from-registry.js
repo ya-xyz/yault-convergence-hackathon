@@ -23,11 +23,15 @@ const router = Router();
 router.post('/', async (req, res) => {
   try {
     const { wallet_id, authority_id, recipient_index, force_redeliver } = req.body || {};
+    const plan_id = req.body?.plan_id ? String(req.body.plan_id).trim() : null;
 
     if (!wallet_id || !authority_id || recipient_index == null) {
       return res.status(400).json({
         error: 'wallet_id, authority_id, and recipient_index are required',
       });
+    }
+    if (!plan_id || !String(plan_id).trim()) {
+      return res.status(400).json({ error: 'plan_id is required' });
     }
     if (req.auth?.authority_id !== authority_id) {
       return res.status(403).json({
@@ -39,7 +43,11 @@ router.post('/', async (req, res) => {
     // Verify authority has an active binding with this wallet
     const normalizedWallet = wallet_id.replace(/^0x/i, '').toLowerCase();
     const bindings = await db.bindings.findByWallet(normalizedWallet);
-    const hasBinding = bindings?.some(b => b.authority_id === authority_id && b.status === 'active');
+    const hasBinding = bindings?.some((b) =>
+      b.authority_id === authority_id &&
+      b.status === 'active' &&
+      b.plan_id === plan_id
+    );
     if (!hasBinding) {
       return res.status(403).json({
         error: 'Forbidden',
@@ -49,6 +57,7 @@ router.post('/', async (req, res) => {
 
     const result = await deliverByRegistry(wallet_id, authority_id, Number(recipient_index), {
       forceRedeliver: !!force_redeliver,
+      planId: plan_id || null,
     });
 
     if (result.delivered) {

@@ -44,6 +44,10 @@ router.post('/', async (req, res) => {
         rwa_upload_body,
         admin_factor_fingerprint,
       } = req.body || {};
+      const plan_id = req.body?.plan_id ? String(req.body.plan_id).trim() : null;
+      if (!plan_id || !String(plan_id).trim()) {
+        return res.status(400).json({ error: 'plan_id is required' });
+      }
 
       if (!req.auth || !req.auth.pubkey) {
         return res.status(401).json({ error: 'Authentication required' });
@@ -71,7 +75,8 @@ router.post('/', async (req, res) => {
 
       const walletBindings = await db.bindings.findByWallet(wallet_id);
       const binding = walletBindings.find(
-        (b) => b.status === 'active' && (b.authority_id || '') === String(authority_id || '')
+        (b) => b.status === 'active' && (b.authority_id || '') === String(authority_id || '') &&
+               b.plan_id === plan_id
       );
       if (!binding) {
         return res.status(404).json({ error: 'Active binding not found for this wallet and authority' });
@@ -83,7 +88,7 @@ router.post('/', async (req, res) => {
 
       let currentManifestTxId = binding.manifest_arweave_tx_id || null;
       if (!currentManifestTxId) {
-        currentManifestTxId = await getManifestTxIdFromRegistry(wallet_id, authority_id);
+        currentManifestTxId = await getManifestTxIdFromRegistry(wallet_id, authority_id, binding.plan_id || null);
       }
       if (!currentManifestTxId) {
         return res.status(503).json({
@@ -97,7 +102,8 @@ router.post('/', async (req, res) => {
         authority_id,
         idx,
         rwa_upload_body,
-        currentManifestTxId
+        currentManifestTxId,
+        binding.plan_id || null
       );
       if (result.error || !result.manifest_arweave_tx_id) {
         return res.status(503).json({
@@ -106,11 +112,14 @@ router.post('/', async (req, res) => {
       }
 
       const newManifestTxId = result.manifest_arweave_tx_id;
-      await updateRegistryAndSave(wallet_id, authority_id, newManifestTxId);
+      await updateRegistryAndSave(wallet_id, authority_id, newManifestTxId, binding.plan_id || null);
 
       // Reset delivery log for this recipient so the new payload can be delivered
       // without being blocked by stale "delivered" records from the old payload.
-      const logId = `${String(wallet_id).trim().toLowerCase()}_${String(authority_id).trim()}_${idx}`;
+      const bindingPlanId = binding.plan_id || null;
+      const logId = bindingPlanId
+        ? `${String(wallet_id).trim().toLowerCase()}_${String(authority_id).trim()}_${idx}_${bindingPlanId}`
+        : `${String(wallet_id).trim().toLowerCase()}_${String(authority_id).trim()}_${idx}`;
       try {
         const existingLog = await db.rwaDeliveryLog.findById(logId);
         if (existingLog) {
@@ -124,7 +133,7 @@ router.post('/', async (req, res) => {
             attempts: 0,
             updated_at: Date.now(),
           });
-          console.log('[release/replace-path-payload] Reset delivery log for replaced payload: wallet=%s recipient=%s', wallet_id, idx);
+          console.log('[release/replace-path-payload] Reset delivery log for replaced payload: wallet=%s recipient=%s plan=%s', wallet_id, idx, bindingPlanId);
         }
       } catch (logErr) {
         console.warn('[release/replace-path-payload] Non-fatal: failed to reset delivery log:', logErr.message);

@@ -24,6 +24,8 @@ const TEST_DB_PATH = path.join(__dirname, '..', '..', 'data', 'test-' + Date.now
 process.env.DATABASE_PATH = TEST_DB_PATH;
 process.env.NODE_ENV = 'test';
 process.env.ADMIN_TOKEN = 'test-admin-token-1234567890';
+process.env.ORACLE_ATTESTATION_ENABLED = 'false';
+process.env.RELEASE_ATTESTATION_ADDRESS = '';
 
 // We need tweetnacl for signing
 const nacl = require('tweetnacl');
@@ -262,6 +264,7 @@ describe('Authority Registration & Verification', () => {
 
 describe('Binding CRUD', () => {
   let authority;
+  const planId = 'plan-binding-crud';
 
   beforeAll(async () => {
     authority = await registerAndVerifyAuthority();
@@ -276,6 +279,7 @@ describe('Binding CRUD', () => {
       .send({
         wallet_id: 'wallet_binding_test_1',
         authority_id: authority.authorityId,
+        plan_id: planId,
         recipient_indices: [0, 1],
       })
       .expect(201);
@@ -302,6 +306,7 @@ describe('Binding CRUD', () => {
       .send({
         wallet_id: 'wallet_noauth',
         authority_id: authority.authorityId,
+        plan_id: planId,
         recipient_indices: [0],
       })
       .expect(401);
@@ -316,6 +321,7 @@ describe('Binding CRUD', () => {
       .send({
         wallet_id: 'wallet_delete_test',
         authority_id: authority.authorityId,
+        plan_id: planId,
         recipient_indices: [0],
       })
       .expect(201);
@@ -335,6 +341,7 @@ describe('Trigger Lifecycle', () => {
   let authority;
   let triggerId;
   const walletId = 'wallet_trigger_lifecycle';
+  const planId = 'plan-trigger-lifecycle';
 
   beforeAll(async () => {
     authority = await registerAndVerifyAuthority();
@@ -347,6 +354,7 @@ describe('Trigger Lifecycle', () => {
       .send({
         wallet_id: walletId,
         authority_id: authority.authorityId,
+        plan_id: planId,
         recipient_indices: [0, 1, 2],
       })
       .expect(201);
@@ -368,6 +376,7 @@ describe('Trigger Lifecycle', () => {
       .set('Authorization', `Ed25519 ${auth.challenge_id}:${auth.signature}`)
       .send({
         wallet_id: walletId,
+        plan_id: planId,
         recipient_index: 0,
         reason_code: 'verified_event',
         evidence_hash: evidenceHash,
@@ -396,6 +405,7 @@ describe('Trigger Lifecycle', () => {
       .set('Authorization', `Ed25519 ${auth.challenge_id}:${auth.signature}`)
       .send({
         wallet_id: walletId,
+        plan_id: planId,
         recipient_index: 0,
         reason_code: 'verified_event',
         evidence_hash: evidenceHash,
@@ -467,6 +477,7 @@ describe('Trigger Lifecycle', () => {
       .set('Authorization', `Ed25519 ${auth.challenge_id}:${auth.signature}`)
       .send({
         wallet_id: walletId,
+        plan_id: planId,
         recipient_index: 1,
         reason_code: 'verified_event',
         evidence_hash: initHash,
@@ -502,6 +513,7 @@ describe('Trigger Lifecycle', () => {
 describe('Revenue Endpoints', () => {
   let authority;
   const walletId = 'wallet_revenue_test';
+  const planId = 'plan-revenue-endpoints';
 
   beforeAll(async () => {
     authority = await registerAndVerifyAuthority();
@@ -514,6 +526,7 @@ describe('Revenue Endpoints', () => {
       .send({
         wallet_id: walletId,
         authority_id: authority.authorityId,
+        plan_id: planId,
         recipient_indices: [0],
       })
       .expect(201);

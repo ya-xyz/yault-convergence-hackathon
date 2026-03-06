@@ -37,6 +37,11 @@ function normalizeAddr(addr) {
   if (!addr || typeof addr !== 'string') return '';
   return addr.replace(/^0x/i, '').toLowerCase();
 }
+function normalizePlanId(planId) {
+  if (planId == null) return null;
+  const p = String(planId).trim();
+  return p || null;
+}
 
 /**
  * Verify caller owns the wallet_id (only wallet owner can configure or read config).
@@ -54,6 +59,10 @@ function verifyWalletOwnership(req, walletId) {
 router.get('/', async (req, res) => {
   try {
     const wallet_id = req.query.wallet_id;
+    const plan_id = normalizePlanId(req.query.plan_id);
+    if (!plan_id) {
+      return res.status(400).json({ error: 'plan_id query is required' });
+    }
     if (!wallet_id || typeof wallet_id !== 'string') {
       return res.status(400).json({ error: 'wallet_id query is required' });
     }
@@ -63,14 +72,16 @@ router.get('/', async (req, res) => {
         detail: 'You can only view release config for your own wallet',
       });
     }
-    // Use full SHA-256 hash as record ID (not truncated) to prevent collision risk
-    const id = crypto.createHash('sha256').update(wallet_id).digest('hex');
+    // Plan-scoped storage key: SHA256(wallet_id:plan_id) when plan_id present, else SHA256(wallet_id) for backward compat
+    const storageInput = plan_id ? `${wallet_id}:${plan_id}` : wallet_id;
+    const id = crypto.createHash('sha256').update(storageInput).digest('hex');
     const record = await db.recipientPaths.findById(id);
     if (!record) {
-      return res.json({ wallet_id, configured: false, paths: [], trigger_type: null, tlock_duration_months: null });
+      return res.json({ wallet_id, plan_id, configured: false, paths: [], trigger_type: null, tlock_duration_months: null });
     }
     return res.json({
       wallet_id: record.wallet_id,
+      plan_id: record.plan_id || null,
       configured: true,
       paths: record.paths || [],
       total_weight: record.total_weight,
@@ -88,6 +99,10 @@ router.get('/', async (req, res) => {
 router.post('/', async (req, res) => {
   try {
     const { wallet_id, paths, trigger_type, tlock_duration_months, authority_id, oracle_info } = req.body || {};
+    const plan_id = normalizePlanId(req.body?.plan_id);
+    if (!plan_id) {
+      return res.status(400).json({ error: 'plan_id is required' });
+    }
 
     // Validation
     const errors = [];
@@ -175,6 +190,7 @@ router.post('/', async (req, res) => {
 
     const record = {
       wallet_id,
+      plan_id: plan_id || null,
       paths: paths.map(p => {
         const out = {
           index: p.index,
@@ -202,33 +218,50 @@ router.post('/', async (req, res) => {
     if (authority_id != null && typeof authority_id === 'string') record.authority_id = authority_id.trim();
     if (oracle_info != null && typeof oracle_info === 'object') record.oracle_info = oracle_info;
 
-    // Use wallet_id as the key (one config per wallet, upsert) — full SHA-256 to prevent collision
-    const id = crypto.createHash('sha256').update(wallet_id).digest('hex');
+    // Plan-scoped storage key: SHA256(wallet_id:plan_id) when plan_id present, else SHA256(wallet_id) for backward compat
+    const storageInput = plan_id ? `${wallet_id}:${plan_id}` : wallet_id;
+    const id = crypto.createHash('sha256').update(storageInput).digest('hex');
     await db.recipientPaths.create(id, record);
 
     // Maintain reverse indexes for efficient recipient lookups (avoids findAll in /claim/me)
     const walletIdNorm = normalizeAddr(wallet_id);
-    await db.recipientPathIndex.deleteByWalletId(walletIdNorm);
-    await db.mnemonicHashIndex.deleteByWalletId(walletIdNorm);
+    if (typeof db.recipientPathIndex.deleteByWalletPlan === 'function') {
+      await db.recipientPathIndex.deleteByWalletPlan(walletIdNorm, plan_id);
+    } else {
+      await db.recipientPathIndex.deleteByWalletId(walletIdNorm);
+    }
+    if (typeof db.mnemonicHashIndex.deleteByWalletPlan === 'function') {
+      await db.mnemonicHashIndex.deleteByWalletPlan(walletIdNorm, plan_id);
+    } else {
+      await db.mnemonicHashIndex.deleteByWalletId(walletIdNorm);
+    }
     for (const p of record.paths) {
       const recipAddr = p.recipient_evm_address ? normalizeAddr(p.recipient_evm_address) : '';
       if (recipAddr) {
-        await db.recipientPathIndex.create(`${recipAddr}_${walletIdNorm}`, {
+        const idxId = plan_id
+          ? `${recipAddr}_${walletIdNorm}_${plan_id}`
+          : `${recipAddr}_${walletIdNorm}`;
+        await db.recipientPathIndex.create(idxId, {
           recipient_address: recipAddr,
           wallet_id: walletIdNorm,
+          plan_id,
         });
       }
       if (p.recipient_mnemonic_hash) {
-        await db.mnemonicHashIndex.create(`${p.recipient_mnemonic_hash}_${walletIdNorm}`, {
+        const idxId = plan_id
+          ? `${p.recipient_mnemonic_hash}_${walletIdNorm}_${plan_id}`
+          : `${p.recipient_mnemonic_hash}_${walletIdNorm}`;
+        await db.mnemonicHashIndex.create(idxId, {
           mnemonic_hash: p.recipient_mnemonic_hash,
           wallet_id: walletIdNorm,
+          plan_id,
           recipient_address: recipAddr,
           path_index: p.index,
         });
       }
     }
 
-    const out = { wallet_id, paths_count: paths.length, total_weight: totalWeight };
+    const out = { wallet_id, plan_id: plan_id || null, paths_count: paths.length, total_weight: totalWeight };
     if (record.trigger_type) out.trigger_type = record.trigger_type;
     if (record.tlock_duration_months) out.tlock_duration_months = record.tlock_duration_months;
     return res.status(201).json(out);
