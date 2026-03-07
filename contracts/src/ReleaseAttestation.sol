@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IReleaseAttestation, Attestation} from "./interfaces/IReleaseAttestation.sol";
 
 /**
  * @title ReleaseAttestation
@@ -10,8 +11,9 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
  *        Only the configured oracle submitter (e.g. Chainlink CRE Forwarder) can submit
  *        oracle attestations; only whitelisted fallback addresses can submit fallback attestations.
  *        Platform and clients read getAttestation to implement "oracle first, fallback when absent".
+ * @dev SC-H-01 FIX: Now explicitly implements IReleaseAttestation.
  */
-contract ReleaseAttestation is Ownable {
+contract ReleaseAttestation is Ownable, IReleaseAttestation {
     // -----------------------------------------------------------------------
     //  Sources and decisions (match platform ReleaseDecision semantics)
     // -----------------------------------------------------------------------
@@ -23,14 +25,8 @@ contract ReleaseAttestation is Ownable {
     uint8 public constant DECISION_HOLD = 1;
     uint8 public constant DECISION_REJECT = 2;
 
-    struct Attestation {
-        uint8 source;       // SOURCE_ORACLE | SOURCE_FALLBACK
-        uint8 decision;     // DECISION_RELEASE | DECISION_HOLD | DECISION_REJECT
-        bytes32 reasonCode; // e.g. keccak256("verified_death") — optional, 0 for none
-        bytes32 evidenceHash;
-        uint64 timestamp;
-        address submitter;
-    }
+    // SC-H-01 FIX: Attestation struct is defined in IReleaseAttestation.sol (file-level)
+    // and imported above. Removed duplicate struct definition here.
 
     /// @notice (walletIdHash => (recipientIndex => Attestation))
     mapping(bytes32 => mapping(uint256 => Attestation)) private _attestations;
@@ -87,7 +83,9 @@ contract ReleaseAttestation is Ownable {
     }
 
     /// @notice Allow or disallow a fallback submitter (entity authority relayer / backend).
+    /// @dev SC-M-07 FIX: Added zero-address check for consistency.
     function setFallbackSubmitter(address submitter, bool allowed) external onlyOwner {
+        if (submitter == address(0)) revert ZeroAddress();
         fallbackSubmitters[submitter] = allowed;
         emit FallbackSubmitterSet(submitter, allowed);
     }

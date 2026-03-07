@@ -38,10 +38,11 @@ const env = JSON.parse(readFileSync(envPath, 'utf-8'));
 // ---------------------------------------------------------------------------
 
 function toEnvVars(cfg) {
+  const security = cfg.security || {};
   const lines = [
     `# Auto-generated from env/${profile}.json — DO NOT EDIT`,
     `# Generated: ${new Date().toISOString()}`,
-    `# Sensitive values (ADMIN_TOKEN, YAULT_API_KEY, etc.) go in .env`,
+    `# Sensitive values (ADMIN_TOKEN, YAULT_API_KEY, ARWEAVE_WALLET_JWK, etc.) go in .env`,
     '',
     `ENV_PROFILE=${profile}`,
     `NODE_ENV=${cfg.server?.nodeEnv || 'development'}`,
@@ -51,6 +52,9 @@ function toEnvVars(cfg) {
     '',
     `DRAND_CHAIN_HASH=${cfg.drand?.chainHash || ''}`,
     `ARWEAVE_GATEWAY=${cfg.arweave?.gateway || 'https://arweave.net'}`,
+    `ARWEAVE_GATEWAY_ALLOWLIST=${cfg.arweave?.gatewayAllowlist || 'https://arweave.net,https://ar-io.net,https://arweave.developerdao.com,https://turbo-gateway.com'}`,
+    `ARWEAVE_EXTRA_GATEWAYS=${cfg.arweave?.extraGateways || ''}`,
+    `ALLOW_UNLISTED_ARWEAVE_GATEWAYS=${cfg.arweave?.allowUnlistedGateways ?? false}`,
     '',
     `EMAIL_PROVIDER=${cfg.email?.provider || 'console'}`,
     `EMAIL_FROM=${cfg.email?.from || 'noreply@yault.xyz'}`,
@@ -68,6 +72,9 @@ function toEnvVars(cfg) {
     `VAULT_ADDRESS=${cfg.claim?.vaultAddress || ''}`,
     '',
     `ADMIN_WALLETS=${cfg.auth?.adminWallets || ''}`,
+    `ADMIN_SESSION_IP_PINNING=${security.adminSessionIpPinning ?? (profile === 'production')}`,
+    `MULTISIG_REQUEST_WINDOW_MS=${security.multisigRequestWindowMs ?? 60000}`,
+    `MULTISIG_MAX_REQUESTS_PER_WINDOW=${security.multisigMaxRequestsPerWindow ?? 24}`,
   ];
 
   // RPC overrides (optional)

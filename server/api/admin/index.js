@@ -34,6 +34,7 @@ const router = Router();
 // ─── Admin Auth Middleware ───
 
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
+const ADMIN_SESSION_IP_PINNING = process.env.ADMIN_SESSION_IP_PINNING === 'true';
 
 /** Comma-separated EVM addresses authorized as admin (with or without 0x prefix). Quotes are stripped. */
 const ADMIN_WALLETS = (process.env.ADMIN_WALLETS || '')
@@ -46,6 +47,25 @@ const sessionCreateTracker = new Map(); // IP -> { count, resetAt }
 const SESSION_RATE_LIMIT = 5; // max per minute
 const SESSION_TTL_MS = 60 * 60 * 1000; // 1 hour
 const MAX_SESSIONS = 100;
+
+function getRequestIp(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.trim()) {
+    return forwarded.split(',')[0].trim();
+  }
+  return req.ip || req.connection?.remoteAddress || req.socket?.remoteAddress || 'unknown';
+}
+
+function timingSafeTokenMatch(a, b) {
+  const left = Buffer.from(String(a || ''), 'utf8');
+  const right = Buffer.from(String(b || ''), 'utf8');
+  const maxLen = Math.max(left.length, right.length);
+  const leftBuf = Buffer.alloc(maxLen);
+  const rightBuf = Buffer.alloc(maxLen);
+  left.copy(leftBuf);
+  right.copy(rightBuf);
+  return crypto.timingSafeEqual(leftBuf, rightBuf);
+}
 
 // Prune expired sessions periodically
 const _sessionPruneTimer = setInterval(async () => {
@@ -84,7 +104,15 @@ router.post('/session', async (req, res) => {
         }
         const sessionToken = crypto.randomBytes(32).toString('hex');
         const expiresAt = Date.now() + SESSION_TTL_MS;
-        await db.adminSessions.create(sessionToken, { _sessionId: sessionToken, address: addr, expires: expiresAt });
+        await db.adminSessions.create(sessionToken, {
+          _sessionId: sessionToken,
+          address: addr,
+          expires: expiresAt,
+          created_ip: getRequestIp(req),
+          created_user_agent: req.headers['user-agent'] || null,
+          last_used_at: Date.now(),
+          use_count: 1,
+        });
         return res.json({ session_token: sessionToken, address: addr, expires_at: expiresAt });
       }
       return res.status(403).json({ error: 'Wallet not authorized as admin' });
@@ -129,7 +157,15 @@ router.post('/session', async (req, res) => {
 
   const sessionToken = crypto.randomBytes(32).toString('hex');
   const expiresAt = Date.now() + SESSION_TTL_MS;
-  await db.adminSessions.create(sessionToken, { _sessionId: sessionToken, address: addr, expires: expiresAt });
+  await db.adminSessions.create(sessionToken, {
+    _sessionId: sessionToken,
+    address: addr,
+    expires: expiresAt,
+    created_ip: clientIp,
+    created_user_agent: req.headers['user-agent'] || null,
+    last_used_at: Date.now(),
+    use_count: 1,
+  });
 
   return res.json({
     session_token: sessionToken,
@@ -142,9 +178,7 @@ async function adminAuth(req, res, next) {
   // Method 1: Legacy admin token (X-Admin-Token header)
   // H-02 FIX: Only accept admin token from headers (not query params to avoid log exposure)
   const token = req.headers['x-admin-token'];
-  if (ADMIN_TOKEN && token && typeof token === 'string' &&
-      token.length === ADMIN_TOKEN.length &&
-      crypto.timingSafeEqual(Buffer.from(token), Buffer.from(ADMIN_TOKEN))) {
+  if (ADMIN_TOKEN && typeof token === 'string' && timingSafeTokenMatch(token, ADMIN_TOKEN)) {
     req.adminAuth = { method: 'token' };
     return next();
   }
@@ -154,6 +188,12 @@ async function adminAuth(req, res, next) {
   if (sessionToken) {
     const session = await db.adminSessions.findById(sessionToken);
     if (session && session.expires > Date.now()) {
+      if (ADMIN_SESSION_IP_PINNING && session.created_ip && session.created_ip !== getRequestIp(req)) {
+        return res.status(401).json({ error: 'Session context mismatch', detail: 'Session is bound to a different network endpoint.' });
+      }
+      session.last_used_at = Date.now();
+      session.use_count = (session.use_count || 0) + 1;
+      await db.adminSessions.update(sessionToken, session);
       req.adminAuth = { address: session.address, method: 'session' };
       return next();
     }

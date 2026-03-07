@@ -57,6 +57,9 @@ contract CrossChainVaultBridgeTest is Test {
     address public constant REMOTE_BRIDGE = address(0xCAFE);
 
     function setUp() public {
+        // Warp to a realistic timestamp so rate limiting doesn't block initial sends
+        vm.warp(1000);
+
         router = new MockCCIPRouter();
         vault = new MockVault4626();
         bridge = new CrossChainVaultBridge(owner, address(router), address(0));

@@ -14,6 +14,7 @@ const config = require('../../config');
 const db = require('../../db');
 const { submitFallbackAttestation } = require('../../services/attestationSubmitter');
 const { deliverRwaPackageForRecipient } = require('../../services/deliverRwaRelease');
+const { getAttestation } = require('../../services/attestationClient');
 
 const router = Router();
 
@@ -59,6 +60,27 @@ router.post('/', authorityAuthMiddleware, async (req, res) => {
         error: 'Fallback attestation not configured',
         detail: 'Set RELEASE_ATTESTATION_ADDRESS and RELEASE_ATTESTATION_RELAYER_PRIVATE_KEY.',
       });
+    }
+
+    // BE-H-01 FIX: Check if oracle attestation already exists on-chain.
+    // The on-chain contract also enforces this (OracleAttestationAlreadyExists error),
+    // but checking early avoids wasted gas and provides a clearer error message.
+    try {
+      const existing = await getAttestation({
+        rpcUrl: config.oracle?.rpcUrl || config.rpcUrl,
+        contractAddress: config.oracle.releaseAttestationAddress,
+        walletId: wallet_id,
+        recipientIndex: Number(recipient_index),
+        planId: plan_id,
+      });
+      if (existing && existing.source === 'oracle') {
+        return res.status(409).json({
+          error: 'Oracle attestation already exists',
+          detail: `An oracle attestation with decision="${existing.decision}" already exists for this wallet/recipient. Fallback cannot overwrite oracle attestations.`,
+        });
+      }
+    } catch (checkErr) {
+      console.warn('[trigger/attestation-fallback] Failed to check existing attestation, proceeding with on-chain guard:', checkErr.message);
     }
 
     const result = await submitFallbackAttestation(config, {

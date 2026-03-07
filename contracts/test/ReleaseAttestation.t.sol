@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Test, console2} from "forge-std/Test.sol";
+import {Attestation} from "../src/interfaces/IReleaseAttestation.sol";
 import {ReleaseAttestation} from "../src/ReleaseAttestation.sol";
 
 contract ReleaseAttestationTest is Test {
@@ -28,7 +29,7 @@ contract ReleaseAttestationTest is Test {
     function test_InitialState() public view {
         assertEq(attestation.oracleSubmitter(), address(0));
         assertFalse(attestation.fallbackSubmitters(fallbackSubmitter));
-        ReleaseAttestation.Attestation memory a = attestation.getAttestation(WALLET_HASH, 0);
+        Attestation memory a = attestation.getAttestation(WALLET_HASH, 0);
         assertEq(a.source, 0);
         assertEq(a.decision, 0);
         assertFalse(attestation.hasAttestation(WALLET_HASH, 0));
@@ -77,7 +78,7 @@ contract ReleaseAttestationTest is Test {
             EVIDENCE_HASH
         );
 
-        ReleaseAttestation.Attestation memory a = attestation.getAttestation(WALLET_HASH, 0);
+        Attestation memory a = attestation.getAttestation(WALLET_HASH, 0);
 
         assertEq(a.source, attestation.SOURCE_ORACLE());
         assertEq(a.decision, attestation.DECISION_RELEASE());
@@ -101,7 +102,7 @@ contract ReleaseAttestationTest is Test {
             EVIDENCE_HASH
         );
 
-        ReleaseAttestation.Attestation memory a = attestation.getAttestation(WALLET_HASH, 1);
+        Attestation memory a = attestation.getAttestation(WALLET_HASH, 1);
         assertEq(a.source, attestation.SOURCE_FALLBACK());
         assertEq(a.decision, attestation.DECISION_HOLD());
         assertTrue(attestation.hasAttestation(WALLET_HASH, 1));
@@ -158,7 +159,7 @@ contract ReleaseAttestationTest is Test {
         attestation.submitAttestation(srcO, WALLET_HASH, 0, decR, REASON_CODE, EVIDENCE_HASH);
 
         // Verify it's recorded
-        ReleaseAttestation.Attestation memory a = attestation.getAttestation(WALLET_HASH, 0);
+        Attestation memory a = attestation.getAttestation(WALLET_HASH, 0);
         assertEq(a.decision, decR, "should be RELEASE");
 
         // Oracle tries to overwrite RELEASE with HOLD — must revert
@@ -195,14 +196,14 @@ contract ReleaseAttestationTest is Test {
         vm.prank(oracleSubmitter);
         attestation.submitAttestation(srcO, WALLET_HASH, 3, decH, REASON_CODE, EVIDENCE_HASH);
 
-        ReleaseAttestation.Attestation memory a1 = attestation.getAttestation(WALLET_HASH, 3);
+        Attestation memory a1 = attestation.getAttestation(WALLET_HASH, 3);
         assertEq(a1.decision, decH, "should be HOLD");
 
         // Oracle overwrites HOLD with RELEASE — should succeed
         vm.prank(oracleSubmitter);
         attestation.submitAttestation(srcO, WALLET_HASH, 3, decR, REASON_CODE, EVIDENCE_HASH);
 
-        ReleaseAttestation.Attestation memory a2 = attestation.getAttestation(WALLET_HASH, 3);
+        Attestation memory a2 = attestation.getAttestation(WALLET_HASH, 3);
         assertEq(a2.decision, decR, "should now be RELEASE");
     }
 
@@ -221,7 +222,7 @@ contract ReleaseAttestationTest is Test {
         vm.prank(oracleSubmitter);
         attestation.submitAttestation(srcO, WALLET_HASH, 4, decR, REASON_CODE, EVIDENCE_HASH);
 
-        ReleaseAttestation.Attestation memory a = attestation.getAttestation(WALLET_HASH, 4);
+        Attestation memory a = attestation.getAttestation(WALLET_HASH, 4);
         assertEq(a.decision, decR, "should now be RELEASE");
     }
 

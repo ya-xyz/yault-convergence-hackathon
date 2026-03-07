@@ -324,11 +324,13 @@ function createCollection(name, options = {}) {
      */
     async delete(id) {
       const db = await ensureReady();
-      const before = db.getRowsModified ? db.getRowsModified() : 0;
       db.run(`DELETE FROM "${name}" WHERE id = ?`, [id]);
       _markDirty();
-      const after = db.getRowsModified ? db.getRowsModified() : 1;
-      return (after - before) > 0 || true; // sql.js doesn't easily expose changes for DELETE
+      const changedResult = db.exec('SELECT changes()');
+      const changed = changedResult.length > 0 && changedResult[0].values.length > 0
+        ? Number(changedResult[0].values[0][0])
+        : 0;
+      return changed > 0;
     },
 
     /**

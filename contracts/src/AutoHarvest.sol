@@ -95,6 +95,10 @@ contract AutoHarvest is Ownable, AutomationCompatibleInterface {
     error OnlyAutomationForwarder();
     error TargetIndexOutOfBounds();
     error BatchSizeTooLarge();
+    error ThresholdTooLow();
+
+    /// @notice Ring buffer index for harvest history.
+    uint256 public historyIndex;
 
     // -----------------------------------------------------------------------
     //  Constructor
@@ -128,8 +132,10 @@ contract AutoHarvest is Ownable, AutomationCompatibleInterface {
         emit TargetRemoved(targetIndex);
     }
 
-    /// @notice Update the minimum yield threshold.
+    /// @notice Update the minimum yield threshold (minimum 100 to prevent dust harvests).
     function setMinYieldThreshold(uint256 newThreshold) external onlyOwner {
+        // SC-L-01 FIX: Enforce minimum threshold to prevent dust harvests
+        if (newThreshold < 100) revert ThresholdTooLow();
         uint256 old = minYieldThreshold;
         minYieldThreshold = newThreshold;
         emit MinYieldThresholdUpdated(old, newThreshold);
@@ -201,7 +207,13 @@ contract AutoHarvest is Ownable, AutomationCompatibleInterface {
 
         for (uint256 i; i < indices.length;) {
             uint256 idx = indices[i];
-            if (idx < targets.length && targets[idx].active) {
+            // Skip duplicates: only harvest if not already harvested in this tx
+            bool isDuplicate = false;
+            for (uint256 j; j < i;) {
+                if (indices[j] == idx) { isDuplicate = true; break; }
+                unchecked { ++j; }
+            }
+            if (!isDuplicate && idx < targets.length && targets[idx].active) {
                 bool success = _executeHarvest(idx);
                 if (success) succeeded++;
             }
@@ -284,27 +296,33 @@ contract AutoHarvest is Ownable, AutomationCompatibleInterface {
     }
 
     /// @dev Execute a harvest for a target, recording the result.
+    /// @dev SC-H-05 FIX: Only update lastHarvested on success.
+    /// @dev SC-H-02 FIX: Proper ring buffer for harvest history.
     function _executeHarvest(uint256 idx) internal returns (bool success) {
         HarvestTarget storage t = targets[idx];
-        lastHarvested[idx] = block.timestamp;
 
         try IYaultVault(t.vault).harvestFor(t.user) {
             success = true;
+            // SC-H-05 FIX: Only update timestamp on successful harvest
+            lastHarvested[idx] = block.timestamp;
         } catch {
             success = false;
         }
 
-        // Record history (circular buffer)
-        if (harvestHistory.length >= MAX_HISTORY) {
-            // Shift is too expensive; just track last MAX_HISTORY naturally
-            // In production, use a ring buffer pattern
-        }
-        harvestHistory.push(HarvestRecord({
+        // SC-H-02 FIX: Ring buffer pattern for bounded storage growth
+        HarvestRecord memory record = HarvestRecord({
             vault: t.vault,
             user: t.user,
             timestamp: block.timestamp,
             success: success
-        }));
+        });
+
+        if (harvestHistory.length < MAX_HISTORY) {
+            harvestHistory.push(record);
+        } else {
+            harvestHistory[historyIndex % MAX_HISTORY] = record;
+        }
+        historyIndex++;
 
         emit HarvestExecuted(t.vault, t.user, block.timestamp, success);
     }

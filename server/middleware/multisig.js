@@ -39,6 +39,11 @@ const MULTISIG_POLICY = {
   'force-redeliver':       { required: 2, expiry_ms: 4 * 60 * 60 * 1000 },
 };
 
+const MULTISIG_REQUEST_WINDOW_MS = Math.max(1, parseInt(process.env.MULTISIG_REQUEST_WINDOW_MS || `${60 * 1000}`, 10));
+const MULTISIG_MAX_REQUESTS_PER_WINDOW = Math.max(1, parseInt(process.env.MULTISIG_MAX_REQUESTS_PER_WINDOW || `${24}`, 10));
+
+const _requestBuckets = new Map(); // key `${action}:${address}:${ip}` -> { count, resetAt }
+
 // Allow override via env: MULTISIG_DISABLED=true skips all checks (dev/test only)
 function isMultisigDisabled() {
   // Multi-sig is always disabled in test environment to allow integration tests
@@ -54,6 +59,32 @@ function getRequiredCount(action) {
     return Math.max(1, parseInt(envVal, 10));
   }
   return MULTISIG_POLICY[action]?.required || 2;
+}
+
+function getRequestIp(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.trim()) {
+    return forwarded.split(',')[0].trim();
+  }
+  return req.ip || req.connection?.remoteAddress || req.socket?.remoteAddress || 'unknown';
+}
+
+function isRateLimited(action, address, ip) {
+  const key = `${action}:${address}:${ip}`;
+  const now = Date.now();
+  const bucket = _requestBuckets.get(key);
+  if (!bucket || bucket.resetAt <= now) {
+    _requestBuckets.set(key, {
+      count: 1,
+      resetAt: now + MULTISIG_REQUEST_WINDOW_MS,
+    });
+    return false;
+  }
+  bucket.count += 1;
+  if (bucket.count > MULTISIG_MAX_REQUESTS_PER_WINDOW) {
+    return true;
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -129,6 +160,14 @@ function requireMultisig(action) {
       return res.status(403).json({
         error: 'Multi-sig requires wallet authentication',
         detail: 'Use wallet signature or admin session (not static token) for multi-sig operations.',
+      });
+    }
+
+    const requestIp = getRequestIp(req);
+    if (isRateLimited(action, signerAddress, requestIp)) {
+      return res.status(429).json({
+        error: 'Too many multisig requests',
+        detail: `Rate limit exceeded for action "${action}". Please retry after ${Math.ceil(MULTISIG_REQUEST_WINDOW_MS / 1000)}s.`,
       });
     }
 

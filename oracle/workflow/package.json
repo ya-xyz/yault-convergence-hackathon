@@ -6,10 +6,12 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "simulate": "cre workflow simulate . --target staging-settings"
+    "simulate": "cre workflow simulate . --target staging"
   },
   "dependencies": {
-    "@chainlink/cre-sdk": "latest"
+    "@chainlink/cre-sdk": "latest",
+    "viem": "^2.31.6",
+    "zod": "^3.24.1"
   },
   "devDependencies": {
     "typescript": "^5.0.0"

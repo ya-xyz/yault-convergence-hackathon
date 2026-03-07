@@ -24,15 +24,17 @@ const DECISION_REJECT = 2;
 
 /**
  * Compute walletIdHash for the ReleaseAttestation contract.
- * Plan-scoped: hash = keccak256(walletId + ":" + planId)
- * so each plan gets an independent attestation namespace on-chain.
+ * When planId is provided: hash = keccak256(walletId + ":" + planId)
+ *   so each plan gets an independent attestation namespace on-chain.
+ * When planId is absent: hash = keccak256(walletId)
+ *   for legacy / non-plan-scoped queries.
  * @param {string} walletId
- * @param {string} planId - plan identifier (required)
+ * @param {string} [planId] - plan identifier (optional for reads, required for writes)
  * @returns {string} 0x-prefixed hex bytes32
  */
 function walletIdHash(walletId, planId) {
-  if (!planId) throw new Error('walletIdHash: planId is required');
-  return ethers.keccak256(ethers.toUtf8Bytes(`${walletId}:${planId}`));
+  const preimage = planId ? `${walletId}:${planId}` : walletId;
+  return ethers.keccak256(ethers.toUtf8Bytes(preimage));
 }
 
 /**

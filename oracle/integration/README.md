@@ -4,13 +4,14 @@ This folder documents how the **oracle** layer plugs into the existing server an
 
 ## Flow: Oracle first, entity fallback
 
-1. **Oracle path** (with 3 external data source checks)
+1. **Oracle path** (with 4 external data source checks)
    - CRE workflow is triggered (cron or HTTP).
    - Workflow optionally fetches pending requests from `GET /api/oracle/pending`.
-   - **Before attesting**, workflow runs 3 external data source checks in parallel:
+   - **Before attesting**, workflow runs 4 external data source checks in parallel:
      - **A) drand beacon** — fetches latest round from `https://drand.cloudflare.com` as verifiable timestamp proof
      - **B) Vault balance** — queries `totalAssets()` on the ERC-4626 vault via `eth_call` to confirm non-zero holdings
      - **C) Compliance screening** — calls `GET /api/compliance/screen` for KYC/AML/sanctions check
+     - **D) Chainlink price feed** — reads latest AggregatorV3 data for enrichment and freshness gating
    - If vault is empty or compliance fails → attestation is **aborted**.
    - Otherwise, enriches `evidenceHash` with drand round + randomness + vault state + compliance checkId.
    - Workflow calls `ReleaseAttestation.submitAttestation(SOURCE_ORACLE, ...)` via CRE EVM Write.
@@ -32,13 +33,13 @@ This folder documents how the **oracle** layer plugs into the existing server an
                             │
               ┌─────────────┼─────────────┐
               ▼             ▼             ▼
-     ┌────────────┐ ┌────────────┐ ┌────────────┐
-     │ A) drand   │ │ B) Vault   │ │ C) Comply  │
-     │ beacon     │ │ eth_call   │ │ screen API │
-     │ (ext API)  │ │ (on-chain) │ │ (ext API)  │
-     └─────┬──────┘ └─────┬──────┘ └─────┬──────┘
-           │              │              │
-           └──────────────┼──────────────┘
+     ┌────────────┐ ┌────────────┐ ┌────────────┐ ┌────────────┐
+     │ A) drand   │ │ B) Vault   │ │ C) Comply  │ │ D) Price   │
+     │ beacon     │ │ eth_call   │ │ screen API │ │ feed       │
+     │ (ext API)  │ │ (on-chain) │ │ (ext API)  │ │ (on-chain) │
+     └─────┬──────┘ └─────┬──────┘ └─────┬──────┘ └─────┬──────┘
+           │              │              │              │
+           └──────────────┼──────────────┼──────────────┘
                           ▼
               ┌───────────────────────┐
               │ Gate: balance > 0 ?   │──No──▶ ABORT
@@ -52,7 +53,8 @@ This folder documents how the **oracle** layer plugs into the existing server an
               │   ‖ drand_round       │
               │   ‖ drand_randomness  │
               │   ‖ vault_totalAssets │
-              │   ‖ compliance_id)    │
+              │   ‖ compliance_id     │
+              │   ‖ price_components*)│
               └───────────┬───────────┘
                           ▼
               ┌───────────────────────┐
@@ -60,6 +62,8 @@ This folder documents how the **oracle** layer plugs into the existing server an
               │ submitAttestation()   │
               └───────────────────────┘
 ```
+
+`price_components*` are included when `priceFeedAddress` is configured in workflow config.
 
 ## Server config (env)
 
