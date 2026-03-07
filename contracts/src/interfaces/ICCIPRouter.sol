@@ -26,6 +26,19 @@ library Client {
         address token;
         uint256 amount;
     }
+
+    /// @dev SC-L-08 FIX: EVMExtraArgsV1 for proper CCIP extraArgs encoding.
+    struct EVMExtraArgsV1 {
+        uint256 gasLimit;
+    }
+
+    /// @dev 4-byte tag that the CCIP router uses to identify EVMExtraArgsV1.
+    bytes4 public constant EVM_EXTRA_ARGS_V1_TAG = 0x97a657c9;
+
+    /// @notice Encode EVMExtraArgsV1 into the bytes format expected by the CCIP router.
+    function _argsToBytes(EVMExtraArgsV1 memory extraArgs) internal pure returns (bytes memory) {
+        return abi.encodeWithSelector(EVM_EXTRA_ARGS_V1_TAG, extraArgs);
+    }
 }
 
 /// @notice Minimal Chainlink CCIP Router interface.

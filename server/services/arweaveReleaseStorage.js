@@ -27,6 +27,23 @@ const MANIFEST_TAG = 'Yault-Type';
 const MANIFEST_VALUE = 'rwa-release-manifest';
 const PAYLOAD_TAG_VALUE = 'rwa-release-payload';
 const REGISTRY_VALUE = 'rwa-release-registry';
+const ARWEAVE_DEFAULT_GATEWAYS = ['https://arweave.net', 'https://ar-io.net', 'https://arweave.developerdao.com', 'https://turbo-gateway.com'];
+const ARWEAVE_GATEWAY_ALLOWLIST = new Set(
+  (process.env.ARWEAVE_GATEWAY_ALLOWLIST || ARWEAVE_DEFAULT_GATEWAYS.join(','))
+    .split(',')
+    .map((gwRaw) => {
+      const gw = String(gwRaw || '').trim();
+      if (!gw) return '';
+      try {
+        return new URL(gw).hostname.toLowerCase();
+      } catch (_) {
+        const withoutProto = gw.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').replace(/\/.*$/, '');
+        return withoutProto.toLowerCase();
+      }
+    })
+    .filter(Boolean)
+);
+const ALLOW_UNLISTED_ARWEAVE_GATEWAYS = process.env.ALLOW_UNLISTED_ARWEAVE_GATEWAYS === 'true';
 
 // Cached Arweave client and wallet (avoid re-init on every upload)
 let _cachedWallet = undefined; // undefined = not yet loaded, null = load failed
@@ -89,11 +106,42 @@ async function loadArweaveWallet() {
   }
 }
 
+function normalizeGatewayUrl(raw, fallback) {
+  try {
+    const input = String(raw || '').trim();
+    if (!input) return fallback;
+    const parsed = new URL(input);
+    if (parsed.protocol !== 'https:') return fallback;
+    const host = parsed.hostname.toLowerCase();
+    if (!ALLOW_UNLISTED_ARWEAVE_GATEWAYS && !ARWEAVE_GATEWAY_ALLOWLIST.has(host)) {
+      console.warn('[arweaveReleaseStorage] blocked non-whitelisted gateway:', host);
+      return fallback;
+    }
+    return `${parsed.protocol}//${parsed.host}`.replace(/\/$/, '');
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function getArweaveGatewayCandidates() {
+  const configured = normalizeGatewayUrl(config.arweave?.gateway || 'https://arweave.net', 'https://arweave.net');
+  const configuredList = configured ? [configured] : [];
+  const fallbackList = ARWEAVE_DEFAULT_GATEWAYS
+    .map((gw) => normalizeGatewayUrl(gw, null))
+    .filter(Boolean);
+  const extra = (process.env.ARWEAVE_EXTRA_GATEWAYS || '')
+    .split(',')
+    .map((gw) => normalizeGatewayUrl(gw, null))
+    .filter(Boolean);
+  return [...new Set([...configuredList, ...fallbackList, ...extra])];
+}
+
 function getArweaveClient() {
   if (_cachedArweaveClient) return _cachedArweaveClient;
   const Arweave = require('arweave');
+  const primaryGateway = normalizeGatewayUrl(config.arweave?.gateway || 'https://arweave.net', 'https://arweave.net');
   _cachedArweaveClient = Arweave.init({
-    host: (config.arweave?.gateway || 'https://arweave.net').replace('https://', ''),
+    host: primaryGateway.replace('https://', ''),
     port: 443,
     protocol: 'https',
   });
@@ -208,7 +256,6 @@ async function uploadToArweave(dataStr, options = {}) {
  * @returns {Promise<string|null>} Response body text or null
  */
 const ARWEAVE_FETCH_TIMEOUT_MS = 15000; // 15s per-gateway timeout
-const ARWEAVE_FALLBACK_GATEWAYS = ['https://arweave.net', 'https://ar-io.net', 'https://arweave.developerdao.com', 'https://turbo-gateway.com'];
 const ARWEAVE_TX_ID_RE = /^[a-zA-Z0-9_-]{43}$/;
 
 function normalizeArweaveTxId(input) {
@@ -265,8 +312,7 @@ async function fetchFromArweave(txId, { skipExtendedRetry = false } = {}) {
     _recentUploads.set(normalizedTxId, { data: diskCached, ts: Date.now() });
     return diskCached;
   }
-  const configured = (config.arweave?.gateway || 'https://arweave.net').replace(/\/$/, '');
-  const gateways = [...new Set([configured, ...ARWEAVE_FALLBACK_GATEWAYS])];
+  const gateways = getArweaveGatewayCandidates().filter((gw) => Boolean(gw && gw.startsWith('https://')));
 
   // Race all gateways concurrently — first success wins
   const racePromises = gateways.map(async (gw) => {

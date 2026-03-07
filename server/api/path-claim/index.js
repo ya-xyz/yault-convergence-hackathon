@@ -13,8 +13,12 @@
 const { Router } = require('express');
 const config = require('../../config');
 const pathClaimContract = require('../../services/pathClaimContract');
+const { dualAuthMiddleware } = require('../../middleware/auth');
 
 const router = Router();
+router.use('/remaining', dualAuthMiddleware);
+router.use('/claim-params', dualAuthMiddleware);
+router.use('/parse-blob', dualAuthMiddleware);
 
 /** Blob format: 32 bytes AdminFactor + 8 bytes amount (u64 big-endian). */
 function parseBlob(blobHex) {

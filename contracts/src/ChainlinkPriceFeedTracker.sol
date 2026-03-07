@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {AggregatorV3Interface} from "./interfaces/IChainlinkPriceFeed.sol";
 
 /**
@@ -89,6 +90,11 @@ contract ChainlinkPriceFeedTracker is Ownable {
     error StalePrice(address feed, uint256 updatedAt, uint256 maxAge);
     error NegativePrice(address feed, int256 price);
     error NoVaultsRegistered();
+    error OnlyOwnerOrSelf();
+    error MaxSnapshotsReached();
+
+    /// @notice Maximum snapshots per user.
+    uint256 public constant MAX_SNAPSHOTS = 500;
 
     // -----------------------------------------------------------------------
     //  Constructor
@@ -242,9 +248,12 @@ contract ChainlinkPriceFeedTracker is Ownable {
     //  NAV Snapshots
     // -----------------------------------------------------------------------
 
-    /// @notice Take a NAV snapshot for a user (callable by anyone, costs gas).
+    /// @notice Take a NAV snapshot for a user.
+    /// @dev SC-M-06 FIX: Restricted to owner or the user themselves. Bounded storage.
     /// @param user The user address to snapshot.
     function takeSnapshot(address user) external {
+        if (msg.sender != owner() && msg.sender != user) revert OnlyOwnerOrSelf();
+        if (_snapshots[user].length >= MAX_SNAPSHOTS) revert MaxSnapshotsReached();
         uint256 count = registeredVaults.length;
         if (count == 0) revert NoVaultsRegistered();
 
@@ -328,7 +337,7 @@ contract ChainlinkPriceFeedTracker is Ownable {
         (, int256 answer,, uint256 updatedAt,) = vf.priceFeed.latestRoundData();
 
         if (answer <= 0) revert NegativePrice(address(vf.priceFeed), answer);
-        if (block.timestamp - updatedAt > maxStaleness) {
+        if (updatedAt > block.timestamp || block.timestamp - updatedAt > maxStaleness) {
             revert StalePrice(address(vf.priceFeed), updatedAt, maxStaleness);
         }
 
@@ -340,6 +349,7 @@ contract ChainlinkPriceFeedTracker is Ownable {
     /// @param price Price from Chainlink (feedDecimals).
     /// @param feedDecimals Chainlink feed decimals.
     /// @param assetDecimals Underlying asset decimals.
+    /// @dev SC-H-04 FIX: Use Math.mulDiv to prevent intermediate overflow.
     function _calculateUSDValue(
         uint256 assets,
         int256 price,
@@ -348,8 +358,12 @@ contract ChainlinkPriceFeedTracker is Ownable {
     ) internal pure returns (uint256) {
         if (assets == 0 || price <= 0) return 0;
 
-        // Normalize to 18 decimals: value = assets * price * 10^(18 - assetDecimals - feedDecimals)
-        // To avoid overflow: (assets * uint256(price) * 10^18) / (10^assetDecimals * 10^feedDecimals)
-        return (assets * uint256(price) * 1e18) / (10 ** assetDecimals * 10 ** feedDecimals);
+        // Normalize to 18 decimals using mulDiv to avoid overflow.
+        // Put the large multiplication inside mulDiv to prevent intermediate overflow.
+        return Math.mulDiv(
+            assets,
+            uint256(price) * 1e18,
+            10 ** assetDecimals * 10 ** feedDecimals
+        );
     }
 }

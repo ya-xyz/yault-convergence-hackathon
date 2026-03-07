@@ -6,7 +6,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import {IReleaseAttestation} from "./interfaces/IReleaseAttestation.sol";
+import {IReleaseAttestation, Attestation} from "./interfaces/IReleaseAttestation.sol";
 
 /**
  * @title YaultPathClaim
@@ -155,12 +155,13 @@ contract YaultPathClaim is Ownable, ReentrancyGuard {
      *         (derived when recipient activates the path). totalAmount is the max
      *         claimable for this path (can be claimed in multiple partial claims).
      */
+    /// @dev SC-L-04 FIX: Added nonReentrant for consistency with other state-modifying functions.
     function registerPath(
         bytes32 walletIdHash,
         uint256 pathIndex,
         address pathController,
         uint256 totalAmount
-    ) external {
+    ) external nonReentrant {
         if (walletOwner[walletIdHash] != msg.sender) revert NotWalletOwner();
         if (pathController == address(0)) revert ZeroAddress();
         PathInfo storage p = pathInfo[walletIdHash][pathIndex];
@@ -225,9 +226,10 @@ contract YaultPathClaim is Ownable, ReentrancyGuard {
         if (to == address(0)) revert ZeroReceiver();
         if (block.timestamp > deadline) revert DeadlineExpired();
 
-        (, uint8 decision,,, uint64 timestamp,) = attestation.getAttestation(walletIdHash, pathIndex);
-        if (timestamp == 0) revert NoAttestation(); // no attestation submitted yet
-        if (decision != DECISION_RELEASE) revert AttestationNotRelease();
+        /// @dev SC-H-01 FIX: Use struct return from IReleaseAttestation.
+        Attestation memory att = attestation.getAttestation(walletIdHash, pathIndex);
+        if (att.timestamp == 0) revert NoAttestation(); // no attestation submitted yet
+        if (att.decision != DECISION_RELEASE) revert AttestationNotRelease();
 
         PathInfo storage p = pathInfo[walletIdHash][pathIndex];
         if (p.pathController == address(0)) revert PathNotRegistered();
@@ -282,10 +284,11 @@ contract YaultPathClaim is Ownable, ReentrancyGuard {
         if (walletOwner[walletIdHash] != msg.sender) revert NotWalletOwner();
         if (to == address(0)) revert ZeroAddress();
 
-        (, uint8 decision,,, uint64 timestamp,) = attestation.getAttestation(walletIdHash, pathIndex);
+        /// @dev SC-H-01 FIX: Use struct return from IReleaseAttestation.
+        Attestation memory att = attestation.getAttestation(walletIdHash, pathIndex);
         // Require attestation exists and is NOT release
-        if (timestamp == 0) revert NoAttestation();
-        if (decision == DECISION_RELEASE) revert AttestationIsRelease();
+        if (att.timestamp == 0) revert NoAttestation();
+        if (att.decision == DECISION_RELEASE) revert AttestationIsRelease();
 
         PathInfo storage p = pathInfo[walletIdHash][pathIndex];
         if (p.pathController == address(0)) revert PathNotRegistered();

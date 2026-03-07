@@ -1,0 +1,64 @@
+{
+  "profile": "test",
+  "server": {
+    "nodeEnv": "test",
+    "port": 3001,
+    "corsOrigin": "*",
+    "databasePath": "./data/yault.test.db"
+  },
+  "api": {
+    "baseUrl": "http://localhost:3001/api",
+    "publicUrl": "https://api.yault.xyz/api"
+  },
+  "drand": {
+    "chainHash": "dbd506d6ef76e5f386f41c651dcb808c5bcbd75471cc4eafa3f4df7ad4e4c493"
+  },
+  "arweave": {
+    "gateway": "https://arweave.net",
+    "graphqlEndpoint": "https://arweave.net/graphql",
+    "gatewayAllowlist": "https://arweave.net,https://ar-io.net,https://arweave.developerdao.com,https://turbo-gateway.com",
+    "extraGateways": "",
+    "allowUnlistedGateways": false
+  },
+  "email": {
+    "provider": "console",
+    "from": "noreply@yault.xyz",
+    "trialRequestEmail": ""
+  },
+  "vault": {
+    "reserveRatioBps": 2000
+  },
+  "scheduler": {
+    "pollIntervalMs": 1000,
+    "enableTlockMonitor": false
+  },
+  "insurance": {
+    "enabled": true,
+    "nexusMutualApi": "",
+    "opencoverApi": ""
+  },
+  "claim": {
+    "evmRpcUrl": "",
+    "vaultAddress": ""
+  },
+  "auth": {
+    "adminWallets": ""
+  },
+  "security": {
+    "adminSessionIpPinning": false,
+    "multisigRequestWindowMs": 60000,
+    "multisigMaxRequestsPerWindow": 24
+  },
+  "chains": {
+    "useTestnet": true,
+    "vault": {},
+    "rpc": {},
+    "mempoolApi": ""
+  },
+  "logging": {
+    "enableConsoleLog": false
+  },
+  "rwa": {
+    "network": "devnet"
+  }
+}

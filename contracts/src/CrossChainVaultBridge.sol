@@ -3,7 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-// SafeERC20 not used — standard approve is sufficient for trusted CCIP router
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Client, IRouterClient, CCIPReceiver} from "./interfaces/ICCIPRouter.sol";
@@ -29,7 +29,7 @@ import {Client, IRouterClient, CCIPReceiver} from "./interfaces/ICCIPRouter.sol"
  *      - Rate limiting on message sends
  */
 contract CrossChainVaultBridge is Ownable, ReentrancyGuard, CCIPReceiver {
-    // using SafeERC20 — not needed for trusted CCIP router approve
+    using SafeERC20 for IERC20;
 
     // -----------------------------------------------------------------------
     //  Message Types
@@ -93,6 +93,9 @@ contract CrossChainVaultBridge is Ownable, ReentrancyGuard, CCIPReceiver {
     /// @notice Monotonic nonce for outgoing messages.
     uint256 public outgoingNonce;
 
+    /// @notice Deployment timestamp for nonce uniqueness across redeployments.
+    uint256 public immutable deployedAt;
+
     /// @notice Minimum interval between messages to the same chain (rate limiting).
     uint256 public minMessageInterval = 60; // 1 minute
 
@@ -141,6 +144,8 @@ contract CrossChainVaultBridge is Ownable, ReentrancyGuard, CCIPReceiver {
     error InvalidMessageType(uint8 msgType);
     error InsufficientFee(uint256 required, uint256 provided);
     error OnlyRouter();
+    error ETHTransferFailed();
+    error MinIntervalTooLow();
 
     // -----------------------------------------------------------------------
     //  Constructor
@@ -154,6 +159,7 @@ contract CrossChainVaultBridge is Ownable, ReentrancyGuard, CCIPReceiver {
         if (_ccipRouter == address(0)) revert ZeroAddress();
         ccipRouter = IRouterClient(_ccipRouter);
         linkToken = _linkToken;
+        deployedAt = block.timestamp;
     }
 
     // -----------------------------------------------------------------------
@@ -168,7 +174,8 @@ contract CrossChainVaultBridge is Ownable, ReentrancyGuard, CCIPReceiver {
     ) external onlyOwner {
         if (remoteBridge == address(0)) revert ZeroAddress();
 
-        bool alreadyExists = remoteChains[chainSelector].remoteBridge != address(0);
+        bool wasAllowed = remoteChains[chainSelector].allowed
+            && remoteChains[chainSelector].remoteBridge != address(0);
 
         remoteChains[chainSelector] = RemoteChainConfig({
             remoteBridge: remoteBridge,
@@ -176,8 +183,19 @@ contract CrossChainVaultBridge is Ownable, ReentrancyGuard, CCIPReceiver {
             lastMessageTime: 0
         });
 
-        if (!alreadyExists) {
+        if (allowed && !wasAllowed) {
+            // Add to supportedChains on first enable or re-enable after disable
             supportedChains.push(chainSelector);
+        } else if (!allowed && wasAllowed) {
+            // SC-M-08 FIX: Remove disabled chain from supportedChains (swap-and-pop)
+            for (uint256 i; i < supportedChains.length;) {
+                if (supportedChains[i] == chainSelector) {
+                    supportedChains[i] = supportedChains[supportedChains.length - 1];
+                    supportedChains.pop();
+                    break;
+                }
+                unchecked { ++i; }
+            }
         }
 
         emit RemoteChainConfigured(chainSelector, remoteBridge, allowed);
@@ -188,8 +206,9 @@ contract CrossChainVaultBridge is Ownable, ReentrancyGuard, CCIPReceiver {
         ccipGasLimit = gasLimit;
     }
 
-    /// @notice Update the minimum message interval.
+    /// @notice Update the minimum message interval (minimum 10 seconds).
     function setMinMessageInterval(uint256 interval) external onlyOwner {
+        if (interval < 10) revert MinIntervalTooLow();
         minMessageInterval = interval;
     }
 
@@ -336,9 +355,10 @@ contract CrossChainVaultBridge is Ownable, ReentrancyGuard, CCIPReceiver {
         config.lastMessageTime = block.timestamp;
     }
 
+    /// @dev SC-M-03 FIX: Include deployedAt to prevent nonce collision across redeployments.
     function _nextNonce() internal returns (bytes32) {
         outgoingNonce++;
-        return keccak256(abi.encodePacked(block.chainid, address(this), outgoingNonce));
+        return keccak256(abi.encodePacked(block.chainid, address(this), deployedAt, outgoingNonce));
     }
 
     function _buildCCIPMessage(uint64 destChainSelector, bytes memory data)
@@ -353,7 +373,8 @@ contract CrossChainVaultBridge is Ownable, ReentrancyGuard, CCIPReceiver {
             receiver: abi.encode(config.remoteBridge),
             data: data,
             tokenAmounts: tokenAmounts,
-            extraArgs: abi.encodePacked(uint256(ccipGasLimit)),
+            /// @dev SC-L-08 FIX: Use CCIP-standard extraArgs encoding.
+            extraArgs: Client._argsToBytes(Client.EVMExtraArgsV1({gasLimit: ccipGasLimit})),
             feeToken: linkToken
         });
     }
@@ -369,15 +390,21 @@ contract CrossChainVaultBridge is Ownable, ReentrancyGuard, CCIPReceiver {
         uint256 fee = ccipRouter.getFee(destChainSelector, ccipMessage);
 
         if (linkToken != address(0)) {
-            IERC20(linkToken).approve(address(ccipRouter), fee);
+            // SC-C-02 FIX: Use forceApprove for safe approval handling
+            IERC20(linkToken).forceApprove(address(ccipRouter), fee);
             return ccipRouter.ccipSend(destChainSelector, ccipMessage);
         } else {
             return ccipRouter.ccipSend{value: fee}(destChainSelector, ccipMessage);
         }
     }
 
+    /// @dev SC-H-03 FIX: Store relayed attestations on-chain for downstream consumers.
+    mapping(bytes32 => mapping(uint256 => AttestationPayload)) public relayedAttestations;
+
     function _handleAttestationRelay(bytes memory payload, uint64 sourceChain) internal {
         AttestationPayload memory att = abi.decode(payload, (AttestationPayload));
+        // Store the relayed attestation for downstream contracts to query
+        relayedAttestations[att.walletIdHash][att.recipientIndex] = att;
         emit AttestationRelayed(
             att.walletIdHash,
             att.recipientIndex,
@@ -386,8 +413,12 @@ contract CrossChainVaultBridge is Ownable, ReentrancyGuard, CCIPReceiver {
         );
     }
 
+    /// @dev SC-I-06 FIX: Store synced positions on-chain.
+    mapping(address => mapping(address => PositionPayload)) public syncedPositions;
+
     function _handlePositionSync(bytes memory payload, uint64 sourceChain) internal {
         PositionPayload memory pos = abi.decode(payload, (PositionPayload));
+        syncedPositions[pos.user][pos.vault] = pos;
         emit PositionSynced(pos.user, pos.vault, pos.valueUSD, sourceChain);
     }
 
@@ -395,13 +426,15 @@ contract CrossChainVaultBridge is Ownable, ReentrancyGuard, CCIPReceiver {
     function withdrawETH(address payable to, uint256 amount) external onlyOwner {
         if (to == address(0)) revert ZeroAddress();
         (bool ok,) = to.call{value: amount}("");
-        require(ok, "ETH transfer failed");
+        // SC-L-02 FIX: Use custom error instead of require string
+        if (!ok) revert ETHTransferFailed();
     }
 
     /// @notice Withdraw stuck LINK (or any ERC-20) from the contract.
+    /// @dev SC-C-01 FIX: Use safeTransfer for non-standard ERC-20 compatibility.
     function withdrawToken(address token, address to, uint256 amount) external onlyOwner {
         if (to == address(0)) revert ZeroAddress();
-        IERC20(token).transfer(to, amount);
+        IERC20(token).safeTransfer(to, amount);
     }
 
     /// @notice Accept native token for CCIP fees.

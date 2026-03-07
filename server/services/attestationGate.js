@@ -79,12 +79,9 @@ async function evaluateReleaseAttestationGate(input) {
       attestation: null,
     };
   }
-  // Accept both oracle and fallback attestations for release decisions.
-  // In the current deployment, the same relayer wallet submits both oracle and fallback
-  // attestations. Supplementary fallback attestations may be written during delivery
-  // for sibling recipients, and the on-chain contract does not allow overwriting.
-  // Rejecting fallback would permanently block triggers whose siblings were attested first.
-  const acceptedSources = ['oracle', 'fallback'];
+  // Default policy: require on-chain oracle attestation.
+  // Allow fallback attestation only when explicitly requested (eg. emergency recovery).
+  const acceptedSources = allowFallback ? ['oracle', 'fallback'] : ['oracle'];
   if (!acceptedSources.includes(attestation.source)) {
     return {
       valid: false,

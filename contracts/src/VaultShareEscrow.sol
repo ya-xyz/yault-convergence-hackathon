@@ -6,7 +6,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import {IReleaseAttestation} from "./interfaces/IReleaseAttestation.sol";
+import {IReleaseAttestation, Attestation} from "./interfaces/IReleaseAttestation.sol";
 
 /**
  * @title VaultShareEscrow
@@ -87,6 +87,8 @@ contract VaultShareEscrow is Ownable, ReentrancyGuard {
     error ZeroReceiver();
     error ReclaimExceedsUnclaimed();
     error AttestationAlreadyReleased();
+    /// @dev SC-L-05 FIX: Reject empty recipient arrays.
+    error EmptyAllocation();
 
     constructor(address initialOwner, address _vault, address _attestation) Ownable(initialOwner) {
         if (_vault == address(0) || _attestation == address(0)) revert ZeroAddress();
@@ -123,6 +125,8 @@ contract VaultShareEscrow is Ownable, ReentrancyGuard {
     ) external nonReentrant {
         if (walletOwner[walletIdHash] != msg.sender) revert NotWalletOwner();
         if (shares == 0) return;
+        /// @dev SC-L-05 FIX: Reject empty allocation arrays.
+        if (recipientIndices.length == 0) revert EmptyAllocation();
         if (recipientIndices.length != amounts.length) revert AllocationSumMismatch();
 
         uint256 sum;
@@ -164,9 +168,10 @@ contract VaultShareEscrow is Ownable, ReentrancyGuard {
         // where an attacker monitors attestations and claims funds to their own address.
         if (walletOwner[walletIdHash] != msg.sender) revert NotWalletOwner();
 
-        (, uint8 decision,,, uint64 timestamp,) = ATTESTATION.getAttestation(walletIdHash, recipientIndex);
-        if (timestamp == 0) revert NoAttestation();
-        if (decision != DECISION_RELEASE) revert AttestationNotRelease();
+        /// @dev SC-H-01 FIX: Use struct return from IReleaseAttestation.
+        Attestation memory att = ATTESTATION.getAttestation(walletIdHash, recipientIndex);
+        if (att.timestamp == 0) revert NoAttestation();
+        if (att.decision != DECISION_RELEASE) revert AttestationNotRelease();
 
         uint256 remaining = allocatedShares[walletIdHash][recipientIndex] - claimedShares[walletIdHash][recipientIndex];
         if (amount > remaining) revert ClaimExceedsRemaining();
@@ -197,8 +202,9 @@ contract VaultShareEscrow is Ownable, ReentrancyGuard {
 
         // Only block reclaim when the attestation decision is RELEASE (funds committed to recipient).
         // HOLD and REJECT attestations do NOT lock funds — the owner can still reclaim.
-        (, uint8 decision,,, uint64 timestamp,) = ATTESTATION.getAttestation(walletIdHash, recipientIndex);
-        if (timestamp != 0 && decision == DECISION_RELEASE) revert AttestationAlreadyReleased();
+        /// @dev SC-H-01 FIX: Use struct return from IReleaseAttestation.
+        Attestation memory att = ATTESTATION.getAttestation(walletIdHash, recipientIndex);
+        if (att.timestamp != 0 && att.decision == DECISION_RELEASE) revert AttestationAlreadyReleased();
 
         uint256 unclaimed = allocatedShares[walletIdHash][recipientIndex] - claimedShares[walletIdHash][recipientIndex];
         if (amount > unclaimed) revert ReclaimExceedsUnclaimed();

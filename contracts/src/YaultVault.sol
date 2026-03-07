@@ -320,9 +320,11 @@ contract YaultVault is ERC4626, Ownable, Pausable, ReentrancyGuard, IYaultVault 
      * @param token Token to sweep (must not be the vault underlying asset).
      * @param to    Recipient.
      */
+    /// @dev SC-M-01 FIX: Also block sweeping aToken to prevent draining invested funds.
     function sweepToken(IERC20 token, address to) external onlyOwner {
         if (address(token) == address(0) || to == address(0)) revert ZeroAddress();
         if (address(token) == asset()) revert CannotSweepVaultAsset();
+        if (aToken != address(0) && address(token) == aToken) revert CannotSweepVaultAsset();
         token.safeTransfer(to, token.balanceOf(address(this)));
     }
 
@@ -369,9 +371,10 @@ contract YaultVault is ERC4626, Ownable, Pausable, ReentrancyGuard, IYaultVault 
     ///         Real Aave often handles this via callback; call once after setStrategy when using a mock.
     /// @dev H-04 FIX: Accept a bounded amount parameter instead of unlimited approve.
     /// @param amount The amount to approve for the strategy pool.
+    /// @dev SC-L-03 FIX: Use forceApprove for non-standard token compatibility.
     function approveStrategyToken(uint256 amount) external onlyOwner {
         if (aToken == address(0)) revert StrategyNotSet();
-        IERC20(aToken).approve(aavePool, amount);
+        IERC20(aToken).forceApprove(aavePool, amount);
         emit StrategyTokenApproved(aToken, aavePool, amount);
     }
 
@@ -563,12 +566,19 @@ contract YaultVault is ERC4626, Ownable, Pausable, ReentrancyGuard, IYaultVault 
     // -----------------------------------------------------------------------
 
     /// @inheritdoc IYaultVault
+    /// @dev SC-M-05 FIX: Auto-unwind from Aave if idle balance is insufficient.
     function claimAuthorityRevenue() external override nonReentrant {
         uint256 amount = pendingAuthorityRevenue[msg.sender];
         if (amount == 0) revert NoPendingRevenue();
 
         pendingAuthorityRevenue[msg.sender] = 0;
         totalEscrowedAuthorityRevenue -= amount;
+
+        // SC-M-05 FIX: Ensure sufficient idle balance, unwinding from Aave if needed
+        uint256 idle = IERC20(asset()).balanceOf(address(this));
+        if (idle < amount && aavePool != address(0)) {
+            IAavePool(aavePool).withdraw(asset(), amount - idle, address(this));
+        }
 
         IERC20(asset()).safeTransfer(msg.sender, amount);
 

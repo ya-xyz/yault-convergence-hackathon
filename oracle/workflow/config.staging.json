@@ -1,9 +1,11 @@
 {
   "chainSelectorName": "evm-ethereum-sepolia",
   "rpcUrl": "https://ethereum-sepolia-rpc.publicnode.com",
-  "releaseAttestationAddress": "0x0000000000000000000000000000000000000000",
-  "platformApiBaseUrl": "https://api.yault.example.com",
+  "releaseAttestationAddress": "0x410D42eAf9D0Ca036664eFE1E866a12d9f0fdc19",
+  "platformApiBaseUrl": "http://localhost:3001",
   "drandUrl": "https://drand.cloudflare.com",
   "vaultAddress": "0xCdF23BF390B1c4BEb811371466b04BB17759FB14",
-  "complianceApiUrl": "https://api.yault.example.com/api/compliance"
+  "complianceApiUrl": "http://localhost:3001/api/compliance",
+  "priceFeedAddress": "0x694AA1769357215DE4FAC081bf1f309aDC325306",
+  "maxStalenessSeconds": 3600
 }

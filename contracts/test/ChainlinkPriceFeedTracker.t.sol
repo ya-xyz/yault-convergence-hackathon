@@ -153,6 +153,8 @@ contract ChainlinkPriceFeedTrackerTest is Test {
         tracker.registerVaultFeed(address(vault), address(usdcFeed));
         tracker.setMaxStaleness(600); // 10 minutes
 
+        // Warp to a realistic timestamp so subtraction doesn't underflow
+        vm.warp(10_000);
         // Make price stale
         usdcFeed.setUpdatedAt(block.timestamp - 601);
 

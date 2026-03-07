@@ -87,7 +87,7 @@ const SOURCE_ORACLE = 0;
 
 // ---------------------------------------------------------------------------
 // Cron-triggered path: poll platform for "pending oracle" requests, then run
-// 3 external data source checks (drand beacon, vault balance, compliance API)
+// 4 external data source checks (drand beacon, vault balance, compliance API, price feed when configured)
 // before submitting attestation via CRE EVM Write.
 // ---------------------------------------------------------------------------
 
@@ -258,7 +258,7 @@ async function checkCompliance(
 }
 
 // ===========================================================================
-// Pre-Attestation Gate: run all 3 external checks before submitting
+// Pre-Attestation Gate: run all external checks before submitting
 // ===========================================================================
 
 type PreAttestationContext = {
@@ -351,7 +351,7 @@ async function doSubmitAttestation(
   const { encodeFunctionData, keccak256: viemKeccak256, toHex } = await import("viem");
 
   // -----------------------------------------------------------------------
-  // Step 1: Run all 3 external data source checks (drand + vault + compliance)
+  // Step 1: Run all external data source checks (drand + vault + compliance + optional price feed)
   // -----------------------------------------------------------------------
   const ctx = await runPreAttestationChecks(runtime, config, input);
 
@@ -367,9 +367,9 @@ async function doSubmitAttestation(
   // -----------------------------------------------------------------------
   // Step 2: Enrich evidence hash with external data source attestation context.
   //   Final evidence = keccak256(original_evidence || drand_round || drand_randomness
-  //                               || vault_totalAssets || compliance_checkId)
+  //                               || vault_totalAssets || compliance_checkId || price_components*)
   //   This anchors the attestation to a verifiable drand timestamp, on-chain vault
-  //   state, and compliance screening result — all from independent external sources.
+  //   state, compliance screening result, and optional market price context.
   // -----------------------------------------------------------------------
   const rawEvidence = input.evidence_hash.startsWith("0x")
     ? input.evidence_hash

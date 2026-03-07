@@ -1,4 +1,4 @@
-# Yault Guardian Vault
+# Yault Crypto Asset Management Platform
 
 **Self-custodial inheritance and conditional asset release with auditable yield sharing, powered by Chainlink CRE-orchestrated attestations and real-time portfolio analytics.**
 
@@ -10,24 +10,31 @@
 
 ## Demo Video
 
-> **[Watch the 3–5 minute demo video →](TODO_INSERT_VIDEO_LINK)**
+> **[Watch the demo video →](https://youtu.be/oey9bS2sctM)**
 >
 > The video demonstrates:
-> - CRE workflow execution (attestation pipeline + price feed enrichment)
-> - Portfolio tracker with real-time Chainlink Data Feed valuations
-> - Automated yield harvesting via Chainlink Automation
-> - Cross-chain attestation relay via Chainlink CCIP
-> - Off-chain analytics via Chainlink Functions
+> - Setting up asset distribution plan and simulation 
+> - Chainlink event triggering off credential release
+> - Asset recipients claiming shares
+> - Asset portfolio introduction
 
 ---
 
-## Problem
+## Problem: The Self-Custody Trilemma
 
-Crypto inheritance and conditional release systems today face a trilemma:
+Over **$100 billion** in crypto is permanently lost because holders die and keys vanish. The root cause is the **self-custody trilemma** — three properties that every crypto holder needs, but no existing solution can deliver simultaneously:
 
-1. **Custodial trust** — traditional solutions require handing keys to a third party
-2. **Weak enforcement** — purely social or legal mechanisms have no on-chain teeth
-3. **No audit trail** — release decisions are opaque and hard to verify after the fact
+1. **Custody** — The holder retains sole control of private keys; no third party can access or freeze assets
+2. **Inheritance** — Assets can be reliably transferred to designated recipients upon real-world events (death, incapacity, legal triggers)
+3. **Yield** — Locked or escrowed assets continue earning returns while awaiting release
+
+**Why are they mutually exclusive today?**
+
+- **Custody + Inheritance, no Yield**: Multi-sig or social recovery can pass keys on, but locked assets sit idle earning nothing
+- **Custody + Yield, no Inheritance**: DeFi vaults generate yield, but have zero inheritance logic — when the holder dies, keys are lost forever
+- **Inheritance + Yield, no Custody**: Centralized custodians (exchanges, trusts) can handle succession and earn yield, but the holder surrenders private keys — no longer self-custodial
+
+Dead-man's switches attempt to bridge custody and inheritance, but they use time-locks (time ≠ death) and still earn no yield. No existing solution solves all three simultaneously — until Yault.
 
 ## Landscape: Why Existing Solutions Fall Short
 
@@ -93,8 +100,8 @@ Owner                  Chainlink Oracle         Authority              Recipient
 Yault integrates **five Chainlink services** as the orchestration and data backbone:
 
 ### 1. CRE Workflow — Attestation Pipeline (Core)
-- **`oracle/workflow/`** — CRE workflow monitors conditions (cron + HTTP triggers), queries 3 external data sources (drand beacon, vault state, compliance API), and writes attestation on-chain via EVM target
-- Simulated via `cre simulate` CLI; deployed to CRE-supported testnet
+- **`oracle/workflow/`** — CRE workflow monitors conditions (cron + HTTP triggers), queries 4 external data sources (drand beacon, vault state, compliance API, Chainlink price feed), and writes attestation on-chain via EVM target
+- Simulated via `cre workflow simulate` CLI and configured for Sepolia deployment
 
 ### 2. Chainlink Data Feeds — Real-Time Portfolio Valuation
 - **`ChainlinkPriceFeedTracker.sol`** — Reads live prices from `AggregatorV3Interface` feeds for multi-vault USD valuation
@@ -117,9 +124,9 @@ Yault integrates **five Chainlink services** as the orchestration and data backb
 | Data Source | Purpose | External Integration |
 |-------------|---------|---------------------|
 | **A — drand Beacon** | Timelock randomness for tlock-based fallback release | drand HTTP API |
-| **B — Vault State** | Current deposit, yield, and path status | Yault API |
+| **B — Vault State** | Current vault asset state gate (`totalAssets()`) | EVM JSON-RPC `eth_call` |
 | **C — Compliance Screen** | OFAC / sanctions check on recipient address | Yault compliance endpoint |
-| **D — Price Feed Enrichment** | Chainlink Data Feed prices for portfolio valuation | Chainlink AggregatorV3 |
+| **D — Price Feed Enrichment (optional)** | Chainlink Data Feed prices for evidence enrichment/freshness gating | Chainlink AggregatorV3 |
 
 ---
 
@@ -194,14 +201,15 @@ See [oracle/workflow/README.md](oracle/workflow/README.md) for CRE setup and sim
 npm install -g @chainlink/cre-cli
 
 # Run one-shot simulation
-cre simulate --workflow oracle/workflow/workflow.yaml --config oracle/workflow/config.staging.json
+cd oracle/workflow
+cre workflow simulate . --target staging
 ```
 
 ### On-Chain Write Evidence
 
 > **Testnet:** Ethereum Sepolia
-> **Contract:** `ReleaseAttestation` — deployed at `TODO_INSERT_CONTRACT_ADDRESS`
-> **Tenderly Virtual TestNet Explorer:** `TODO_INSERT_TENDERLY_LINK`
+> **Contract:** `ReleaseAttestation` — deployed at `0x410D42eAf9D0Ca036664eFE1E866a12d9f0fdc19`
+> **Explorer:** [Sepolia Etherscan](https://sepolia.etherscan.io/address/0x410D42eAf9D0Ca036664eFE1E866a12d9f0fdc19)
 
 ---
 
@@ -220,7 +228,7 @@ cre simulate --workflow oracle/workflow/workflow.yaml --config oracle/workflow/c
 | Frontend | Vanilla JS · Web3 wallet connect |
 | Storage | Arweave · AO |
 | Timelock | drand network · tlock-js |
-| Testnet | Ethereum Sepolia · Tenderly Virtual TestNet |
+| Testnet | Ethereum Sepolia |
 
 ## Smart Contracts
 
@@ -371,6 +379,23 @@ docker compose up          # Starts API server + ArLocal (local Arweave)
 - This is a hackathon build; third-party security audits are required before production deployment
 - No private keys or assets are held server-side — fully non-custodial architecture
 - Authority holds only an encrypted share with zero standalone cryptographic capability
+
+### Security Environment Variables
+
+The following env vars control the latest backend hardening behavior:
+
+| Variable | Default | Description | Recommended (Production) |
+|----------|---------|-------------|---------------------------|
+| `ADMIN_SESSION_IP_PINNING` | `false` | When `true`, admin session tokens are bound to the originating client IP. Requests from a different IP are rejected. | Set to `true` behind a stable reverse proxy/load balancer. |
+| `MULTISIG_REQUEST_WINDOW_MS` | `60000` | Time window (ms) for per-admin/per-IP multi-sig action rate limiting. | Keep `60000` or increase slightly for high-latency ops networks. |
+| `MULTISIG_MAX_REQUESTS_PER_WINDOW` | `24` | Max multi-sig requests per action, per admin address and IP, inside the window. | Lower for stricter abuse resistance (e.g. `10`-`20`). |
+| `ARWEAVE_GATEWAY_ALLOWLIST` | `https://arweave.net,https://ar-io.net,https://arweave.developerdao.com,https://turbo-gateway.com` | Comma-separated list of allowed Arweave gateway hosts/URLs used for reads. Non-allowlisted gateways are blocked unless explicitly enabled. | Keep a minimal trusted list managed by ops. |
+| `ARWEAVE_EXTRA_GATEWAYS` | empty | Optional extra Arweave gateways appended to fetch candidates (still checked against allowlist unless override is enabled). | Add only vetted gateways. |
+| `ALLOW_UNLISTED_ARWEAVE_GATEWAYS` | `false` | If `true`, disables strict allowlist enforcement for Arweave gateways. | Keep `false`. Enable only for temporary debugging. |
+
+Notes:
+- `allowFallback` attestation source is now treated as an explicit emergency path in server policy code. Normal release checks default to oracle attestation source.
+- If `ADMIN_SESSION_IP_PINNING=true`, ensure `X-Forwarded-For` is trustworthy and set correctly by your ingress/proxy.
 - CRE-supported testnets only — no mainnet wallets, real funds, or production credentials used
 - Demo includes controlled assumptions and mocked components where noted
 
