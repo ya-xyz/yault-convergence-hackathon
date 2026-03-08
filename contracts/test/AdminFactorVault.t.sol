@@ -6,6 +6,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {AdminFactorVault} from "../src/AdminFactorVault.sol";
 import {ReleaseAttestation} from "../src/ReleaseAttestation.sol";
+import {Attestation} from "../src/interfaces/IReleaseAttestation.sol";
 import {VaultShareEscrow} from "../src/VaultShareEscrow.sol";
 import {YaultVault} from "../src/YaultVault.sol";
 import {YaultVaultCreator} from "../src/YaultVaultCreator.sol";
@@ -48,8 +49,9 @@ contract AdminFactorVaultTest is Test {
     function setUp() public {
         // Deploy token + vault
         token = new MockTokenAFV();
-        YaultVaultCreator creator = new YaultVaultCreator();
+        YaultVaultCreator creator = new YaultVaultCreator(address(this));
         YaultVaultFactory factory = new YaultVaultFactory(deployer, platform, address(creator));
+        creator.transferOwnership(address(factory));
         vm.prank(deployer);
         address vaultAddr = factory.createVault(IERC20(address(token)), "Yault USDC", "yUSDC");
         vault = YaultVault(vaultAddr);
@@ -83,8 +85,8 @@ contract AdminFactorVaultTest is Test {
         vault.deposit(DEPOSIT_AMOUNT, alice);
 
         // Register alice's wallet in escrow
-        vm.prank(alice);
-        escrow.registerWallet(WALLET_HASH);
+        vm.prank(deployer);
+        escrow.registerWallet(WALLET_HASH, alice);
     }
 
     // -----------------------------------------------------------------------
@@ -227,7 +229,7 @@ contract AdminFactorVaultTest is Test {
         afVault.destroy(WALLET_HASH, 1);
 
         // Verify REJECT attestation was submitted
-        ReleaseAttestation.Attestation memory att = attestation.getAttestation(WALLET_HASH, 1);
+        Attestation memory att = attestation.getAttestation(WALLET_HASH, 1);
         assertEq(att.decision, attestation.DECISION_REJECT(), "decision should be REJECT");
         assertEq(att.source, attestation.SOURCE_FALLBACK(), "source should be FALLBACK");
         assertEq(att.reasonCode, afVault.REASON_AF_DESTROYED(), "reason should be AF_DESTROYED");
@@ -342,7 +344,7 @@ contract AdminFactorVaultTest is Test {
         afVault.destroy(WALLET_HASH, 1);
 
         // Verify attestation is REJECT
-        ReleaseAttestation.Attestation memory att = attestation.getAttestation(WALLET_HASH, 1);
+        Attestation memory att = attestation.getAttestation(WALLET_HASH, 1);
         assertEq(att.decision, attestation.DECISION_REJECT());
 
         // In the full system, alice would now call VaultShareEscrow.reclaim()
@@ -384,7 +386,7 @@ contract AdminFactorVaultTest is Test {
         assertFalse(afVault.isActive(WALLET_HASH, 1), "AF should be inactive");
 
         // REJECT attestation should be submitted
-        ReleaseAttestation.Attestation memory att = attestation.getAttestation(WALLET_HASH, 1);
+        Attestation memory att = attestation.getAttestation(WALLET_HASH, 1);
         assertEq(att.decision, attestation.DECISION_REJECT(), "decision should be REJECT");
 
         // Shares should be back with alice

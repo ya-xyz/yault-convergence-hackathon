@@ -92,6 +92,7 @@ contract VaultShareEscrow is Ownable, ReentrancyGuard {
     error AttestationAlreadyReleased();
     error NotAdminFactorVault();
     error NotActualWalletOwner();
+    error EmptyAllocation();
 
     constructor(address initialOwner, address _vault, address _attestation) Ownable(initialOwner) {
         if (_vault == address(0) || _attestation == address(0)) revert ZeroAddress();
@@ -247,8 +248,8 @@ contract VaultShareEscrow is Ownable, ReentrancyGuard {
         if (walletOwner[walletIdHash] != walletAddr) revert NotActualWalletOwner();
         if (amount == 0) revert ClaimAmountZero();
 
-        (, uint8 decision,,, uint64 timestamp,) = ATTESTATION.getAttestation(walletIdHash, recipientIndex);
-        if (timestamp != 0 && decision == DECISION_RELEASE) revert AttestationAlreadyReleased();
+        Attestation memory att = ATTESTATION.getAttestation(walletIdHash, recipientIndex);
+        if (att.timestamp != 0 && att.decision == DECISION_RELEASE) revert AttestationAlreadyReleased();
 
         uint256 unclaimed = allocatedShares[walletIdHash][recipientIndex] - claimedShares[walletIdHash][recipientIndex];
         if (amount > unclaimed) revert ReclaimExceedsUnclaimed();
