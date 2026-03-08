@@ -386,7 +386,8 @@ router.post('/from-oracle', async (req, res) => {
  */
 router.post('/simulate-chainlink', dualAuthMiddleware, async (req, res) => {
   try {
-    if (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') {
+    const simulateEnabled = String(process.env.SIMULATE_ENDPOINTS_ENABLED || 'false').toLowerCase() === 'true';
+    if ((process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') && !simulateEnabled) {
       return res.status(403).json({ error: 'Simulate endpoints disabled in production/staging' });
     }
 
@@ -403,6 +404,12 @@ router.post('/simulate-chainlink', dualAuthMiddleware, async (req, res) => {
     const pubkey = (req.auth.pubkey || '').replace(/^0x/i, '').toLowerCase();
     const walletId = '0x' + pubkey;
 
+    const normalizeWalletId = (w) => {
+      const h = String(w || '').replace(/^0x/i, '').toLowerCase();
+      return h ? ('0x' + h) : '';
+    };
+    const normalizedWalletId = normalizeWalletId(walletId);
+
     // Find active binding — match by plan_id when present
     let walletBindings = await db.bindings.findByWallet(walletId);
     if (walletBindings.length === 0) {
@@ -414,12 +421,87 @@ router.post('/simulate-chainlink', dualAuthMiddleware, async (req, res) => {
         }
       } catch (_) {}
     }
-    const binding = walletBindings.find((b) =>
+    if (walletBindings.length === 0) {
+      // Last-resort normalization lookup for historical rows with mixed wallet_id casing/format.
+      const allBindings = await db.bindings.findAll();
+      walletBindings = allBindings.filter((b) => normalizeWalletId(b.wallet_id) === normalizedWalletId);
+    }
+
+    let binding = walletBindings.find((b) =>
       b.status === 'active' &&
       b.plan_id === simPlanId
     );
+
+    // If binding is missing (or has empty recipient_indices), recover indices from release path config.
     if (!binding || !Array.isArray(binding.recipient_indices) || binding.recipient_indices.length === 0) {
-      return res.status(404).json({ error: 'No active binding with recipient indices found for this wallet' });
+      let pathConfigs = await db.recipientPaths.findByWallet(walletId);
+      if (pathConfigs.length === 0) {
+        // Last-resort normalization lookup for historical rows with mixed wallet_id casing/format.
+        const allPaths = await db.recipientPaths.findAll();
+        pathConfigs = allPaths.filter((p) => normalizeWalletId(p.wallet_id) === normalizedWalletId);
+      }
+      const pathConfig = pathConfigs.find((p) => (p.plan_id || null) === simPlanId) || null;
+      let derivedIndices = Array.from(new Set(
+        ((pathConfig && Array.isArray(pathConfig.paths)) ? pathConfig.paths : [])
+          .map((p) => Number(p.index))
+          .filter((n) => Number.isInteger(n) && n > 0)
+      ));
+
+      // Final fallback: derive recipient indices from saved wallet plan recipients (1..N).
+      // This keeps simulate-chainlink operable when release path config is missing.
+      if (derivedIndices.length === 0) {
+        let walletPlans = [];
+        // walletPlans uses id = normalized wallet address in many flows.
+        const direct = await db.walletPlans.findById(pubkey);
+        if (direct) walletPlans.push(direct);
+        const allPlans = await db.walletPlans.findAll();
+        walletPlans = walletPlans.concat(allPlans.filter((p) => normalizeWalletId(p.wallet_id) === normalizedWalletId));
+        const wp = walletPlans.find((p) => (p.plan_id || null) === simPlanId) || null;
+        const recipients = wp && Array.isArray(wp.recipients) ? wp.recipients : [];
+        if (recipients.length > 0) {
+          derivedIndices = recipients.map((_, i) => i + 1);
+          console.warn('[simulate-chainlink] Recovered recipient indices from wallet plan recipients: wallet=%s plan=%s count=%d',
+            walletId, simPlanId, recipients.length);
+        }
+      }
+
+      if (derivedIndices.length > 0) {
+        if (binding) {
+          binding = await db.bindings.update(binding.binding_id, {
+            ...binding,
+            recipient_indices: derivedIndices,
+            updated_at: Date.now(),
+          }) || { ...binding, recipient_indices: derivedIndices };
+          console.warn('[simulate-chainlink] Recovered missing recipient_indices from path config: wallet=%s plan=%s indices=%j',
+            walletId, simPlanId, derivedIndices);
+        } else {
+          const recoveredBinding = {
+            binding_id: crypto.randomBytes(16).toString('hex'),
+            wallet_id: walletId,
+            authority_id: ORACLE_AUTHORITY_ID,
+            plan_id: simPlanId,
+            recipient_indices: derivedIndices,
+            release_model: 'per-path',
+            admin_factor_fingerprints: Array.isArray(pathConfig.paths)
+              ? pathConfig.paths.map((p) => p.admin_factor_fingerprint).filter(Boolean)
+              : [],
+            status: 'active',
+            created_at: Date.now(),
+            terminated_at: null,
+          };
+          await db.bindings.create(recoveredBinding.binding_id, recoveredBinding);
+          binding = recoveredBinding;
+          console.warn('[simulate-chainlink] Recovered missing active binding from path config: wallet=%s plan=%s indices=%j',
+            walletId, simPlanId, derivedIndices);
+        }
+      }
+    }
+
+    if (!binding || !Array.isArray(binding.recipient_indices) || binding.recipient_indices.length === 0) {
+      return res.status(404).json({
+        error: 'No active binding with recipient indices found for this wallet',
+        detail: 'No binding and no recipient path indices could be recovered for this plan_id',
+      });
     }
 
     const indices = binding.recipient_indices.map(Number);

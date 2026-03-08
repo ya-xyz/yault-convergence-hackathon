@@ -26,6 +26,7 @@ const { Router } = require('express');
 const crypto = require('crypto');
 const db = require('../../db');
 const { uploadPayloadsAndManifest } = require('../../services/arweaveReleaseStorage');
+const ORACLE_AUTHORITY_ID = (process.env.ORACLE_AUTHORITY_ID || '').trim();
 
 const router = Router();
 
@@ -93,15 +94,6 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // Verify authority exists and is verified
-    const authority = await db.authorities.findById(authority_id);
-    if (!authority) {
-      return res.status(404).json({ error: 'Authority not found' });
-    }
-    if (!authority.verified) {
-      return res.status(400).json({ error: 'Authority not verified' });
-    }
-
     // Look up recipient path config to get fingerprints
     const pathConfigs = await db.recipientPaths.findByWallet(wallet_id);
     const pathConfig = pathConfigs.find((p) => p.plan_id === plan_id) || null;
@@ -110,6 +102,19 @@ router.post('/', async (req, res) => {
         error: 'Release config not found',
         detail: 'No release path config found for this wallet and plan_id',
       });
+    }
+    const isOraclePlan = String(pathConfig.trigger_type || '').toLowerCase() === 'oracle';
+
+    // Verify authority only for non-oracle plans.
+    // Oracle trigger flow uses configured ORACLE_AUTHORITY_ID as a virtual/system authority.
+    let authority = await db.authorities.findById(authority_id);
+    if (!isOraclePlan || authority_id !== ORACLE_AUTHORITY_ID) {
+      if (!authority) {
+        return res.status(404).json({ error: 'Authority not found' });
+      }
+      if (!authority.verified) {
+        return res.status(400).json({ error: 'Authority not verified' });
+      }
     }
     const fingerprints = Array.isArray(pathConfig.paths)
       ? pathConfig.paths.map(p => p.admin_factor_fingerprint)
@@ -238,9 +243,11 @@ router.post('/', async (req, res) => {
 
     await db.bindings.create(bindingRecord.binding_id, bindingRecord);
 
-    // Increment authority's active_bindings
-    const updated = { ...authority, active_bindings: (authority.active_bindings || 0) + 1 };
-    await db.authorities.update(authority_id, updated);
+    // Increment authority's active_bindings when a DB authority profile exists.
+    if (authority) {
+      const updated = { ...authority, active_bindings: (authority.active_bindings || 0) + 1 };
+      await db.authorities.update(authority_id, updated);
+    }
 
     const responsePayload = {
       binding_id: bindingRecord.binding_id,

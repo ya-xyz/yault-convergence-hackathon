@@ -191,6 +191,7 @@ function generateRandomPassphrase(len) {
 // ─── Wallet Connector (loaded from shared module) ───
 let wallet = null; // WalletConnector instance
 let _e2eReady = false; // true once E2E client is initialized
+let _simulateChainlinkCountdownTimer = null;
 
 // ─── State ───
 
@@ -682,6 +683,84 @@ async function loadBoundFirms() {
       }));
     }
   } catch { /* non-fatal */ }
+}
+
+function clearSimulateChainlinkCountdown() {
+  if (_simulateChainlinkCountdownTimer) {
+    clearInterval(_simulateChainlinkCountdownTimer);
+    _simulateChainlinkCountdownTimer = null;
+  }
+}
+
+async function checkPlanReleaseState(planId) {
+  const addr = (state.auth?.address && state.auth.address.startsWith('0x')) ? state.auth.address : ('0x' + (state.auth?.pubkey || ''));
+  if (!addr || addr === '0x' || !planId) return { released: false, cooldownRemainingMs: null };
+  const headers = await getAuthHeadersAsync().catch(() => ({}));
+  const resp = await apiFetch(`${API_BASE}/trigger/pending?wallet_id=${encodeURIComponent(addr)}&status=all&limit=200`, { headers });
+  if (!resp.ok) return { released: false, cooldownRemainingMs: null };
+  const data = await resp.json().catch(() => ({}));
+  const items = Array.isArray(data) ? data : (data.triggers || []);
+  const forPlan = items.filter((t) => (t.plan_id || null) === planId);
+  const released = forPlan.some((t) => t.status === 'released');
+  const cooldownItems = forPlan
+    .filter((t) => t.status === 'cooldown' && Number.isFinite(Number(t.cooldown_remaining_ms)))
+    .sort((a, b) => Number(a.cooldown_remaining_ms) - Number(b.cooldown_remaining_ms));
+  const cooldownRemainingMs = cooldownItems.length > 0 ? Number(cooldownItems[0].cooldown_remaining_ms) : null;
+  return { released, cooldownRemainingMs };
+}
+
+function startSimulateChainlinkCountdown(hintEl, minutes, planId, buttonEl) {
+  clearSimulateChainlinkCountdown();
+  const totalMs = Math.max(1, Math.round(Number(minutes || 0) * 60 * 1000));
+  const deadline = Date.now() + totalMs;
+
+  const tick = async function () {
+    const remainMs = Math.max(0, deadline - Date.now());
+    const mm = Math.floor(remainMs / 60000);
+    const ss = Math.floor((remainMs % 60000) / 1000);
+
+    if (hintEl) {
+      hintEl.style.display = 'inline';
+      hintEl.style.color = 'var(--text-muted)';
+      hintEl.textContent = 'Oracle event triggered. Cooldown remaining: ' + String(mm).padStart(2, '0') + ':' + String(ss).padStart(2, '0');
+    }
+
+    if (remainMs > 0) return;
+
+    clearSimulateChainlinkCountdown();
+    try {
+      const status = await checkPlanReleaseState(planId);
+      if (status.released) {
+        if (hintEl) {
+          hintEl.style.color = 'var(--success)';
+          hintEl.textContent = 'Claim credentials have been sent. Recipients can claim assets now.';
+        }
+      } else if (status.cooldownRemainingMs != null && status.cooldownRemainingMs > 0) {
+        const minsLeft = Math.ceil(status.cooldownRemainingMs / 60000);
+        if (hintEl) {
+          hintEl.style.color = 'var(--warning)';
+          hintEl.textContent = 'Cooldown still active on-chain. About ' + minsLeft + ' minute(s) remaining.';
+        }
+      } else {
+        if (hintEl) {
+          hintEl.style.color = 'var(--warning)';
+          hintEl.textContent = 'Cooldown ended, but release is not finalized yet. Please refresh in 30-60 seconds.';
+        }
+      }
+    } catch (_) {
+      if (hintEl) {
+        hintEl.style.color = 'var(--warning)';
+        hintEl.textContent = 'Cooldown ended. Status check failed; please refresh and check Trigger/Claim status.';
+      }
+    }
+    if (buttonEl) {
+      buttonEl.textContent = 'Simulate Chainlink Event';
+      buttonEl.disabled = false;
+    }
+  };
+
+  _simulateChainlinkCountdownTimer = setInterval(tick, 1000);
+  tick();
 }
 
 async function loadKYCStatus() {
@@ -1432,11 +1511,18 @@ function renderLogin() {
 
       <section class="env-notice" aria-label="Test Environment Notice" style="max-width:760px;margin:16px auto 0;">
         <h2>Test Environment Notice</h2>
-        <p>This is a test environment. The system is currently running on testnets (Ethereum Sepolia / Solana Devnet).</p>
+        <p>This is a test environment. The system is currently running on testnets (Ethereum Sepolia / Solana Devnet). Only WETH is supported currently. </p>
         <p><strong>Testing tutorial:</strong></p>
         <ol>
-          <li>Full testing requires Yallet wallet support (not released yet).</li>
-          <li>Get test ETH from <a href="https://sepolia-faucet.pk910.de/#/" target="_blank" rel="noopener">https://sepolia-faucet.pk910.de/#/</a>.</li>
+          <li>
+            Full testing requires Yallet wallet support (alpha build for testing). To install:
+            <div style="margin-top:8px;">
+              <a href="/downloads/yallet.zip" target="_blank" rel="noopener" style="display:inline-block;padding:6px 10px;border:1px solid var(--border);border-radius:6px;color:#7dd3fc;text-decoration:none;">
+                Download Yallet Alpha (ZIP)
+              </a>
+            </div>
+          </li>
+          <li>Get test ETH from <a href="https://sepolia-faucet.pk910.de/" target="_blank" rel="noopener">https://sepolia-faucet.pk910.de/</a> for the evm address in Yallet.</li>
           <li>Swap to WETH on <a href="https://app.uniswap.org/" target="_blank" rel="noopener">https://app.uniswap.org/</a> (Sepolia network).</li>
         </ol>
       </section>
@@ -2061,6 +2147,13 @@ function renderProtectionOverview() {
       const planToken = state.savedPlan.token_symbol || tokenLabel;
       const hasRemaining = state.planRemaining && (parseFloat(state.planRemaining.shares || '0') > 0 || parseFloat(state.planRemaining.value || '0') > 0);
       const isBalanceZero = state.planRemaining != null && parseFloat(state.planRemaining.shares || '0') <= 0 && parseFloat(state.planRemaining.value || '0') <= 0;
+      const recipients = state.savedPlan.recipients || [];
+      const allRecipientsClaimed = recipients.length > 0 && recipients.every((_, i) => {
+        const st = (state.recipientClaimStatus || {})[i + 1];
+        return !!(st && st.claimed);
+      });
+      const showFullyClaimed = isBalanceZero && allRecipientsClaimed;
+      const showEscrowEmptyWarning = isBalanceZero && !allRecipientsClaimed;
       const olderPlans = (state.planHistory || []).slice(1); // all except the latest
       return `
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:16px;">
@@ -2079,7 +2172,8 @@ function renderProtectionOverview() {
           ${state.savedPlan.createdAt ? `<span style="font-size:11px;color:var(--text-muted);font-weight:400;margin-left:8px;">${new Date(state.savedPlan.createdAt).toLocaleDateString()}</span>` : ''}
         </h3>
         ${state.currentPlanId ? `<div style="font-size:11px;color:var(--text-muted);margin:-8px 0 12px 0;font-family:monospace;">Plan ID: ${esc(state.currentPlanId)}</div>` : ''}
-        ${isBalanceZero ? '<p style="font-size:14px;color:var(--warning);margin:0 0 10px 0;">This plan has been fully claimed.</p>' : ''}
+        ${showFullyClaimed ? '<p style="font-size:14px;color:var(--warning);margin:0 0 10px 0;">This plan has been fully claimed.</p>' : ''}
+        ${showEscrowEmptyWarning ? '<p style="font-size:14px;color:#f97316;margin:0 0 10px 0;">Escrow currently has no locked balance for this plan. If this plan was just created, escrow deposit may have failed or is still pending confirmation.</p>' : ''}
         <h4 style="margin-top:12px;">Recipients</h4>
         <table class="table" style="width:100%;margin-top:8px;">
           <thead>
@@ -3459,7 +3553,19 @@ function renderAccountsRelatedSection() {
               <div style="font-weight:600;display:flex;align-items:center;gap:8px;">${esc(acc.label || acc.email)} ${tagBadges}</div>
               <div style="font-size:12px;color:var(--text-muted);">${esc(acc.email)}${acc.address ? ' <span class="mono" style="font-size:11px;opacity:0.85;">' + esc(shortEvm(acc.address)) + '</span>' : ''}</div>
             </div>
-            <button type="button" class="btn btn-primary" style="width:auto;padding:6px 14px;font-size:13px;" data-action="accounts-transfer" data-index="${origIdx}">Transfer</button>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <button type="button" class="btn btn-primary" style="width:auto;padding:6px 14px;font-size:13px;" data-action="accounts-transfer" data-index="${origIdx}">Transfer</button>
+              <button
+                type="button"
+                class="btn btn-secondary"
+                title="Remove linked account"
+                aria-label="Remove linked account"
+                style="width:auto;padding:6px 10px;font-size:14px;line-height:1;color:#ef4444;border-color:rgba(239,68,68,0.45);"
+                data-action="accounts-delete"
+                data-index="${origIdx}">
+                🗑
+              </button>
+            </div>
           </div>`;
         }).join('')}
       ` : `
@@ -4681,10 +4787,7 @@ function attachAppEvents() {
         const data = await resp.json();
         const mins = data.cooldown_minutes || 10;
         btnSimChainOverview.textContent = 'Event Triggered';
-        if (hint) {
-          hint.style.display = 'inline';
-          hint.textContent = 'Oracle event has been triggered. Please wait ' + mins + ' minutes before claiming.';
-        }
+        startSimulateChainlinkCountdown(hint, mins, state.currentPlanId || null, btnSimChainOverview);
         reportActivity('simulate_chainlink', null, null, { detail: (data.triggers || []).length + ' triggers created' });
         const firstTx = (data.triggers || []).find(function (t) { return t.attestation_tx; });
         if (firstTx && firstTx.attestation_tx) {
@@ -4700,6 +4803,7 @@ function attachAppEvents() {
           setTimeout(function () { return toast.remove(); }, 10000);
         }
       } catch (err) {
+        clearSimulateChainlinkCountdown();
         btnSimChainOverview.textContent = 'Simulate Chainlink Event';
         btnSimChainOverview.disabled = false;
         if (hint) {
@@ -5749,10 +5853,7 @@ function attachAppEvents() {
         const data = await resp.json();
         const mins = data.cooldown_minutes || 10;
         btnSimulateChainlink.textContent = 'Event Triggered';
-        if (hint) {
-          hint.style.display = 'inline';
-          hint.textContent = 'Oracle event has been triggered. Please wait ' + mins + ' minutes before claiming.';
-        }
+        startSimulateChainlinkCountdown(hint, mins, state.currentPlanId || null, btnSimulateChainlink);
         reportActivity('simulate_chainlink', null, null, { detail: (data.triggers || []).length + ' triggers created' });
         const firstTx = (data.triggers || []).find(function (t) { return t.attestation_tx; });
         if (firstTx && firstTx.attestation_tx) {
@@ -5768,6 +5869,7 @@ function attachAppEvents() {
           setTimeout(function () { return toast.remove(); }, 10000);
         }
       } catch (err) {
+        clearSimulateChainlinkCountdown();
         btnSimulateChainlink.textContent = 'Simulate Chainlink Event';
         btnSimulateChainlink.disabled = false;
         if (hint) {
@@ -6105,6 +6207,41 @@ function attachAppEvents() {
       state.accountsTransferToken = 'ETH';
       state.accountsTransferAmount = '';
       render();
+    });
+  });
+
+  app.querySelectorAll('[data-action="accounts-delete"]').forEach((el) => {
+    el.addEventListener('click', async () => {
+      const index = parseInt(el.dataset.index, 10);
+      if (!Number.isFinite(index) || index < 0 || index >= state.relatedAccounts.length) return;
+      const account = state.relatedAccounts[index];
+      const id = account && account.id ? String(account.id) : '';
+      if (!id) {
+        showToast('Cannot remove this account: missing invite id', 'error');
+        return;
+      }
+      const displayName = account.label || account.email || 'this linked account';
+      const confirmed = window.confirm(`Remove "${displayName}" from linked accounts?`);
+      if (!confirmed) return;
+
+      try {
+        const headers = await getAuthHeadersAsync().catch(() => ({}));
+        const resp = await apiFetch(`${API_BASE}/account-invites/${encodeURIComponent(id)}`, {
+          method: 'DELETE',
+          headers,
+        });
+        if (resp.status === 401 && wallet) wallet.sessionToken = null;
+        if (!resp.ok && resp.status !== 204) {
+          const err = await resp.json().catch(() => ({}));
+          throw new Error(err.error || 'Failed to remove linked account');
+        }
+        await loadAccountInvites();
+        showToast('Linked account removed', 'success');
+      } catch (err) {
+        showToast(err.message || 'Failed to remove linked account', 'error');
+      } finally {
+        render();
+      }
     });
   });
 
@@ -6504,7 +6641,8 @@ function attachAppEvents() {
                 const approveHash = await sendTransactionInWallet(approveTx, addr);
                 // Wait for approve to be mined before sending deposit (prevents race condition)
                 showToast('Waiting for approval to confirm...', 'info');
-                await waitForTxReceipt(rpcUrl, approveHash, 120000);
+                const receiptProvider = wallet?._yalletProvider || window.yallet || null;
+                await waitForTxReceipt(rpcUrl, approveHash, 120000, receiptProvider);
               }
             }
           }
@@ -7904,11 +8042,24 @@ function normalizeHex(s) {
 }
 
 /** Wait for a transaction to be mined. Uses raw JSON-RPC fetch (no ethers dependency). */
-async function waitForTxReceipt(rpcUrl, txHash, timeoutMs) {
-  const timeout = timeoutMs || 120000;
+async function waitForTxReceipt(rpcUrl, txHash, timeoutMs, provider) {
+  const timeout = timeoutMs || 300000;
   const start = Date.now();
   while (Date.now() - start < timeout) {
     try {
+      // Try wallet/provider first, then fall back to direct RPC.
+      // Some wallet providers may lag on eth_getTransactionReceipt even after tx is mined.
+      if (provider && typeof provider.request === 'function') {
+        const receipt = await provider.request({
+          method: 'eth_getTransactionReceipt',
+          params: [txHash],
+        });
+        if (receipt) {
+          if (receipt.status === '0x0') throw new Error('Transaction reverted: ' + txHash);
+          return receipt;
+        }
+      }
+
       const resp = await fetch(rpcUrl, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getTransactionReceipt', params: [txHash] }),

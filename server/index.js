@@ -125,6 +125,16 @@ const pathClaimRouter = require('./api/path-claim');
 // ---------------------------------------------------------------------------
 
 const app = express();
+// Behind Cloudflare/Fly, trust proxy headers so rate-limit gets real client IP.
+// Can be overridden with TRUST_PROXY env (e.g. "1", "true", "false").
+const trustProxyEnv = String(process.env.TRUST_PROXY || '').trim().toLowerCase();
+if (trustProxyEnv === 'false' || trustProxyEnv === '0') {
+  app.set('trust proxy', false);
+} else if (trustProxyEnv) {
+  app.set('trust proxy', trustProxyEnv === 'true' ? true : trustProxyEnv);
+} else {
+  app.set('trust proxy', true);
+}
 
 // Body parsing
 app.use(express.json({ limit: '1mb' }));
@@ -182,7 +192,12 @@ app.use((req, res, next) => {
         }
       }
       // Reject requests with no Origin/Referer (prevents CSRF from programmatic clients)
-      const hasApiKey = req.headers['x-api-key'] || req.headers['authorization'];
+      const hasApiKey = req.headers['x-api-key']
+        || req.headers['authorization']
+        || req.headers['x-admin-token']
+        || req.headers['x-admin-session']
+        || req.headers['x-authority-session']
+        || req.headers['x-oracle-internal-key'];
       if (!requestOrigin && !hasApiKey) {
         return res.status(403).json({ error: 'CSRF check failed: missing origin' });
       }
@@ -698,6 +713,34 @@ async function seedTestAuthorityIfNeeded() {
   console.log('[server] Seeded test Authority for', TEST_AUTHORITY_WALLET);
 }
 
+async function seedOracleAuthorityIfNeeded() {
+  const oracleAuthorityId = (process.env.ORACLE_AUTHORITY_ID || '').trim();
+  if (!oracleAuthorityId) return;
+  const existing = await db.authorities.findById(oracleAuthorityId);
+  if (existing) return;
+
+  await db.authorities.create(oracleAuthorityId, {
+    authority_id: oracleAuthorityId,
+    name: 'Oracle Authority',
+    bar_number: 'ORACLE-001',
+    jurisdiction: 'System',
+    region: 'Global',
+    specialization: ['Oracle attestation'],
+    languages: ['en'],
+    pubkey: '',
+    fee_structure: { base_fee_bps: 0, flat_fee_usd: 0, currency: 'USD' },
+    email: null,
+    website: null,
+    verified: true,
+    rating: null,
+    rating_count: 0,
+    active_bindings: 0,
+    max_capacity: 1000000,
+    created_at: new Date().toISOString(),
+  });
+  console.log('[server] Seeded Oracle Authority for ORACLE_AUTHORITY_ID');
+}
+
 /** In production, log warnings for insecure or missing sensitive config. */
 function warnProductionConfig() {
   if (process.env.NODE_ENV !== 'production') return;
@@ -726,6 +769,10 @@ function warnProductionConfig() {
 
 if (require.main === module) {
   db.ensureReady()
+    .then(() => {
+      // Always ensure configured oracle authority exists, so oracle plan distribute can create bindings.
+      return seedOracleAuthorityIfNeeded();
+    })
     .then(() => {
       // #21 FIX: Guard test authority seed — only in development
       if (process.env.NODE_ENV === 'development') {

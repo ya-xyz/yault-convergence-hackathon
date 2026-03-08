@@ -96,7 +96,7 @@ module.exports = {
   },
   // Public base URL for invite links (e.g. http://localhost:3001 or https://app.yault.xyz).
   // Used when printing invite link in console; production should send link via email (TODO).
-  publicBaseUrl: process.env.PUBLIC_BASE_URL || process.env.BASE_URL || 'http://localhost:3001',
+  publicBaseUrl: process.env.PUBLIC_BASE_URL || process.env.BASE_URL || process.env.CORS_ORIGIN || 'http://localhost:3001',
 
   // RWA: upload-and-mint API for delivering stored credential NFT after attestation release.
   rwa: {
