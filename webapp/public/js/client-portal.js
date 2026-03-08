@@ -4497,7 +4497,6 @@ async function handleFixEncryptionClick(e) {
       index: recipientIndex,
       label: label,
     }, 'Re-generate payload');
-    const prepared = await window.YaultRwaSdk.prepareCredentialNftPayload(solanaAddress, strictPayload, { xidentity: xidentity });
     const fingerprintBytes = new Uint8Array(adminFactorHex.match(/.{2}/g).map(b => parseInt(b, 16)));
     const fingerprintBuf = await crypto.subtle.digest('SHA-256', fingerprintBytes);
     const adminFactorFingerprint = Array.from(new Uint8Array(fingerprintBuf)).map(b => b.toString(16).padStart(2, '0')).join('');
@@ -5688,7 +5687,6 @@ function attachAppEvents() {
                             label: label,
                             memo: (state.planMemo && state.planMemo.trim()) ? state.planMemo.trim() : undefined,
                           }, 'Plan payload #' + (i + 1));
-                          const prepared = await window.YaultRwaSdk.prepareCredentialNftPayload(solanaAddress, strictPayload, { xidentity: xidentity });
                           packagesPerPath.push({
                             index: i + 1,
                             recipient_solana_address: prepared.recipientSolanaAddress,
