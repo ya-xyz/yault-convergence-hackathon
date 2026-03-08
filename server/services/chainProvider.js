@@ -18,6 +18,10 @@ const BALANCE_RPC_TIMEOUT_MS = 5000;
 // Overall timeout for multi-chain balance: return partial results after this (avoid waiting for slowest chain)
 const MULTICHAIN_OVERALL_TIMEOUT_MS = 10000;
 
+function isValidEvmAddress(value) {
+  return /^0x[0-9a-fA-F]{40}$/.test(String(value || ''));
+}
+
 // ---------------------------------------------------------------------------
 // Internal: JSON-RPC helper with timeout + fallback
 // ---------------------------------------------------------------------------
@@ -128,6 +132,9 @@ async function getEvmTokenBalance(chainKey, address, tokenAddress, decimals = 6,
 
   // ERC-20 balanceOf(address) call data; ensure to/tokenAddress has 0x for RPC
   const toContract = tokenAddress.startsWith('0x') ? tokenAddress : '0x' + tokenAddress;
+  if (!/^0x[0-9a-fA-F]{40}$/.test(toContract)) {
+    throw new Error(`Invalid token contract address: ${tokenAddress}`);
+  }
   const addrPadded = address.replace(/^0x/, '').toLowerCase().padStart(64, '0');
   const callData = '0x70a08231' + addrPadded;
 
@@ -144,7 +151,9 @@ async function getEvmTokenBalance(chainKey, address, tokenAddress, decimals = 6,
     console.log('[chainProvider] token eth_call result:', typeof result === 'string' ? result : JSON.stringify(result));
   }
 
-  const balanceRaw = BigInt(result || '0x0');
+  // Some RPCs return "0x" (empty hex) for failed/empty eth_call; treat as zero.
+  const balanceHex = (typeof result === 'string' && result.trim() === '0x') ? '0x0' : (result || '0x0');
+  const balanceRaw = BigInt(balanceHex);
   const divisor = BigInt(10 ** decimals);
   const whole = balanceRaw / divisor;
   const frac = balanceRaw % divisor;
@@ -172,11 +181,23 @@ async function getEvmTokenBalance(chainKey, address, tokenAddress, decimals = 6,
  */
 async function getBitcoinBalance(address, useTestnet = false) {
   const chain = CHAINS.bitcoin;
-  const apiUrl = useTestnet && chain.testnet?.apis?.mempool
-    ? chain.testnet.apis.mempool
-    : chain.apis.mempool;
+  const addr = String(address || '').trim();
+  const isLikelyTestnetAddr = /^(tb1|bcrt1|2|m|n)/i.test(addr);
+  const primaryTestnet = useTestnet || isLikelyTestnetAddr;
+  const primary = primaryTestnet ? chain.testnet?.apis?.mempool : chain.apis.mempool;
+  const fallback = primaryTestnet ? chain.apis.mempool : chain.testnet?.apis?.mempool;
 
-  const data = await fetchJson(`${apiUrl}/address/${address}`);
+  let data;
+  try {
+    data = await fetchJson(`${primary}/address/${addr}`);
+  } catch (err) {
+    // Common case: wrong network endpoint for this BTC address -> HTTP 400.
+    if (fallback) {
+      data = await fetchJson(`${fallback}/address/${addr}`);
+    } else {
+      throw err;
+    }
+  }
   const funded = data.chain_stats?.funded_txo_sum || 0;
   const spent = data.chain_stats?.spent_txo_sum || 0;
   const balanceSats = funded - spent;
@@ -332,7 +353,7 @@ async function getMultiChainBalances(addresses, options = {}) {
         );
       }
       const wbtcAddr = useTestnet ? (chain.testnet?.wbtc || chain.wbtc) : chain.wbtc;
-      if (includeTokens && wbtcAddr) {
+      if (includeTokens && wbtcAddr && isValidEvmAddress(wbtcAddr)) {
         promises.push(
           getEvmTokenBalance(chain.key, addresses.evmAddress, wbtcAddr, 8, rpcTimeoutMs, useTestnet)
             .then((bal) => results.evm.push({ ...bal, symbol: 'WBTC' }))
@@ -346,8 +367,10 @@ async function getMultiChainBalances(addresses, options = {}) {
                 symbol: 'WBTC',
                 error: err.message,
               });
-            })
+          })
         );
+      } else if (includeTokens && wbtcAddr && !isValidEvmAddress(wbtcAddr)) {
+        console.warn(`[chainProvider] ${chain.name} WBTC query skipped: invalid token address (${wbtcAddr})`);
       }
     }
   }
