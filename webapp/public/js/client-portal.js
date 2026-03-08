@@ -2079,7 +2079,8 @@ function renderProtectionOverview() {
                     : (claimSt ? '<span class="badge badge-muted">Pending</span>' : '<span style="font-size:11px;color:var(--text-muted);">—</span>')}
                 </td>
                 ${!isBalanceZero ? `<td style="padding:8px;border-bottom:1px solid var(--border);text-align:right;">
-                  ${!isClaimed ? `<button type="button" class="btn btn-secondary btn-sm" data-fix-enc-index="${rIdx}" title="Regenerate credentials for this recipient (fix wrong x25519 encryption)">Re-Generate Credential</button>` : ''}
+                  <button type="button" class="btn btn-secondary btn-sm" data-fix-enc-index="${i + 1}" title="Regenerate credentials for this recipient (fix wrong x25519 encryption)">Resend</button>
+                  <button type="button" class="btn btn-sm" style="background:var(--error);color:#fff;margin-left:6px;" data-revoke-index="${i + 1}" title="Destroy AF and reclaim escrow shares for this recipient (irreversible)">Revoke</button>
                 </td>` : ''}
               </tr>`;
             }).join('')}
@@ -4597,6 +4598,84 @@ async function handleFixEncryptionClick(e) {
   }
 }
 
+/**
+ * Handle "Revoke" button click: destroyAndReclaim() in a single tx.
+ * Destroys the encrypted AdminFactor on-chain and reclaims escrow shares.
+ */
+async function handleRevokeRecipientClick(e) {
+  const revokeBtn = e.target && e.target.closest && e.target.closest('[data-revoke-index]');
+  if (!revokeBtn) return;
+  const recipientIndex = parseInt(revokeBtn.getAttribute('data-revoke-index'), 10);
+  if (!Number.isFinite(recipientIndex) || recipientIndex < 1) return;
+
+  const walletId = (state.auth?.address && state.auth.address.startsWith('0x'))
+    ? state.auth.address
+    : ('0x' + (state.auth?.pubkey || ''));
+  if (!walletId || walletId === '0x') {
+    showToast('Wallet not connected', 'error');
+    return;
+  }
+
+  // Confirm with user — this is irreversible
+  const recipientLabel = (state.savedPlan?.recipients?.[recipientIndex - 1]?.label) || ('Recipient #' + recipientIndex);
+  if (!confirm('Revoke access for ' + recipientLabel + '?\n\nThis will permanently destroy the encrypted AdminFactor and reclaim the escrow shares. This action is irreversible.')) {
+    return;
+  }
+
+  if (!window.YaultAdminFactorVault) {
+    showToast('AdminFactorVault module not loaded. Please refresh the page.', 'error');
+    return;
+  }
+
+  const provider = (wallet && wallet._yalletProvider) || window.yallet;
+  if (!provider || typeof provider.request !== 'function') {
+    showToast('Yallet not connected', 'error');
+    return;
+  }
+
+  revokeBtn.disabled = true;
+  revokeBtn.textContent = 'Revoking...';
+
+  try {
+    const afCfg = await _getAdminFactorVaultConfig();
+    if (!afCfg || !afCfg.afVaultAddress) {
+      showToast('AdminFactorVault not configured on server', 'error');
+      return;
+    }
+
+    const result = await window.YaultAdminFactorVault.destroyAndReclaim(
+      provider,
+      afCfg,
+      walletId,
+      recipientIndex,
+      function (step, total, detail) {
+        console.log('[Revoke] ' + step + '/' + total + ': ' + detail);
+      }
+    );
+
+    if (result.success) {
+      showToast(recipientLabel + ' revoked. AF destroyed and escrow shares reclaimed.', 'success');
+      // Refresh remaining balance
+      try {
+        const authHeaders = await getAuthHeadersAsync().catch(() => ({}));
+        const remainResp = await fetch(`${API_BASE}/claim/escrow-balance?walletId=${encodeURIComponent(walletId)}`, { headers: authHeaders });
+        if (remainResp.ok) {
+          const remainData = await remainResp.json();
+          state.planRemaining = { shares: remainData.shares || '0', value: remainData.value || '0' };
+        }
+      } catch (_) {}
+      render();
+    } else {
+      showToast('Revoke failed: ' + (result.error || 'Unknown error'), 'error');
+    }
+  } catch (err) {
+    showToast('Revoke failed: ' + (err.message || err), 'error');
+  } finally {
+    revokeBtn.disabled = false;
+    revokeBtn.textContent = 'Revoke';
+  }
+}
+
 function attachAppEvents() {
   const app = document.getElementById('app');
   if (!app) return;
@@ -4870,6 +4949,12 @@ function attachAppEvents() {
   if (!app.dataset.fixEncClickBound) {
     app.dataset.fixEncClickBound = '1';
     app.addEventListener('click', handleFixEncryptionClick);
+  }
+
+  // Revoke: only bind once (same pattern as Resend)
+  if (!app.dataset.revokeClickBound) {
+    app.dataset.revokeClickBound = '1';
+    app.addEventListener('click', handleRevokeRecipientClick);
   }
 
   const btnPlanLoadVaultBalance = document.getElementById('btnPlanLoadVaultBalance');
