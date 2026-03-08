@@ -547,6 +547,26 @@ router.get('/escrow-config', (req, res) => {
 });
 
 /**
+ * GET /api/claim/af-vault-config
+ *
+ * Return AdminFactorVault address and chain info for frontend tx building.
+ */
+router.get('/af-vault-config', (req, res) => {
+  const afVaultAddr = (process.env.ADMIN_FACTOR_VAULT_ADDRESS || '').trim();
+  const escrowAddr = (config.escrow?.address || '').trim();
+  const chainId = config.escrow?.chainId || '11155111';
+  const rpcUrl = config.escrow?.rpcUrl || 'https://ethereum-sepolia-rpc.publicnode.com';
+  const enabled = !!afVaultAddr;
+  return res.json({
+    afVaultAddress: afVaultAddr,
+    escrowAddress: escrowAddr,
+    chainId,
+    rpcUrl,
+    enabled,
+  });
+});
+
+/**
  * GET /api/claim/escrow-balance?walletId=...&recipientIndex=...
  *
  * Query VaultShareEscrow for a recipient's claimable balance.

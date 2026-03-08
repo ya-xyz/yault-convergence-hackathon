@@ -25,143 +25,23 @@ const API_BASE = (typeof YAULT_ENV !== 'undefined' && YAULT_ENV?.api?.baseUrl)
   ? YAULT_ENV.api.baseUrl
   : (window.location.port === '3001' ? '/api' : (window.location.hostname === 'localhost' ? 'http://localhost:3001/api' : 'https://api.yault.xyz/api'));
 
-const PLAN_WRITE_QUEUE_KEY = 'yault_plan_write_retry_v1';
-const PLAN_WRITE_RETRY_BASE_MS = 30 * 1000;
-let _planWriteFlushInFlight = false;
-let _planWriteRetryTimer = null;
-
-function _loadPlanWriteQueue() {
+/**
+ * Fetch AdminFactorVault config from server (address, chainId, rpcUrl).
+ * Returns null if not configured.
+ */
+let _afVaultConfigCache = null;
+async function _getAdminFactorVaultConfig() {
+  if (_afVaultConfigCache) return _afVaultConfigCache;
   try {
-    const raw = sessionStorage.getItem(PLAN_WRITE_QUEUE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch (_) {
-    return [];
-  }
-}
-
-function _savePlanWriteQueue(items) {
-  try {
-    if (!items || items.length === 0) {
-      sessionStorage.removeItem(PLAN_WRITE_QUEUE_KEY);
-      return;
+    const res = await fetch(API_BASE + '/claim/af-vault-config');
+    if (!res.ok) return null;
+    const cfg = await res.json();
+    if (cfg && cfg.afVaultAddress) {
+      _afVaultConfigCache = cfg;
+      return cfg;
     }
-    sessionStorage.setItem(PLAN_WRITE_QUEUE_KEY, JSON.stringify(items));
-  } catch (_) {
-    // Best effort only.
-  }
-}
-
-function _planWriteEndpoint(type) {
-  if (type === 'admin_factor') return '/wallet-plan/admin-factor';
-  if (type === 'path_credentials') return '/wallet-plan/path-credentials';
-  if (type === 'send_release_link') return '/wallet-plan/send-release-link';
-  return null;
-}
-
-function _planWriteKey(type, payload) {
-  const p = payload || {};
-  if (type === 'admin_factor') return `${type}:${p.recipientIndex || ''}:${p.label || ''}`;
-  if (type === 'path_credentials') return `${type}:${p.recipientIndex || ''}:${p.mnemonic_hash || ''}`;
-  if (type === 'send_release_link') return `${type}:${p.authority_id || ''}:${p.recipient_id || ''}`;
-  return `${type}:${JSON.stringify(p)}`;
-}
-
-function queuePlanWrite(type, payload, reason) {
-  const endpoint = _planWriteEndpoint(type);
-  if (!endpoint) return;
-  const key = _planWriteKey(type, payload);
-  const now = Date.now();
-  const queue = _loadPlanWriteQueue();
-  const existingIndex = queue.findIndex((item) => item && item.key === key);
-  const nextItem = {
-    key,
-    type,
-    endpoint,
-    payload,
-    attempts: 0,
-    next_retry_at: now + PLAN_WRITE_RETRY_BASE_MS,
-    last_error: reason || 'queued',
-    updated_at: now,
-  };
-  if (existingIndex >= 0) queue[existingIndex] = { ...queue[existingIndex], ...nextItem };
-  else queue.push(nextItem);
-  _savePlanWriteQueue(queue);
-}
-
-async function _postPlanWrite(endpoint, payload, headers) {
-  const resp = await apiFetch(`${API_BASE}${endpoint}`, {
-    method: 'POST',
-    headers: { ...headers, 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  if (!resp.ok) {
-    const errBody = await resp.json().catch(() => ({}));
-    throw new Error(errBody.error || resp.statusText || `HTTP ${resp.status}`);
-  }
-}
-
-async function persistPlanWriteOrQueue(type, payload) {
-  const endpoint = _planWriteEndpoint(type);
-  if (!endpoint) return { ok: false, queued: false, error: 'unknown type' };
-  try {
-    const headers = await getAuthHeadersAsync();
-    await _postPlanWrite(endpoint, payload, headers);
-    return { ok: true, queued: false };
-  } catch (err) {
-    queuePlanWrite(type, payload, err.message || 'request failed');
-    return { ok: false, queued: true, error: err.message || 'request failed' };
-  }
-}
-
-async function flushPendingPlanWrites() {
-  if (_planWriteFlushInFlight) return { flushed: 0, remaining: _loadPlanWriteQueue().length };
-  if (!wallet || !wallet.connected || !state.auth) return { flushed: 0, remaining: _loadPlanWriteQueue().length };
-  const queue = _loadPlanWriteQueue();
-  if (queue.length === 0) return { flushed: 0, remaining: 0 };
-
-  _planWriteFlushInFlight = true;
-  try {
-    const headers = await getAuthHeadersAsync();
-    const now = Date.now();
-    const nextQueue = [];
-    let flushed = 0;
-
-    for (const item of queue) {
-      if (!item || !item.endpoint) continue;
-      if (item.next_retry_at && now < Number(item.next_retry_at)) {
-        nextQueue.push(item);
-        continue;
-      }
-      try {
-        await _postPlanWrite(item.endpoint, item.payload, headers);
-        flushed += 1;
-      } catch (err) {
-        const attempts = Number(item.attempts || 0) + 1;
-        const backoff = Math.min(60 * 60 * 1000, PLAN_WRITE_RETRY_BASE_MS * Math.pow(2, Math.min(attempts, 8) - 1));
-        nextQueue.push({
-          ...item,
-          attempts,
-          next_retry_at: Date.now() + backoff,
-          last_error: err.message || 'retry failed',
-          updated_at: Date.now(),
-        });
-      }
-    }
-
-    _savePlanWriteQueue(nextQueue);
-    return { flushed, remaining: nextQueue.length };
-  } finally {
-    _planWriteFlushInFlight = false;
-  }
-}
-
-function ensurePlanWriteRetryLoop() {
-  if (_planWriteRetryTimer) return;
-  _planWriteRetryTimer = setInterval(() => {
-    flushPendingPlanWrites().catch(() => {});
-  }, 60 * 1000);
+    return null;
+  } catch (_) { return null; }
 }
 
 /** Generate a random password of given length (alphanumeric, easy to type), default 12 chars. */
@@ -4609,7 +4489,8 @@ async function handleFixEncryptionClick(e) {
       showToast('RWA SDK prepareCredentialNftPayload not available', 'error');
       return;
     }
-    const strictPayload = buildCredentialPayloadStrict({
+    // NFT payload does NOT include admin_factor — AF is stored separately on-chain via AdminFactorVault.
+    const prepared = await window.YaultRwaSdk.prepareCredentialNftPayload(solanaAddress, {
       mnemonic: newMnemonic,
       passphrase: newPassphrase,
       index: recipientIndex,
@@ -4619,6 +4500,35 @@ async function handleFixEncryptionClick(e) {
     const fingerprintBytes = new Uint8Array(adminFactorHex.match(/.{2}/g).map(b => parseInt(b, 16)));
     const fingerprintBuf = await crypto.subtle.digest('SHA-256', fingerprintBytes);
     const adminFactorFingerprint = Array.from(new Uint8Array(fingerprintBuf)).map(b => b.toString(16).padStart(2, '0')).join('');
+
+    // Store encrypted AF on-chain via AdminFactorVault (if configured).
+    // The AF is encrypted with the recipient's xidentity (ECIES) so only they can decrypt.
+    if (window.YaultAdminFactorVault && window.YaultEscrow) {
+      try {
+        const afEncryptor = new window.YaultRwaSdk.ECIESEncryptor();
+        const afPlain = { af: adminFactorHex };
+        const afEncrypted = await window.YaultRwaSdk.encryptAsset(
+          { title: 'AF', content: JSON.stringify(afPlain), metadata: {} },
+          'NOTE', xidentity.trim(), afEncryptor
+        );
+        const afCiphertextHex = '0x' + Array.from(new TextEncoder().encode(JSON.stringify(afEncrypted)))
+          .map(b => b.toString(16).padStart(2, '0')).join('');
+        const wHash = window.YaultAdminFactorVault.walletIdHash(walletId);
+        const fingerprintBytes32 = '0x' + adminFactorFingerprint;
+        const afCfg = await _getAdminFactorVaultConfig();
+        if (afCfg && afCfg.afVaultAddress) {
+          const storeTx = window.YaultAdminFactorVault.buildStoreTx(
+            afCfg.afVaultAddress, wHash, recipientIndex, afCiphertextHex, fingerprintBytes32, afCfg.chainId
+          );
+          storeTx.from = walletId;
+          await provider.request({ method: 'eth_sendTransaction', params: [storeTx] });
+          console.log('[Resend] AF stored on-chain for recipient #' + recipientIndex);
+        }
+      } catch (afErr) {
+        console.warn('[Resend] Failed to store AF on-chain:', afErr.message || afErr);
+        // Non-fatal: AF storage on-chain is new; fall back to legacy flow if needed.
+      }
+    }
     const replaceResp = await fetch(`${API_BASE}/release/replace-path-payload`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders },
@@ -5685,7 +5595,8 @@ function attachAppEvents() {
                       }
                       if (hasPrepare && solanaAddress && xidentity) {
                         try {
-                          const strictPayload = buildCredentialPayloadStrict({
+                          // NFT payload does NOT include admin_factor — AF stored separately on-chain.
+                          const prepared = await window.YaultRwaSdk.prepareCredentialNftPayload(solanaAddress, {
                             mnemonic: state.planMnemonics[i],
                             passphrase: state.planPassphrases[i],
                             index: i + 1,
@@ -5730,47 +5641,68 @@ function attachAppEvents() {
                         const cfgErr = await configureResp.json().catch(() => ({}));
                         showToast('Failed to configure release paths: ' + (cfgErr.error || configureResp.statusText), 'error');
                       } else {
-                        // Retry distribute up to 3 times with exponential backoff
-                        const MAX_DISTRIBUTE_RETRIES = 3;
-                        let distributeSuccess = false;
-                        for (let attempt = 1; attempt <= MAX_DISTRIBUTE_RETRIES; attempt++) {
-                          try {
-                            const distHeaders = await getAuthHeadersAsync();
-                            const distResp = await fetch(`${API_BASE}/release/distribute`, {
-                              method: 'POST',
-                              headers: { 'Content-Type': 'application/json', ...distHeaders },
-                              body: JSON.stringify({
-                                wallet_id: walletId,
-                                authority_id: oracleAuthority.id,
-                                encrypted_packages: packagesPerPath,
-                                plan_id: state.currentPlanId || undefined,
-                              }),
-                            });
-                            if (distResp.ok) {
-                              showToast('Release paths configured (per-recipient credentials stored to Arweave).', 'success');
-                              // Clear sensitive credential data from memory after successful Arweave storage
-                              state.planAdminFactors = [];
-                              state.planMnemonics = [];
-                              state.planPassphrases = [];
-                              distributeSuccess = true;
-                              break;
-                            } else {
-                              const distErr = await distResp.json().catch(() => ({}));
-                              if (attempt < MAX_DISTRIBUTE_RETRIES) {
-                                console.warn('[Plan] Distribute attempt ' + attempt + ' failed, retrying...', distErr.error);
-                                await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt - 1)));
-                              } else {
-                                showToast('Failed to distribute packages after ' + MAX_DISTRIBUTE_RETRIES + ' attempts: ' + (distErr.error || 'Unknown error') + '. Credentials are saved server-side and can be retried from the plan overview.', 'error');
+                        const distHeaders = await getAuthHeadersAsync();
+                        const distResp = await fetch(`${API_BASE}/release/distribute`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json', ...distHeaders },
+                          body: JSON.stringify({
+                            wallet_id: walletId,
+                            authority_id: oracleAuthority.id,
+                            encrypted_packages: packagesPerPath,
+                          }),
+                        });
+                        if (distResp.ok) {
+                          showToast('Release paths and binding configured for Oracle (per-recipient credentials stored to Arweave).', 'success');
+
+                          // Store encrypted AdminFactors on-chain via AdminFactorVault.
+                          // AF is encrypted with each recipient's xidentity so only they can decrypt.
+                          if (window.YaultAdminFactorVault) {
+                            try {
+                              const afCfg = await _getAdminFactorVaultConfig();
+                              if (afCfg && afCfg.afVaultAddress) {
+                                const evmProvider = (wallet && wallet._yalletProvider) || window.yallet;
+                                const wHash = window.YaultAdminFactorVault.walletIdHash(walletId);
+                                for (let ai = 0; ai < state.planAdminFactors.length; ai++) {
+                                  const r = recipients[ai];
+                                  const evmFromInvite = (r.id && inviteIdToEvm[r.id]) ? inviteIdToEvm[r.id] : null;
+                                  const evmKey = evmFromInvite || normAddr(r.address);
+                                  const addrRec = addresses[evmKey] || {};
+                                  const xid = addrRec.xidentity;
+                                  if (!xid) continue;
+                                  try {
+                                    const afEncryptor = new window.YaultRwaSdk.ECIESEncryptor();
+                                    const afPlain = { af: state.planAdminFactors[ai] };
+                                    const afEncrypted = await window.YaultRwaSdk.encryptAsset(
+                                      { title: 'AF', content: JSON.stringify(afPlain), metadata: {} },
+                                      'NOTE', xid.trim(), afEncryptor
+                                    );
+                                    const afCtHex = '0x' + Array.from(new TextEncoder().encode(JSON.stringify(afEncrypted)))
+                                      .map(b => b.toString(16).padStart(2, '0')).join('');
+                                    const fpHex = '0x' + fingerprintsResolved[ai];
+                                    const storeTx = window.YaultAdminFactorVault.buildStoreTx(
+                                      afCfg.afVaultAddress, wHash, ai + 1, afCtHex, fpHex, afCfg.chainId
+                                    );
+                                    storeTx.from = walletId;
+                                    await evmProvider.request({ method: 'eth_sendTransaction', params: [storeTx] });
+                                    console.log('[Plan] AF stored on-chain for recipient #' + (ai + 1));
+                                  } catch (afStoreErr) {
+                                    console.warn('[Plan] AF on-chain store failed for recipient #' + (ai + 1) + ':', afStoreErr.message || afStoreErr);
+                                  }
+                                }
+                                showToast('AdminFactors stored on-chain (encrypted, destroyable).', 'success');
                               }
-                            }
-                          } catch (distNetErr) {
-                            if (attempt < MAX_DISTRIBUTE_RETRIES) {
-                              console.warn('[Plan] Distribute attempt ' + attempt + ' network error, retrying...', distNetErr.message);
-                              await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt - 1)));
-                            } else {
-                              showToast('Distribute network error after ' + MAX_DISTRIBUTE_RETRIES + ' attempts: ' + distNetErr.message, 'error');
+                            } catch (afBatchErr) {
+                              console.warn('[Plan] AF batch store failed:', afBatchErr.message || afBatchErr);
                             }
                           }
+
+                          // Clear sensitive credential data from memory after successful storage
+                          state.planMnemonics = [];
+                          state.planPassphrases = [];
+                          state.planAdminFactors = []; // AF now on-chain, clear from memory
+                        } else {
+                          const distErr = await distResp.json().catch(() => ({}));
+                          showToast('Failed to distribute packages: ' + (distErr.error || distResp.statusText), 'error');
                         }
                       }
                     }

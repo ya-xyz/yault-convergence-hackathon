@@ -68,6 +68,7 @@ const _portalState = {
   status: 'waiting', // 'waiting' | 'released' | 'activated'
   balances: null,
   error: null,
+  _retrievingAF: false,
 };
 
 function _resetState() {
@@ -78,6 +79,7 @@ function _resetState() {
   _portalState.status = 'waiting';
   _portalState.balances = null;
   _portalState.error = null;
+  _portalState._retrievingAF = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -177,25 +179,40 @@ function _renderStep2() {
 }
 
 function _renderStep3() {
+  const isActive = _portalState.currentStep === 3;
+  const isRetrieving = isActive && _portalState._retrievingAF;
   return `
     <div class="claim-step ${_stepClass(3)}" data-step="3">
       <div class="claim-step-header">
         <div class="claim-step-number">${_stepNumberContent(3)}</div>
-        <div class="claim-step-title">Enter AdminFactor or Blob</div>
+        <div class="claim-step-title">AdminFactor</div>
       </div>
       <div class="claim-step-content">
+        ${isActive ? `
+          <div class="alert-banner alert-info" style="margin-bottom:8px;">
+            <span class="alert-icon">&#8505;</span>
+            AdminFactor can be retrieved automatically from the on-chain vault, or entered manually.
+          </div>
+          <div style="display:flex;gap:8px;margin-bottom:8px;">
+            <button class="btn-add-recipient" data-action="retrieve-af-onchain"
+              style="flex:1;${isRetrieving ? 'opacity:0.6;pointer-events:none;' : ''}"
+              ${isRetrieving ? 'disabled' : ''}>
+              ${isRetrieving ? 'Retrieving...' : 'Retrieve from On-Chain Vault'}
+            </button>
+          </div>
+          <div style="text-align:center;font-size:11px;color:var(--text-secondary);margin-bottom:8px;">— or enter manually —</div>
+        ` : ''}
         <div class="form-group">
-          <label class="form-label">AdminFactor or blob (hex, from authority)</label>
+          <label class="form-label">AdminFactor or blob (hex)</label>
           <input class="form-input" type="text" id="claimAdminFactor"
             placeholder="64-char (AF only) or 80-char (AF+amount blob)"
-            ${_portalState.currentStep !== 3 ? 'disabled' : ''}
+            ${!isActive ? 'disabled' : ''}
             value="${escapeHTML(_portalState.adminfactor)}" maxlength="82" />
           <div class="form-hint">
-            64-char = AdminFactor only. 80-char = blob (AdminFactor + amount). Amount is read from blob — no need to enter it.
-            Contact your designated authority if you have not received it.
+            64-char = AdminFactor only. 80-char = blob (AdminFactor + amount).
           </div>
         </div>
-        ${_portalState.currentStep === 3 ? `
+        ${isActive ? `
           <button class="btn-add-recipient" data-action="next-step" data-step="3" style="margin-top:4px;">
             Continue
           </button>
@@ -458,6 +475,10 @@ function _attachPortalEvents(container) {
         break;
       }
 
+      case 'retrieve-af-onchain':
+        _handleRetrieveAFOnChain(container);
+        break;
+
       case 'activate-path':
         _handleActivate(container);
         break;
@@ -524,6 +545,42 @@ function _handleNextStep(container, fromStep) {
   }
 
   _refreshWizard(container);
+}
+
+/**
+ * Retrieve encrypted AF from AdminFactorVault on-chain, decrypt with recipient's
+ * xidentity private key, and auto-fill the AdminFactor input.
+ *
+ * Dispatches 'release:retrieve-af' event for the release module to handle decryption
+ * (since the private key is in the wallet extension, not accessible here).
+ */
+async function _handleRetrieveAFOnChain(container) {
+  _portalState._retrievingAF = true;
+  _portalState.error = null;
+  _refreshWizard(container);
+
+  // Dispatch event for the release module to handle the on-chain retrieval + decryption.
+  // The release module has access to the wallet provider and can:
+  //   1. Call AdminFactorVault.retrieve(walletIdHash, recipientIndex)
+  //   2. Decrypt the ciphertext with the recipient's xidentity private key
+  //   3. Return the plaintext AF hex
+  container.dispatchEvent(new CustomEvent('release:retrieve-af', {
+    bubbles: true,
+    detail: {
+      callback: (result) => {
+        _portalState._retrievingAF = false;
+        if (result.error) {
+          _portalState.error = result.error;
+        } else if (result.adminfactor) {
+          _portalState.adminfactor = result.adminfactor;
+          // Auto-fill the input
+          const input = container.querySelector('#claimAdminFactor');
+          if (input) input.value = result.adminfactor;
+        }
+        _refreshWizard(container);
+      },
+    },
+  }));
 }
 
 function _handleActivate(container) {
