@@ -148,7 +148,7 @@ app.use((req, res, next) => {
   if (allowedOrigin) {
     res.header('Access-Control-Allow-Origin', allowedOrigin);
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Admin-Token, X-Admin-Session, X-Authority-Session, X-Yallet-Identity, X-Yallet-Signing-Key, X-Yallet-Address, X-Yallet-EVM-Address, X-Yallet-Signature, X-Yallet-Nonce, X-Oracle-Internal-Key');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Client-Session, X-Admin-Token, X-Admin-Session, X-Authority-Session, X-Yallet-Identity, X-Yallet-Signing-Key, X-Yallet-Address, X-Yallet-EVM-Address, X-Yallet-Signature, X-Yallet-Nonce, X-Oracle-Internal-Key');
   } else if (!isDev) {
     // #12 FIX: In non-development without CORS_ORIGIN, block OPTIONS and don't set Allow-Origin.
     // This also handles the case where NODE_ENV is unset (defaults to blocking).
@@ -629,9 +629,18 @@ app.get('/health', (_req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Unified frontend (client / authority / ops portals)
+// Optional static frontend hosting
 // ---------------------------------------------------------------------------
-app.use(express.static(path.join(__dirname, '..', 'webapp', 'public')));
+// Default: disabled in production (API-only deployment), enabled in development/test.
+const serveStatic = (() => {
+  const raw = String(process.env.SERVE_STATIC || '').toLowerCase().trim();
+  if (['1', 'true', 'yes', 'on'].includes(raw)) return true;
+  if (['0', 'false', 'no', 'off'].includes(raw)) return false;
+  return process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test';
+})();
+if (serveStatic) {
+  app.use(express.static(path.join(__dirname, '..', 'webapp', 'public')));
+}
 
 // ---------------------------------------------------------------------------
 // 404 handler (API only; static already tried)
