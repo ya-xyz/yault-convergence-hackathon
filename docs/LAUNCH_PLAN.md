@@ -149,22 +149,93 @@ Pre-mainnet checklist from testnet-ready to production launch.
 
 ---
 
-## Phase 6 — Post-Launch
+## Phase 6 — AESP Integration (Agent Economic Sovereignty Protocol)
 
-### 6.1 Growth
-- [ ] Analytics dashboard for platform metrics (TVL, users, vaults)
+AESP (`@yallet/aesp`) is the AI agent economic layer built on top of Yault. It enables AI agents to autonomously negotiate, transact, and settle payments within human-defined policy boundaries. Yault is the settlement layer; AESP is the agent protocol layer.
+
+```
+┌─────────────────────────────────────────────────┐
+│  DSE (Digital Sovereign Entity)                  │
+│  Human controls everything via Yallet            │
+├─────────────────────────────────────────────────┤
+│  AESP Protocol Layer                             │
+│  Identity │ Policy │ Negotiation │ Commitment    │
+│  Review   │ MCP    │ A2A         │ Privacy       │
+├─────────────────────────────────────────────────┤
+│  MCP / A2A / AP2 Bridge                          │
+│  External AI frameworks discover & call Yault    │
+├─────────────────────────────────────────────────┤
+│  Yault Settlement Layer                          │
+│  Vaults │ Escrow │ Allowances │ Authority        │
+└─────────────────────────────────────────────────┘
+```
+
+### 6.1 Integration Points
+
+| AESP Module | Yault Component | Integration |
+|---|---|---|
+| **MCP Tools** (8 tools) | Vault API (`/api/vault/*`, `/api/accounts/allowances`) | Agent balance checks, deposits, redemptions, allowance management |
+| **PolicyEngine** | Authority system + Allowances | Policy-gated spending: per-tx/daily/weekly/monthly budgets, chain restrictions, allowlists |
+| **CommitmentBuilder** (EIP-712) | VaultShareEscrow contract | Agent-to-agent agreements settle via on-chain escrow with dual signatures |
+| **ReviewManager** | Trigger → Decision → Cooldown flow | Actions exceeding policy route to human mobile approval (biometric) |
+| **NegotiationProtocol** | E2E encryption (wasm-core) | Agent-to-agent negotiation uses same X25519 + ChaCha20 crypto primitives |
+| **Privacy** (ephemeral addresses) | HKDF derivation + Arweave storage | Context-isolated addresses prevent on-chain correlation; audit tags archived to Arweave |
+| **Identity** (BIP44 hierarchy) | Sub-accounts (`/api/accounts/members`) | Human → parent agent → sub-agents (max 5 levels) maps to Yault sub-account system |
+| **A2A Agent Card** | Server API discovery | Exposes Yault capabilities to external AI frameworks via Google A2A protocol |
+| **Crypto** (acegf WASM) | wasm-core (yault-custody-wasm) | Shared Rust crypto backend: Ed25519, secp256k1, HKDF, SHA-256 |
+
+### 6.2 Server-Side Integration
+
+- [ ] Add AESP MCP server endpoint (`/api/mcp`) — proxy the 8 MCP tools to Yault API
+- [ ] Add A2A agent card endpoint (`/api/.well-known/agent.json`) for external discovery
+- [ ] Extend allowance API to support AESP policy conditions (time windows, chain restrictions)
+- [ ] Add agent identity registration and certificate verification to auth middleware
+- [ ] Integrate AESP ReviewManager with existing trigger/decision flow
+- [ ] Add agent-specific rate limiting (per-agent budget enforcement)
+
+### 6.3 Smart Contract Integration
+
+- [ ] Extend VaultShareEscrow to accept EIP-712 dual-signed commitments from AESP
+- [ ] Add agent identity verification to escrow claim (certificate-based auth)
+- [ ] Deploy AgentAllowance contract for on-chain budget enforcement
+- [ ] Integrate Chainlink Automation for automated agent budget resets (daily/weekly/monthly)
+
+### 6.4 Privacy & Audit
+
+- [ ] Connect AESP ephemeral address pool to Yault's Arweave storage for audit trails
+- [ ] Implement consolidation scheduler (batched ephemeral → vault with timing jitter)
+- [ ] Add encrypted context tags to every agent transaction for compliance review
+- [ ] Ensure agent activity feeds into Yault's immutable audit log (Phase 3.1)
+
+### 6.5 Testing & Validation
+
+- [ ] End-to-end test: agent negotiation → commitment → escrow → settlement → audit
+- [ ] Policy violation test: agent exceeds budget → ReviewManager → human approval → resume
+- [ ] Multi-agent hierarchy test: parent delegates to sub-agent with restricted policy
+- [ ] Privacy test: verify ephemeral address isolation across agent contexts
+- [ ] Cross-framework test: external MCP client discovers and calls Yault via A2A card
+
+---
+
+## Phase 7 — Post-Launch Growth
+
+### 7.1 Platform Growth
+- [ ] Analytics dashboard for platform metrics (TVL, users, vaults, agent activity)
 - [ ] Affiliate/sub-vault model (see `docs/strategy-and-thoughts/affiliate-sub-vault-model.md`)
 - [ ] Multi-protocol yield strategy (see `docs/strategy-and-thoughts/multi-protocol-yield-strategy.md`)
+- [ ] Agent marketplace — discover and deploy pre-configured agent policies
 
-### 6.2 Multi-Chain Expansion
+### 7.2 Multi-Chain Expansion
 - [ ] Deploy vaults on additional chains via CCIP bridge
 - [ ] Chain-specific gas optimization
 - [ ] Cross-chain portfolio view
+- [ ] Cross-chain agent operations via CCIP (agent on Chain A settles on Chain B)
 
-### 6.3 Governance
+### 7.3 Governance
 - [ ] Transition admin functions to DAO governance
 - [ ] Token-based voting for fee parameter changes
 - [ ] Community bug bounty program
+- [ ] Agent policy template marketplace (community-contributed)
 
 ---
 
@@ -181,8 +252,11 @@ Pre-mainnet checklist from testnet-ready to production launch.
 | P1 | Disaster recovery plan | No, but risky without |
 | P1 | API documentation | No, but slows integrations |
 | P1 | Lint cleanup to zero warnings | No |
+| P1 | AESP MCP + A2A endpoints | No, but key differentiator |
 | P2 | End-user documentation | No, but hurts adoption |
 | P2 | Load testing | No, but unknown risk |
+| P2 | AESP escrow + policy contracts | No, extends after core launch |
 | P2 | Accessibility audit | No |
 | P3 | Multi-chain expansion | No |
 | P3 | DAO governance | No |
+| P3 | Agent marketplace | No |
