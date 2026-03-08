@@ -20,6 +20,7 @@
   const ADMIN_FACTOR_VAULT_ABI = [
     'function store(bytes32 walletIdHash, uint256 recipientIndex, bytes calldata ciphertext, bytes32 fingerprint)',
     'function destroy(bytes32 walletIdHash, uint256 recipientIndex)',
+    'function destroyAndReclaim(bytes32 walletIdHash, uint256 recipientIndex)',
     'function retrieve(bytes32 walletIdHash, uint256 recipientIndex) view returns (bytes ciphertext, bytes32 fingerprint, address owner)',
     'function isActive(bytes32 walletIdHash, uint256 recipientIndex) view returns (bool)',
   ];
@@ -130,6 +131,26 @@
     };
   }
 
+  /**
+   * Build afVault.destroyAndReclaim(walletIdHash, index) tx.
+   * Destroy AF + reclaim escrow shares atomically in one transaction (one signature).
+   *
+   * @param {string} afVaultAddress
+   * @param {string} walletIdHashHex
+   * @param {number} recipientIndex
+   * @param {string|number} chainId
+   */
+  function buildDestroyAndReclaimTx(afVaultAddress, walletIdHashHex, recipientIndex, chainId) {
+    const ethers = _ethers();
+    const iface = new ethers.Interface(ADMIN_FACTOR_VAULT_ABI);
+    return {
+      to: afVaultAddress,
+      data: iface.encodeFunctionData('destroyAndReclaim', [walletIdHashHex, recipientIndex]),
+      value: '0x0',
+      chainId: '0x' + Number(chainId).toString(16),
+    };
+  }
+
   // -----------------------------------------------------------------------
   //  High-level: store all AFs during plan creation
   // -----------------------------------------------------------------------
@@ -170,50 +191,31 @@
   }
 
   /**
-   * Destroy AF and reclaim escrow shares for a recipient.
-   * Sends destroy() tx on AdminFactorVault, then reclaim() on VaultShareEscrow.
+   * Destroy AF and reclaim escrow shares for a recipient in a single transaction.
+   * One signature: destroyAndReclaim() on AdminFactorVault atomically submits REJECT,
+   * zeros ciphertext, and reclaims escrow shares back to the owner.
    *
    * @param {object} provider - EVM-compatible provider
-   * @param {object} cfg - { afVaultAddress, escrowAddress, chainId, rpcUrl }
+   * @param {object} cfg - { afVaultAddress, chainId, rpcUrl }
    * @param {string} ownerAddress
    * @param {number} recipientIndex
    * @param {function} [onProgress]
    * @returns {Promise<{ success: boolean, txHashes: string[], error?: string }>}
    */
   async function destroyAndReclaim(provider, cfg, ownerAddress, recipientIndex, onProgress) {
-    const ethers = _ethers();
     const progress = onProgress || function () {};
     const txHashes = [];
     const wHash = walletIdHash(ownerAddress);
 
     try {
-      // Step 1: Destroy AF (submits REJECT attestation atomically)
-      progress(1, 2, 'Destroying AF and submitting REJECT attestation...');
-      const destroyTx = buildDestroyTx(cfg.afVaultAddress, wHash, recipientIndex, cfg.chainId);
-      destroyTx.from = ownerAddress;
-      const destroyHash = await provider.request({ method: 'eth_sendTransaction', params: [destroyTx] });
-      txHashes.push(destroyHash);
-      await _waitForTx(cfg.rpcUrl, destroyHash);
+      progress(1, 1, 'Destroying AF and reclaiming escrow shares...');
+      const tx = buildDestroyAndReclaimTx(cfg.afVaultAddress, wHash, recipientIndex, cfg.chainId);
+      tx.from = ownerAddress;
+      const hash = await provider.request({ method: 'eth_sendTransaction', params: [tx] });
+      txHashes.push(hash);
+      await _waitForTx(cfg.rpcUrl, hash);
 
-      // Step 2: Reclaim escrow shares (safe because attestation is now REJECT)
-      progress(2, 2, 'Reclaiming escrow shares...');
-      if (cfg.escrowAddress && global.YaultEscrow) {
-        const rpcProvider = new ethers.JsonRpcProvider(cfg.rpcUrl);
-        const escrowAbi = global.YaultEscrow.VAULT_SHARE_ESCROW_ABI;
-        const escrow = new ethers.Contract(cfg.escrowAddress, escrowAbi, rpcProvider);
-        const remaining = await escrow.remainingForRecipient(wHash, recipientIndex);
-        if (remaining > 0n) {
-          const reclaimTx = global.YaultEscrow.buildReclaimTx(
-            cfg.escrowAddress, wHash, recipientIndex, remaining.toString(), cfg.chainId
-          );
-          reclaimTx.from = ownerAddress;
-          const reclaimHash = await provider.request({ method: 'eth_sendTransaction', params: [reclaimTx] });
-          txHashes.push(reclaimHash);
-          await _waitForTx(cfg.rpcUrl, reclaimHash);
-        }
-      }
-
-      progress(2, 2, 'AF destroyed and shares reclaimed.');
+      progress(1, 1, 'AF destroyed and shares reclaimed.');
       return { success: true, txHashes };
     } catch (err) {
       return { success: false, txHashes, error: err.message || String(err) };
@@ -254,6 +256,7 @@
     // Tx builders
     buildStoreTx,
     buildDestroyTx,
+    buildDestroyAndReclaimTx,
     // High-level
     storeAllAFs,
     destroyAndReclaim,

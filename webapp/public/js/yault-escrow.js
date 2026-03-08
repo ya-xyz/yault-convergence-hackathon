@@ -29,6 +29,8 @@
     'function deposit(bytes32 walletIdHash, uint256 shares, uint256[] calldata recipientIndices, uint256[] calldata amounts)',
     'function claim(bytes32 walletIdHash, uint256 recipientIndex, address to, uint256 amount, bool redeemToAsset)',
     'function reclaim(bytes32 walletIdHash, uint256 recipientIndex, uint256 amount)',
+    'function reclaimFor(bytes32 walletIdHash, uint256 recipientIndex, uint256 amount, address walletAddr)',
+    'function adminFactorVault() view returns (address)',
     'function walletOwner(bytes32) view returns (address)',
     'function totalDeposited(bytes32) view returns (uint256)',
     'function allocatedShares(bytes32, uint256) view returns (uint256)',

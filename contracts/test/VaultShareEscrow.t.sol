@@ -467,6 +467,44 @@ contract VaultShareEscrowTest is Test {
         escrow.reclaim(WALLET_HASH, 1, shares + 1);
     }
 
+    // -----------------------------------------------------------------------
+    //  reclaimFor() access control
+    // -----------------------------------------------------------------------
+
+    function testReclaimFor_OnlyAdminFactorVault() public {
+        uint256 shares = vault.balanceOf(alice);
+        uint256[] memory indices = new uint256[](1);
+        uint256[] memory amounts = new uint256[](1);
+        indices[0] = 1;
+        amounts[0] = shares;
+
+        _approveAndDeposit(shares, indices, amounts);
+
+        // Random caller cannot call reclaimFor
+        vm.prank(attacker);
+        vm.expectRevert(VaultShareEscrow.NotAdminFactorVault.selector);
+        escrow.reclaimFor(WALLET_HASH, 1, shares, alice);
+    }
+
+    function testReclaimFor_WrongWalletOwnerReverts() public {
+        uint256 shares = vault.balanceOf(alice);
+        uint256[] memory indices = new uint256[](1);
+        uint256[] memory amounts = new uint256[](1);
+        indices[0] = 1;
+        amounts[0] = shares;
+
+        _approveAndDeposit(shares, indices, amounts);
+
+        // Set deployer as adminFactorVault for this test
+        vm.prank(deployer);
+        escrow.setAdminFactorVault(deployer);
+
+        // Caller is adminFactorVault but walletAddr is wrong
+        vm.prank(deployer);
+        vm.expectRevert(VaultShareEscrow.NotActualWalletOwner.selector);
+        escrow.reclaimFor(WALLET_HASH, 1, shares, attacker);
+    }
+
     function testThreat_RegisterWallet_TwiceReverts() public {
         // setUp already registered WALLET_HASH for alice
         assertEq(escrow.walletOwner(WALLET_HASH), alice);

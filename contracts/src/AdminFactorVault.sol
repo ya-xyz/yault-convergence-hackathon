@@ -31,6 +31,24 @@ interface IReleaseAttestationFull {
 }
 
 /**
+ * @title IVaultShareEscrow
+ * @notice Minimal interface for reclaim operations on VaultShareEscrow.
+ */
+interface IVaultShareEscrow {
+    function remainingForRecipient(bytes32 walletIdHash, uint256 recipientIndex)
+        external
+        view
+        returns (uint256);
+
+    function reclaimFor(
+        bytes32 walletIdHash,
+        uint256 recipientIndex,
+        uint256 amount,
+        address walletAddr
+    ) external;
+}
+
+/**
  * @title AdminFactorVault
  * @author Yault
  * @notice Stores encrypted AdminFactors on-chain, separate from the credential NFT.
@@ -54,8 +72,8 @@ interface IReleaseAttestationFull {
  *   1. Plan creation: owner calls store(walletIdHash, index, ciphertext, fingerprint).
  *   2. Normal claim:  recipient calls retrieve() to get ciphertext, decrypts off-chain
  *                     with x25519 private key, uses AF as third factor for claim.
- *   3. Revocation:    owner calls destroy() — REJECT attestation submitted, AF zeroed.
- *                     Owner then calls escrow.reclaim() to recover shares.
+ *   3. Revocation:    owner calls destroyAndReclaim() — REJECT attestation submitted,
+ *                     AF zeroed, and escrow shares reclaimed atomically in one tx.
  *
  * NOTE: This contract must be registered as a fallbackSubmitter on ReleaseAttestation
  *       for the destroy-with-REJECT flow to work.
@@ -69,6 +87,7 @@ contract AdminFactorVault is Ownable {
     bytes32 public constant REASON_AF_DESTROYED = keccak256("AF_DESTROYED");
 
     IReleaseAttestationFull public immutable ATTESTATION;
+    IVaultShareEscrow public immutable ESCROW;
 
     struct EncryptedAF {
         bytes ciphertext;       // ECIES(xidentity, AF): ephemeral_pub || nonce || ciphertext+tag (~92 bytes)
@@ -111,8 +130,9 @@ contract AdminFactorVault is Ownable {
     //  Constructor
     // -----------------------------------------------------------------------
 
-    constructor(address initialOwner, address _attestation) Ownable(initialOwner) {
+    constructor(address initialOwner, address _attestation, address _escrow) Ownable(initialOwner) {
         ATTESTATION = IReleaseAttestationFull(_attestation);
+        ESCROW = IVaultShareEscrow(_escrow);
     }
 
     // -----------------------------------------------------------------------
@@ -199,6 +219,54 @@ contract AdminFactorVault is Ownable {
         // Keep owner and fingerprint for audit trail; mark as destroyed by empty ciphertext.
 
         emit AdminFactorDestroyed(walletIdHash, recipientIndex, msg.sender);
+    }
+
+    /**
+     * @notice Destroy AF and reclaim escrow shares in a single transaction.
+     *         Atomically: submit REJECT attestation → zero ciphertext → reclaim shares.
+     *         Owner signs once instead of twice.
+     *
+     * @param walletIdHash   Plan/wallet identifier hash.
+     * @param recipientIndex Recipient path index.
+     */
+    function destroyAndReclaim(bytes32 walletIdHash, uint256 recipientIndex) external {
+        bytes32 key = _key(walletIdHash, recipientIndex);
+        EncryptedAF storage entry = _vault[key];
+
+        if (entry.owner == address(0)) revert NotStored();
+        if (entry.owner != msg.sender) revert NotAFOwner();
+        if (entry.ciphertext.length == 0) revert AlreadyDestroyed();
+
+        // Check attestation status — RELEASE is final, cannot destroy after RELEASE.
+        (, uint8 decision,,, uint64 timestamp,) =
+            ATTESTATION.getAttestation(walletIdHash, recipientIndex);
+
+        if (timestamp != 0 && decision == DECISION_RELEASE) {
+            revert ReleaseAlreadyAttested();
+        }
+
+        // Submit REJECT attestation to lock the slot (prevent future RELEASE).
+        if (timestamp == 0 || decision != DECISION_REJECT) {
+            ATTESTATION.submitAttestation(
+                SOURCE_FALLBACK,
+                walletIdHash,
+                recipientIndex,
+                DECISION_REJECT,
+                REASON_AF_DESTROYED,
+                bytes32(0)
+            );
+        }
+
+        // Zero out the encrypted data.
+        delete _vault[key].ciphertext;
+
+        emit AdminFactorDestroyed(walletIdHash, recipientIndex, msg.sender);
+
+        // Reclaim escrow shares back to the owner in the same tx.
+        uint256 remaining = ESCROW.remainingForRecipient(walletIdHash, recipientIndex);
+        if (remaining > 0) {
+            ESCROW.reclaimFor(walletIdHash, recipientIndex, remaining, msg.sender);
+        }
     }
 
     /**

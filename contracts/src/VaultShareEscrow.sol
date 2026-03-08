@@ -42,6 +42,9 @@ contract VaultShareEscrow is Ownable, ReentrancyGuard {
     IERC4626 public immutable VAULT;
     IReleaseAttestation public immutable ATTESTATION;
 
+    /// @notice AdminFactorVault address — only this contract can call reclaimFor().
+    address public adminFactorVault;
+
     /// @notice walletIdHash => owner address (only they can deposit for this plan)
     mapping(bytes32 => address) public walletOwner;
 
@@ -87,8 +90,8 @@ contract VaultShareEscrow is Ownable, ReentrancyGuard {
     error ZeroReceiver();
     error ReclaimExceedsUnclaimed();
     error AttestationAlreadyReleased();
-    /// @dev SC-L-05 FIX: Reject empty recipient arrays.
-    error EmptyAllocation();
+    error NotAdminFactorVault();
+    error NotActualWalletOwner();
 
     constructor(address initialOwner, address _vault, address _attestation) Ownable(initialOwner) {
         if (_vault == address(0) || _attestation == address(0)) revert ZeroAddress();
@@ -215,6 +218,46 @@ contract VaultShareEscrow is Ownable, ReentrancyGuard {
         // Transfer vault shares back to the owner
         IERC20(address(VAULT)).safeTransfer(msg.sender, amount);
         emit Reclaimed(walletIdHash, recipientIndex, msg.sender, amount);
+    }
+
+    /**
+     * @notice Allow the contract owner to set the AdminFactorVault address.
+     *         Only that address can call reclaimFor().
+     */
+    function setAdminFactorVault(address _afv) external onlyOwner {
+        adminFactorVault = _afv;
+    }
+
+    /**
+     * @notice Reclaim shares on behalf of a wallet owner. Only callable by AdminFactorVault
+     *         so that destroyAndReclaim() can atomically destroy AF + reclaim in one tx.
+     *
+     * @param walletIdHash   Plan identifier.
+     * @param recipientIndex Recipient index to reclaim shares from.
+     * @param amount         Share amount to reclaim (must be <= unclaimed).
+     * @param walletAddr     The actual wallet owner who receives the shares.
+     */
+    function reclaimFor(
+        bytes32 walletIdHash,
+        uint256 recipientIndex,
+        uint256 amount,
+        address walletAddr
+    ) external nonReentrant {
+        if (msg.sender != adminFactorVault) revert NotAdminFactorVault();
+        if (walletOwner[walletIdHash] != walletAddr) revert NotActualWalletOwner();
+        if (amount == 0) revert ClaimAmountZero();
+
+        (, uint8 decision,,, uint64 timestamp,) = ATTESTATION.getAttestation(walletIdHash, recipientIndex);
+        if (timestamp != 0 && decision == DECISION_RELEASE) revert AttestationAlreadyReleased();
+
+        uint256 unclaimed = allocatedShares[walletIdHash][recipientIndex] - claimedShares[walletIdHash][recipientIndex];
+        if (amount > unclaimed) revert ReclaimExceedsUnclaimed();
+
+        allocatedShares[walletIdHash][recipientIndex] -= amount;
+        totalDeposited[walletIdHash] -= amount;
+
+        IERC20(address(VAULT)).safeTransfer(walletAddr, amount);
+        emit Reclaimed(walletIdHash, recipientIndex, walletAddr, amount);
     }
 
     /**

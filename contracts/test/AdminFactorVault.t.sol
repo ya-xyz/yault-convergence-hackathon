@@ -2,14 +2,30 @@
 pragma solidity ^0.8.24;
 
 import {Test, console2} from "forge-std/Test.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {AdminFactorVault} from "../src/AdminFactorVault.sol";
 import {ReleaseAttestation} from "../src/ReleaseAttestation.sol";
+import {VaultShareEscrow} from "../src/VaultShareEscrow.sol";
+import {YaultVault} from "../src/YaultVault.sol";
+import {YaultVaultCreator} from "../src/YaultVaultCreator.sol";
+import {YaultVaultFactory} from "../src/YaultVaultFactory.sol";
+
+contract MockTokenAFV is ERC20 {
+    constructor() ERC20("Mock USDC", "mUSDC") {}
+    function mint(address to, uint256 amount) external { _mint(to, amount); }
+    function decimals() public pure override returns (uint8) { return 6; }
+}
 
 contract AdminFactorVaultTest is Test {
+    MockTokenAFV internal token;
+    YaultVault internal vault;
+    VaultShareEscrow internal escrow;
     AdminFactorVault internal afVault;
     ReleaseAttestation internal attestation;
 
     address internal deployer = makeAddr("deployer");
+    address internal platform = makeAddr("platform");
     address internal alice = makeAddr("alice");       // plan owner
     address internal bob = makeAddr("bob");           // recipient
     address internal oracle = makeAddr("oracle");
@@ -27,18 +43,48 @@ contract AdminFactorVaultTest is Test {
 
     bytes32 internal constant MOCK_FINGERPRINT = keccak256("mock-admin-factor");
 
+    uint256 internal constant DEPOSIT_AMOUNT = 10_000e6;
+
     function setUp() public {
+        // Deploy token + vault
+        token = new MockTokenAFV();
+        YaultVaultCreator creator = new YaultVaultCreator();
+        YaultVaultFactory factory = new YaultVaultFactory(deployer, platform, address(creator));
+        vm.prank(deployer);
+        address vaultAddr = factory.createVault(IERC20(address(token)), "Yault USDC", "yUSDC");
+        vault = YaultVault(vaultAddr);
+
         // Deploy attestation
         attestation = new ReleaseAttestation(deployer);
         vm.prank(deployer);
         attestation.setOracleSubmitter(oracle);
 
-        // Deploy AdminFactorVault
-        afVault = new AdminFactorVault(deployer, address(attestation));
+        // Deploy escrow
+        escrow = new VaultShareEscrow(deployer, address(vault), address(attestation));
+        vm.prank(deployer);
+        vault.setTransferExempt(address(escrow), true);
+
+        // Deploy AdminFactorVault (with escrow reference)
+        afVault = new AdminFactorVault(deployer, address(attestation), address(escrow));
 
         // Register AdminFactorVault as a fallback submitter on ReleaseAttestation
         vm.prank(deployer);
         attestation.setFallbackSubmitter(address(afVault), true);
+
+        // Register AdminFactorVault on escrow so reclaimFor() works
+        vm.prank(deployer);
+        escrow.setAdminFactorVault(address(afVault));
+
+        // Fund alice with vault shares for escrow tests
+        token.mint(alice, DEPOSIT_AMOUNT * 10);
+        vm.prank(alice);
+        token.approve(address(vault), type(uint256).max);
+        vm.prank(alice);
+        vault.deposit(DEPOSIT_AMOUNT, alice);
+
+        // Register alice's wallet in escrow
+        vm.prank(alice);
+        escrow.registerWallet(WALLET_HASH);
     }
 
     // -----------------------------------------------------------------------
@@ -302,6 +348,109 @@ contract AdminFactorVaultTest is Test {
         // In the full system, alice would now call VaultShareEscrow.reclaim()
         // which checks: if (timestamp != 0 && decision == DECISION_RELEASE) revert;
         // Since decision == REJECT, reclaim succeeds. (Tested in VaultShareEscrow.t.sol)
+    }
+
+    // -----------------------------------------------------------------------
+    //  destroyAndReclaim() — single-tx destroy + escrow reclaim
+    // -----------------------------------------------------------------------
+
+    function _depositToEscrow(uint256 recipientIndex, uint256 shares) internal {
+        vm.prank(alice);
+        vault.approve(address(escrow), shares);
+
+        uint256[] memory indices = new uint256[](1);
+        uint256[] memory amounts = new uint256[](1);
+        indices[0] = recipientIndex;
+        amounts[0] = shares;
+
+        vm.prank(alice);
+        escrow.deposit(WALLET_HASH, shares, indices, amounts);
+    }
+
+    function testDestroyAndReclaim_SingleTx() public {
+        _store(1);
+
+        uint256 shares = vault.balanceOf(alice);
+        _depositToEscrow(1, shares);
+
+        // Alice's vault balance is now 0 (all in escrow)
+        assertEq(vault.balanceOf(alice), 0, "all shares in escrow");
+
+        // Single tx: destroy AF + reclaim escrow
+        vm.prank(alice);
+        afVault.destroyAndReclaim(WALLET_HASH, 1);
+
+        // AF should be destroyed
+        assertFalse(afVault.isActive(WALLET_HASH, 1), "AF should be inactive");
+
+        // REJECT attestation should be submitted
+        ReleaseAttestation.Attestation memory att = attestation.getAttestation(WALLET_HASH, 1);
+        assertEq(att.decision, attestation.DECISION_REJECT(), "decision should be REJECT");
+
+        // Shares should be back with alice
+        assertEq(vault.balanceOf(alice), shares, "alice should have shares back");
+        assertEq(escrow.remainingForRecipient(WALLET_HASH, 1), 0, "escrow should be empty");
+    }
+
+    function testDestroyAndReclaim_NoEscrowShares() public {
+        // AF stored but no escrow deposit — should still work (just skip reclaim)
+        _store(1);
+
+        vm.prank(alice);
+        afVault.destroyAndReclaim(WALLET_HASH, 1);
+
+        assertFalse(afVault.isActive(WALLET_HASH, 1), "AF destroyed");
+    }
+
+    function testDestroyAndReclaim_RevertsAfterRelease() public {
+        _store(1);
+
+        uint256 shares = vault.balanceOf(alice);
+        _depositToEscrow(1, shares);
+
+        _submitRelease(1);
+
+        vm.prank(alice);
+        vm.expectRevert(AdminFactorVault.ReleaseAlreadyAttested.selector);
+        afVault.destroyAndReclaim(WALLET_HASH, 1);
+    }
+
+    function testDestroyAndReclaim_NotOwnerReverts() public {
+        _store(1);
+
+        vm.prank(attacker);
+        vm.expectRevert(AdminFactorVault.NotAFOwner.selector);
+        afVault.destroyAndReclaim(WALLET_HASH, 1);
+    }
+
+    function testDestroyAndReclaim_MultipleRecipients() public {
+        _store(1);
+        _store(2);
+
+        uint256 shares = vault.balanceOf(alice);
+        uint256 halfShares = shares / 2;
+        uint256 otherHalf = shares - halfShares;
+
+        // Deposit for both recipients
+        vm.prank(alice);
+        vault.approve(address(escrow), shares);
+        uint256[] memory indices = new uint256[](2);
+        uint256[] memory amounts = new uint256[](2);
+        indices[0] = 1;
+        indices[1] = 2;
+        amounts[0] = halfShares;
+        amounts[1] = otherHalf;
+        vm.prank(alice);
+        escrow.deposit(WALLET_HASH, shares, indices, amounts);
+
+        // Destroy + reclaim only recipient 1
+        vm.prank(alice);
+        afVault.destroyAndReclaim(WALLET_HASH, 1);
+
+        assertFalse(afVault.isActive(WALLET_HASH, 1), "recipient 1 AF destroyed");
+        assertTrue(afVault.isActive(WALLET_HASH, 2), "recipient 2 AF untouched");
+        assertEq(vault.balanceOf(alice), halfShares, "alice got half shares back");
+        assertEq(escrow.remainingForRecipient(WALLET_HASH, 2), otherHalf, "recipient 2 escrow intact");
     }
 
     // -----------------------------------------------------------------------
