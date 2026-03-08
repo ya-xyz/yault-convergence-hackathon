@@ -7,7 +7,7 @@
     "databasePath": "./data/yault.db"
   },
   "api": {
-    "baseUrl": "http://localhost:3001/api",
+    "baseUrl": "https://api.yault.xyz/api",
     "publicUrl": "https://api.yault.xyz/api"
   },
   "drand": {
@@ -51,7 +51,9 @@
   },
   "chains": {
     "useTestnet": true,
-    "vault": {},
+    "vault": {
+      "sepolia": "0x92D53960Ed6cB37de2cda6629208d1F3C078D8ba"
+    },
     "rpc": {},
     "mempoolApi": ""
   },
@@ -59,6 +61,7 @@
     "enableConsoleLog": true
   },
   "rwa": {
+    "uploadAndMintApiUrl": "https://api.yallet.xyz/api/v1/storage/rwa/upload-and-mint",
     "network": "devnet"
   }
 }
