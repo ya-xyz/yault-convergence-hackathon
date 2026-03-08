@@ -11,6 +11,8 @@
  */
 
 'use strict';
+const fs = require('fs');
+const path = require('path');
 
 // ---------------------------------------------------------------------------
 // Provider abstraction
@@ -29,7 +31,7 @@ function getProvider() {
   if (provider === 'sendgrid' && apiKey) {
     return {
       name: 'sendgrid',
-      async send(to, subject, body) {
+      async send(to, subject, body, html) {
         // Dynamic import so the dependency is optional
         const sgMail = require('@sendgrid/mail');
         sgMail.setApiKey(apiKey);
@@ -38,6 +40,7 @@ function getProvider() {
           from: process.env.EMAIL_FROM || 'noreply@yault.xyz',
           subject,
           text: body,
+          html: html || undefined,
         });
       },
     };
@@ -46,7 +49,7 @@ function getProvider() {
   if (provider === 'resend' && apiKey) {
     return {
       name: 'resend',
-      async send(to, subject, body) {
+      async send(to, subject, body, html) {
         const { Resend } = require('resend');
         const resend = new Resend(apiKey);
         await resend.emails.send({
@@ -54,6 +57,7 @@ function getProvider() {
           to,
           subject,
           text: body,
+          html: html || undefined,
         });
       },
     };
@@ -62,7 +66,7 @@ function getProvider() {
   if (provider === 'mailgun' && apiKey) {
     return {
       name: 'mailgun',
-      async send(to, subject, body) {
+      async send(to, subject, body, html) {
         const domain = process.env.MAILGUN_DOMAIN;
         if (!domain) throw new Error('MAILGUN_DOMAIN is required');
         const from = process.env.EMAIL_FROM || 'noreply@yault.xyz';
@@ -71,7 +75,16 @@ function getProvider() {
         // Use Node built-in https to avoid extra dependency
         const { request } = require('https');
         const { URL } = require('url');
-        const formData = `from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&subject=${encodeURIComponent(subject)}&text=${encodeURIComponent(body)}`;
+        const formFields = [
+          `from=${encodeURIComponent(from)}`,
+          `to=${encodeURIComponent(to)}`,
+          `subject=${encodeURIComponent(subject)}`,
+          `text=${encodeURIComponent(body)}`,
+        ];
+        if (html) {
+          formFields.push(`html=${encodeURIComponent(html)}`);
+        }
+        const formData = formFields.join('&');
         const parsed = new URL(url);
 
         await new Promise((resolve, reject) => {
@@ -106,14 +119,35 @@ function getProvider() {
   // Default: console provider (development)
   return {
     name: 'console',
-    async send(to, subject, body) {
+    async send(to, subject, body, html) {
       console.log('=== EMAIL (dev) ===');
       console.log(`  To:      ${to}`);
       console.log(`  Subject: ${subject}`);
       console.log(`  Body:    ${body.substring(0, 200)}${body.length > 200 ? '...' : ''}`);
+      if (html) {
+        console.log(`  HTML:    ${html.substring(0, 200)}${html.length > 200 ? '...' : ''}`);
+      }
       console.log('===================');
     },
   };
+}
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function loadTemplate(name) {
+  const p = path.join(__dirname, '..', 'templates', name);
+  return fs.readFileSync(p, 'utf8');
+}
+
+function renderTemplate(tpl, vars) {
+  return tpl.replace(/\{\{(\w+)\}\}/g, (_m, key) => (Object.prototype.hasOwnProperty.call(vars, key) ? String(vars[key]) : ''));
 }
 
 // ---------------------------------------------------------------------------
@@ -312,14 +346,54 @@ async function sendInviteEmail(recipientEmail, inviterName, inviteLink) {
   const body = [
     `${inviterName || 'A Yault user'} has invited you to join the Yault platform.`,
     '',
-    'Yault is a modern DeFi yield vault with built-in asset planning features.',
+    'Yault is a self-custodial crypto treasury platform.',
     '',
     inviteLink ? `Accept the invitation: ${inviteLink}` : '',
+    'If Yallet is not installed, the page will prompt installation before acceptance.',
     '',
     'This is an automated invitation from the Yault Platform.',
   ].filter(Boolean).join('\n');
+  let html = '';
+  try {
+    const tpl = loadTemplate('invite-email.html');
+    html = renderTemplate(tpl, {
+      inviterName: escapeHtml(inviterName || 'A Yault user'),
+      inviteLink: escapeHtml(inviteLink || '#'),
+      recipientEmail: escapeHtml(recipientEmail),
+      year: String(new Date().getFullYear()),
+    });
+  } catch (err) {
+    console.warn('[email] invite html template load failed, fallback to text-only:', err.message);
+  }
 
-  await provider.send(recipientEmail, subject, body);
+  await provider.send(recipientEmail, subject, body, html || undefined);
+}
+
+/**
+ * Send a generic test email to validate provider wiring.
+ *
+ * @param {string} to - Recipient email
+ * @param {string} subject - Email subject
+ * @param {string} body - Email body text
+ * @param {object} [meta] - Optional metadata for audit context
+ * @returns {Promise<void>}
+ */
+async function sendTestEmail(to, subject, body, meta = {}) {
+  if (!to || typeof to !== 'string' || !to.trim()) {
+    throw new Error('Recipient email is required');
+  }
+  const provider = getProvider();
+  const providerName = provider.name || 'unknown';
+  const metaLines = [
+    '---',
+    'This is an automated test email from Yault admin API.',
+    `Provider: ${providerName}`,
+    `Time: ${new Date().toISOString()}`,
+  ];
+  if (meta.triggeredBy) metaLines.push(`Triggered by: ${meta.triggeredBy}`);
+  if (meta.authMethod) metaLines.push(`Auth method: ${meta.authMethod}`);
+  const content = [body || 'Email provider test', '', ...metaLines].join('\n');
+  await provider.send(to.trim(), subject || '[Yault] Email Test', content);
 }
 
 // ---------------------------------------------------------------------------
@@ -333,6 +407,7 @@ module.exports = {
   sendCooldownNotification,
   sendTrialRequest,
   sendInviteEmail,
+  sendTestEmail,
   /** Exposed for testing */
   _getProvider: getProvider,
 };

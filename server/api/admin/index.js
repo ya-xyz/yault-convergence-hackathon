@@ -25,6 +25,7 @@ const config = require('../../config');
 const vaultContract = require('../../services/vaultContract');
 const escrowContract = require('../../services/escrowContract');
 const { deliverByRegistry } = require('../../services/deliverRwaRelease');
+const { sendTestEmail } = require('../../services/email');
 const { verifySignature, verifyClientSessionToken, dualAuthMiddleware } = require('../../middleware/auth');
 
 const { requireMultisig, listPendingApprovals, listApprovals, rejectApproval } = require('../../middleware/multisig');
@@ -228,6 +229,35 @@ async function adminAuth(req, res, next) {
 }
 
 router.use(adminAuth);
+
+// ─── POST /email/test ───
+// Admin-only endpoint to verify outbound email provider wiring.
+router.post('/email/test', async (req, res) => {
+  try {
+    const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const toRaw = String(req.body?.to || process.env.TRIAL_REQUEST_EMAIL || '').trim().toLowerCase();
+    const subject = String(req.body?.subject || '[Yault] Email Test').trim();
+    const body = String(req.body?.body || 'This is a test email from Yault admin API.').trim();
+
+    if (!toRaw || !EMAIL_RE.test(toRaw)) {
+      return res.status(400).json({ error: 'Valid recipient email is required in body.to (or TRIAL_REQUEST_EMAIL env).' });
+    }
+
+    const triggeredBy = req.adminAuth?.address || 'admin-token';
+    const authMethod = req.adminAuth?.method || 'token';
+    await sendTestEmail(toRaw, subject, body, { triggeredBy, authMethod });
+
+    return res.json({
+      ok: true,
+      to: toRaw,
+      provider: process.env.EMAIL_PROVIDER || 'console',
+      message: 'Test email sent',
+    });
+  } catch (err) {
+    console.error('[admin/email/test] Error:', err.message || err);
+    return res.status(500).json({ error: err.message || 'Failed to send test email' });
+  }
+});
 
 // ─── KYC (persisted in DB; provider API integration is future) ───
 

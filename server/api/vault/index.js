@@ -585,7 +585,8 @@ router.post('/transfer', dualAuthMiddleware, async (req, res) => {
 // ─── POST /simulate-yield (dev/demo: inject WETH into vault to simulate yield) ───
 
 router.post('/simulate-yield', dualAuthMiddleware, async (req, res) => {
-  if (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') {
+  const simulateEnabled = String(process.env.SIMULATE_ENDPOINTS_ENABLED || 'false').toLowerCase() === 'true';
+  if ((process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') && !simulateEnabled) {
     return res.status(403).json({ error: 'Simulate endpoints disabled in production/staging' });
   }
 

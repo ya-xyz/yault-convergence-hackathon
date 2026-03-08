@@ -2,6 +2,16 @@
 
 let encryptorPromise = null;
 
+// @yallet/rwa-sdk uses Web Crypto global; ensure it's available in Node runtime.
+if (!globalThis.crypto) {
+  try {
+    const nodeCrypto = require('crypto');
+    if (nodeCrypto && nodeCrypto.webcrypto) {
+      globalThis.crypto = nodeCrypto.webcrypto;
+    }
+  } catch (_) {}
+}
+
 function normalizeAdminFactorHex(value) {
   const hex = String(value || '').trim().toLowerCase().replace(/^0x/i, '');
   if (!/^[0-9a-f]{64}$/.test(hex)) {
@@ -40,4 +50,3 @@ module.exports = {
   encryptAdminFactorForXidentity,
   normalizeAdminFactorHex,
 };
-

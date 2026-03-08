@@ -298,7 +298,7 @@
         txHashes.push(approveHash);
 
         // Wait for approval to confirm
-        await _waitForTx(cfg.rpcUrl, approveHash);
+        await _waitForTx(cfg.rpcUrl, approveHash, undefined, provider);
       } else {
         progress(1, isRegistered ? 3 : 4, 'Allowance already sufficient, skipping approve...');
       }
@@ -310,7 +310,7 @@
         regTx.from = ownerAddress;
         const regHash = await provider.request({ method: 'eth_sendTransaction', params: [regTx] });
         txHashes.push(regHash);
-        await _waitForTx(cfg.rpcUrl, regHash);
+        await _waitForTx(cfg.rpcUrl, regHash, undefined, provider);
       }
 
       // 5. Deposit + allocate shares
@@ -321,7 +321,7 @@
       depTx.from = ownerAddress;
       const depHash = await provider.request({ method: 'eth_sendTransaction', params: [depTx] });
       txHashes.push(depHash);
-      await _waitForTx(cfg.rpcUrl, depHash);
+      await _waitForTx(cfg.rpcUrl, depHash, undefined, provider);
 
       progress(totalSteps, totalSteps, 'Escrow deposit complete!');
       return { success: true, txHashes, totalShares, amounts };
@@ -377,7 +377,7 @@
           tx.from = ownerAddress;
           const hash = await provider.request({ method: 'eth_sendTransaction', params: [tx] });
           txHashes.push(hash);
-          await _waitForTx(cfg.rpcUrl, hash);
+          await _waitForTx(cfg.rpcUrl, hash, undefined, provider);
           reclaimedCount++;
         } catch (perErr) {
           errors.push('recipient #' + index + ': ' + (perErr.message || perErr));
@@ -432,7 +432,7 @@
       var tx = buildClaimTx(cfg.escrowAddress, wHash, recipientIndex, toAddress, claimAmount, redeemToAsset, cfg.chainId);
       tx.from = callerAddress;
       var txHash = await provider.request({ method: 'eth_sendTransaction', params: [tx] });
-      await _waitForTx(cfg.rpcUrl, txHash);
+      await _waitForTx(cfg.rpcUrl, txHash, undefined, provider);
 
       // Query updated remaining
       var newRemaining = await getRemaining(cfg.rpcUrl, cfg.escrowAddress, wHash, recipientIndex);
@@ -447,13 +447,21 @@
   /**
    * Wait for a transaction to be mined.
    */
-  async function _waitForTx(rpcUrl, txHash, timeoutMs) {
+  async function _waitForTx(rpcUrl, txHash, timeoutMs, walletProvider) {
     const ethers = _ethers();
     const provider = new ethers.JsonRpcProvider(rpcUrl);
-    const timeout = timeoutMs || 120000;
+    const timeout = timeoutMs || 300000;
     const start = Date.now();
     while (Date.now() - start < timeout) {
-      const receipt = await provider.getTransactionReceipt(txHash);
+      let receipt = await provider.getTransactionReceipt(txHash);
+      if (!receipt && walletProvider && typeof walletProvider.request === 'function') {
+        try {
+          receipt = await walletProvider.request({
+            method: 'eth_getTransactionReceipt',
+            params: [txHash],
+          });
+        } catch (_) {}
+      }
       if (receipt) {
         if (receipt.status === 0) throw new Error('Transaction reverted: ' + txHash);
         return receipt;

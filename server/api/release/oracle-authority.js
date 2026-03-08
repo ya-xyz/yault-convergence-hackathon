@@ -5,7 +5,8 @@
  * Used by the client to run configure + distribute automatically on "Submit & Create Plan"
  * for Oracle-only plans (no separate Protection step needed).
  *
- * Returns 200: { id, name, public_key_hex } when ORACLE_AUTHORITY_ID is set and authority exists.
+ * Returns 200: { id, name, public_key_hex } when ORACLE_AUTHORITY_ID is set.
+ * DB authority profile is optional for oracle-only trigger flow.
  * Returns 404 when Oracle authority is not configured.
  */
 
@@ -28,16 +29,10 @@ router.get('/', dualAuthMiddleware, async (req, res) => {
       });
     }
     const authority = await db.authorities.findById(oracleId);
-    if (!authority || !authority.verified) {
-      return res.status(404).json({
-        error: 'Oracle authority not found or not verified',
-        detail: 'Ensure the authority exists and is verified.',
-      });
-    }
     return res.json({
-      id: authority.authority_id || oracleId,
-      name: authority.name || authority.authority_id || oracleId,
-      public_key_hex: authority.public_key_hex || authority.pubkey || '',
+      id: oracleId,
+      name: (authority && authority.name) || 'Oracle Authority',
+      public_key_hex: (authority && (authority.public_key_hex || authority.pubkey)) || '',
     });
   } catch (err) {
     console.error('[release/oracle-authority] Error:', err);

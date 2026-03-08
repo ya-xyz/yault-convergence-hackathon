@@ -135,6 +135,7 @@ router.get('/', (req, res, next) => {
       const entry = {
         trigger_id: t.trigger_id,
         wallet_id: t.wallet_id,
+        plan_id: t.plan_id || null,
         recipient_index: t.recipient_index,
         tlock_round: t.tlock_round,
         arweave_tx_id: t.arweave_tx_id,
