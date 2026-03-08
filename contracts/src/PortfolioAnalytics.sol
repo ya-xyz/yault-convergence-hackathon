@@ -170,8 +170,8 @@ contract PortfolioAnalytics is Ownable, IFunctionsClient {
 
         if (bytes(analyticsSource).length == 0) revert NoAnalyticsSource();
 
-        // Rate limiting
-        if (block.timestamp < lastRequestTime[user] + minRequestInterval) {
+        // Rate limiting (skip for first-ever request)
+        if (lastRequestTime[user] != 0 && block.timestamp < lastRequestTime[user] + minRequestInterval) {
             revert RequestTooFrequent(user, lastRequestTime[user] + minRequestInterval);
         }
 
@@ -297,8 +297,9 @@ contract PortfolioAnalytics is Ownable, IFunctionsClient {
         result[0] = "0";
         result[1] = "x";
         for (uint256 i; i < 20;) {
-            result[2 + i * 2] = alphabet[uint8(uint160(addr) >> (8 * (19 - i)) >> 4)];
-            result[3 + i * 2] = alphabet[uint8(uint160(addr) >> (8 * (19 - i))) & 0x0f];
+            uint8 b = uint8(uint160(addr) >> (8 * (19 - i)));
+            result[2 + i * 2] = alphabet[b >> 4];
+            result[3 + i * 2] = alphabet[b & 0x0f];
             unchecked { ++i; }
         }
         return string(result);

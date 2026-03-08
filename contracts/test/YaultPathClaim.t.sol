@@ -115,6 +115,7 @@ contract YaultPathClaimTest is Test {
         uint256 deadline = block.timestamp + 3600;
         (uint8 v, bytes32 r, bytes32 s) = _signClaim(PATH_TOTAL_AMOUNT, recipient, deadline);
 
+        vm.prank(walletOwnerAddr);
         pool.claim(WALLET_HASH, PATH_INDEX, PATH_TOTAL_AMOUNT, recipient, deadline, v, r, s);
 
         assertEq(token.balanceOf(recipient), PATH_TOTAL_AMOUNT);
@@ -135,6 +136,7 @@ contract YaultPathClaimTest is Test {
         uint256 amount1 = 300e6;
         uint256 deadline1 = block.timestamp + 3600;
         (uint8 v1, bytes32 r1, bytes32 s1) = _signClaim(amount1, recipient, deadline1);
+        vm.prank(walletOwnerAddr);
         pool.claim(WALLET_HASH, PATH_INDEX, amount1, recipient, deadline1, v1, r1, s1);
         assertEq(token.balanceOf(recipient), amount1);
         assertEq(pool.remainingForPath(WALLET_HASH, PATH_INDEX), PATH_TOTAL_AMOUNT - amount1);
@@ -144,6 +146,7 @@ contract YaultPathClaimTest is Test {
         uint256 amount2 = 200e6;
         uint256 deadline2 = block.timestamp + 3600;
         (uint8 v2, bytes32 r2, bytes32 s2) = _signClaim(amount2, recipient2, deadline2);
+        vm.prank(walletOwnerAddr);
         pool.claim(WALLET_HASH, PATH_INDEX, amount2, recipient2, deadline2, v2, r2, s2);
         assertEq(token.balanceOf(recipient2), amount2);
         assertEq(pool.remainingForPath(WALLET_HASH, PATH_INDEX), PATH_TOTAL_AMOUNT - amount1 - amount2);
@@ -152,6 +155,7 @@ contract YaultPathClaimTest is Test {
         uint256 amount3 = 500e6;
         uint256 deadline3 = block.timestamp + 3600;
         (uint8 v3, bytes32 r3, bytes32 s3) = _signClaim(amount3, recipient, deadline3);
+        vm.prank(walletOwnerAddr);
         pool.claim(WALLET_HASH, PATH_INDEX, amount3, recipient, deadline3, v3, r3, s3);
         assertEq(token.balanceOf(recipient), amount1 + amount3);
         assertEq(pool.remainingForPath(WALLET_HASH, PATH_INDEX), 0);
@@ -172,6 +176,7 @@ contract YaultPathClaimTest is Test {
         uint256 first = 600e6;
         uint256 deadline1 = block.timestamp + 3600;
         (uint8 v1, bytes32 r1, bytes32 s1) = _signClaim(first, recipient, deadline1);
+        vm.prank(walletOwnerAddr);
         pool.claim(WALLET_HASH, PATH_INDEX, first, recipient, deadline1, v1, r1, s1);
         assertEq(token.balanceOf(recipient), first);
         assertEq(pool.remainingForPath(WALLET_HASH, PATH_INDEX), PATH_TOTAL_AMOUNT - first);
@@ -179,6 +184,7 @@ contract YaultPathClaimTest is Test {
         // Second claim: sign for full totalAmount, should cap to remaining 40%
         uint256 deadline2 = block.timestamp + 3600;
         (uint8 v2, bytes32 r2, bytes32 s2) = _signClaim(PATH_TOTAL_AMOUNT, recipient, deadline2);
+        vm.prank(walletOwnerAddr);
         pool.claim(WALLET_HASH, PATH_INDEX, PATH_TOTAL_AMOUNT, recipient, deadline2, v2, r2, s2);
         assertEq(token.balanceOf(recipient), PATH_TOTAL_AMOUNT, "recipient gets full total across both claims");
         assertEq(pool.remainingForPath(WALLET_HASH, PATH_INDEX), 0);
@@ -198,6 +204,7 @@ contract YaultPathClaimTest is Test {
         uint256 signedAmount = PATH_TOTAL_AMOUNT + 1; // more than remaining
         uint256 deadline = block.timestamp + 3600;
         (uint8 v, bytes32 r, bytes32 s) = _signClaim(signedAmount, recipient, deadline);
+        vm.prank(walletOwnerAddr);
         pool.claim(WALLET_HASH, PATH_INDEX, signedAmount, recipient, deadline, v, r, s);
         assertEq(token.balanceOf(recipient), PATH_TOTAL_AMOUNT, "transfers only remaining");
         assertEq(pool.remainingForPath(WALLET_HASH, PATH_INDEX), 0);
@@ -267,11 +274,13 @@ contract YaultPathClaimTest is Test {
         uint256 deadline = block.timestamp + 3600;
         (uint8 v, bytes32 r, bytes32 s) = _signClaim(amount, recipient, deadline);
 
+        vm.prank(walletOwnerAddr);
         pool.claim(WALLET_HASH, PATH_INDEX, amount, recipient, deadline, v, r, s);
         assertEq(token.balanceOf(recipient), amount);
 
         // Replay same signature — nonce has incremented, so digest differs; signer would need to sign (nonce+1).
         // Same (v,r,s) was for nonce=0; now nonce=1, so getClaimHash returns different digest → invalid signature.
+        vm.prank(walletOwnerAddr);
         vm.expectRevert(YaultPathClaim.InvalidSignature.selector);
         pool.claim(WALLET_HASH, PATH_INDEX, amount, recipient, deadline, v, r, s);
     }
@@ -314,6 +323,7 @@ contract YaultPathClaimTest is Test {
         );
         (v, r, s) = vm.sign(wrongPk, digest);
 
+        vm.prank(walletOwnerAddr);
         vm.expectRevert(YaultPathClaim.InvalidSignature.selector);
         pool.claim(WALLET_HASH, PATH_INDEX, PATH_TOTAL_AMOUNT, recipient, deadline, v, r, s);
     }
