@@ -190,6 +190,23 @@ router.put('/', dualAuthMiddleware, async (req, res) => {
     const tokenSym = (token_symbol || '').trim().toUpperCase() || 'ETH';
     const key = newPlanKey(walletId, chainKey, tokenSym);
 
+    // Preserve createdAt from existing plan for this wallet+chain+token
+    const prefix = planPrefix(walletId, chainKey, tokenSym);
+    const allIds = await db.walletPlans.findAllIds();
+    const matchingIds = allIds.filter(
+      (id) => id === prefix || id.startsWith(prefix + '_')
+    );
+    let existingCreatedAt = null;
+    if (matchingIds.length > 0) {
+      for (const mid of matchingIds) {
+        const existing = await db.walletPlans.findById(mid);
+        if (existing && existing.createdAt && !existing._migratedToMulti) {
+          existingCreatedAt = existing.createdAt;
+          break;
+        }
+      }
+    }
+
     const planId = crypto.randomBytes(16).toString('hex');
     const data = {
       plan_id: planId,
@@ -198,7 +215,7 @@ router.put('/', dualAuthMiddleware, async (req, res) => {
       triggerConfig: triggerConfig || {},
       chain_key: chainKey,
       token_symbol: tokenSym,
-      createdAt: new Date().toISOString(),
+      createdAt: existingCreatedAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
 

@@ -108,7 +108,7 @@ describe('fetchFromArweave', () => {
     const result = await fetchFromArweave(validTxId);
     expect(result).toBe('{"data":"test"}');
     // Multi-gateway: races configured gateway + fallback gateways concurrently
-    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(global.fetch).toHaveBeenCalledTimes(4);
     const calledUrls = global.fetch.mock.calls.map(c => c[0]);
     expect(calledUrls).toContain(`https://arweave.net/${validTxId}`);
   });

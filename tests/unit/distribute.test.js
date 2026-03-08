@@ -114,13 +114,26 @@ describe('POST /api/release/distribute', () => {
     sessionToken = await getSessionToken(walletKp.publicKey, walletKp.secretKey);
     const auth = await registerAndVerifyAuthority();
     authorityId = auth.authorityId;
+
+    // Seed a recipientPaths config so the distribute endpoint finds a release config
+    const storageInput = `${walletKp.publicKey}:test-plan-1`;
+    const id = crypto.createHash('sha256').update(storageInput).digest('hex');
+    await db.recipientPaths.create(id, {
+      wallet_id: walletKp.publicKey,
+      plan_id: 'test-plan-1',
+      paths: [
+        { index: 0, label: 'Test Path', weight: 100, admin_factor_fingerprint: 'a'.repeat(64) },
+      ],
+      total_weight: 100,
+      created_at: Date.now(),
+    });
   });
 
   function distributeWithAuth(body) {
     return request
       .post('/api/release/distribute')
       .set('X-Client-Session', sessionToken)
-      .send(body);
+      .send({ plan_id: 'test-plan-1', ...body });
   }
 
   test('rejects non-array encrypted_packages', async () => {

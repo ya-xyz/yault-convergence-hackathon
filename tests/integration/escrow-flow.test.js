@@ -436,6 +436,13 @@ describe('Escrow Flow - Claim Lookup', () => {
 
     authorityKp = generateKeypair();
     authorityId = await seedAuthority(authorityKp.publicKey);
+
+    // Seed walletAddresses with xidentity for the client (required by claim lookup endpoint)
+    const db = require('../../server/db');
+    await db.walletAddresses.create(walletId, {
+      evm_address: '0x' + walletId,
+      xidentity: 'test-xid-' + walletId.slice(0, 16),
+    });
   });
 
   test('Claim lookup returns released=false when no released trigger', async () => {

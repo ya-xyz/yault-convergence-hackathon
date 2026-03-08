@@ -20,6 +20,12 @@ process.env.DATABASE_PATH = TEST_DB_PATH;
 process.env.NODE_ENV = 'test';
 process.env.ADMIN_TOKEN = 'test-admin-token-1234567890';
 
+// Mock xidentity encryption (ESM-only @yallet/rwa-sdk unavailable in Jest)
+jest.mock('../../server/services/xidentityAdminFactor', () => ({
+  encryptAdminFactorForXidentity: jest.fn(async (hex) => ({ ciphertext: hex, algorithm: 'mock' })),
+  normalizeAdminFactorHex: jest.fn((v) => String(v || '').trim().toLowerCase().replace(/^0x/i, '')),
+}));
+
 const nacl = require('tweetnacl');
 
 let app;
@@ -132,6 +138,13 @@ describe('AdminFactor Release POST (authority submission)', () => {
       created_at: new Date().toISOString(),
     });
 
+    // Seed walletAddresses with xidentity for the recipient (required by admin-factor release endpoint)
+    const recipientNorm = evmAddress.replace(/^0x/i, '').toLowerCase();
+    await db.walletAddresses.create(recipientNorm, {
+      evm_address: evmAddress,
+      xidentity: 'test-xid-' + recipientNorm.slice(0, 16),
+    });
+
     // Seed: create authorityReleaseLinks record (as if client sent release link)
     // Note: id must be included in data because findByField only returns data column
     const linkId = crypto.randomBytes(16).toString('hex');
@@ -165,7 +178,9 @@ describe('AdminFactor Release POST (authority submission)', () => {
     // Verify the record was updated
     const db = require('../../server/db');
     const record = await db.recipientMnemonicAdmin.findById(mnemonicHash);
-    expect(record.admin_factor).toBe(adminFactor);
+    // admin_factor is set to null after encryption; encrypted_admin_factor holds the encrypted payload
+    expect(record.admin_factor).toBeNull();
+    expect(record.encrypted_admin_factor).toBeDefined();
     expect(record.linked_by_authority_id).toBe(authority.authorityId);
 
     // Verify the release link was cleaned up

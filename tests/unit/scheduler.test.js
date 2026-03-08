@@ -35,6 +35,7 @@ delete process.env.ARWEAVE_WALLET_JWK;
 let db;
 let processDueAllowances;
 let maybeFinalizeDecision;
+let finalizeCooldowns;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -86,6 +87,10 @@ beforeAll(async () => {
   // Decision router — exposes _maybeFinalizeDecision
   const decisionRouter = require('../../server/api/trigger/decision');
   maybeFinalizeDecision = decisionRouter._maybeFinalizeDecision;
+
+  // Cooldown finalizer from pending.js (C-07: cooldown finalization moved here from scheduler)
+  const pendingRouter = require('../../server/api/trigger/pending');
+  finalizeCooldowns = pendingRouter._finalizeCooldowns;
 });
 
 afterAll(() => {
@@ -97,7 +102,7 @@ afterAll(() => {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('Scheduler — cooldown finalization via processDueAllowances()', () => {
+describe('Cooldown finalization via finalizeCooldowns()', () => {
 
   afterEach(async () => {
     // Clean the triggers table between tests so state does not leak.
@@ -116,7 +121,7 @@ describe('Scheduler — cooldown finalization via processDueAllowances()', () =>
     });
     await insertTrigger(data);
 
-    await processDueAllowances();
+    await finalizeCooldowns();
 
     const updated = await db.triggers.findById('trig-release-001');
     expect(updated).not.toBeNull();
@@ -133,7 +138,7 @@ describe('Scheduler — cooldown finalization via processDueAllowances()', () =>
     });
     await insertTrigger(data);
 
-    await processDueAllowances();
+    await finalizeCooldowns();
 
     const updated = await db.triggers.findById('trig-future-001');
     expect(updated).not.toBeNull();
@@ -150,7 +155,7 @@ describe('Scheduler — cooldown finalization via processDueAllowances()', () =>
     });
     await insertTrigger(data);
 
-    await processDueAllowances();
+    await finalizeCooldowns();
 
     const updated = await db.triggers.findById('trig-pending-001');
     expect(updated).not.toBeNull();
@@ -167,7 +172,7 @@ describe('Scheduler — cooldown finalization via processDueAllowances()', () =>
     });
     await insertTrigger(data);
 
-    await processDueAllowances();
+    await finalizeCooldowns();
 
     const updated = await db.triggers.findById('trig-hold-001');
     expect(updated).not.toBeNull();
@@ -176,7 +181,7 @@ describe('Scheduler — cooldown finalization via processDueAllowances()', () =>
   });
 
   // 8. Multiple cooldown triggers finalized in a single tick
-  test('finalizes multiple expired cooldown triggers in a single processDueAllowances tick', async () => {
+  test('finalizes multiple expired cooldown triggers in a single finalizeCooldowns tick', async () => {
     const ids = ['trig-batch-001', 'trig-batch-002', 'trig-batch-003'];
 
     for (const id of ids) {
@@ -187,7 +192,7 @@ describe('Scheduler — cooldown finalization via processDueAllowances()', () =>
       }));
     }
 
-    await processDueAllowances();
+    await finalizeCooldowns();
 
     for (const id of ids) {
       const updated = await db.triggers.findById(id);

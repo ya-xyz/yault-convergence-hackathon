@@ -352,7 +352,7 @@ async function getMultiChainBalances(addresses, options = {}) {
             })
         );
       }
-      const wbtcAddr = useTestnet ? (chain.testnet?.wbtc || chain.wbtc) : chain.wbtc;
+      const wbtcAddr = useTestnet ? (chain.testnet?.wbtc ?? null) : chain.wbtc;
       if (includeTokens && wbtcAddr && isValidEvmAddress(wbtcAddr)) {
         promises.push(
           getEvmTokenBalance(chain.key, addresses.evmAddress, wbtcAddr, 8, rpcTimeoutMs, useTestnet)

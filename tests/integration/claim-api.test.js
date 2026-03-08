@@ -19,6 +19,12 @@ process.env.DATABASE_PATH = TEST_DB_PATH;
 process.env.NODE_ENV = 'test';
 process.env.ADMIN_TOKEN = 'test-admin-token-1234567890';
 
+// Mock xidentity encryption (ESM-only @yallet/rwa-sdk unavailable in Jest)
+jest.mock('../../server/services/xidentityAdminFactor', () => ({
+  encryptAdminFactorForXidentity: jest.fn(async (hex) => ({ ciphertext: hex, algorithm: 'mock' })),
+  normalizeAdminFactorHex: jest.fn((v) => String(v || '').trim().toLowerCase().replace(/^0x/i, '')),
+}));
+
 const nacl = require('tweetnacl');
 
 let app;
@@ -70,6 +76,16 @@ async function getSessionToken(pubkeyHex, secretKey) {
 // Tests
 // ---------------------------------------------------------------------------
 
+/** Seed walletAddresses with xidentity for a given public key (required by claim endpoints). */
+async function seedXidentity(pubkeyHex) {
+  const db = require('../../server/db');
+  const addr = pubkeyHex.toLowerCase();
+  await db.walletAddresses.create(addr, {
+    evm_address: '0x' + addr,
+    xidentity: 'test-xid-' + addr.slice(0, 16),
+  });
+}
+
 describe('Claim /me endpoint', () => {
   let recipientKp;
   let recipientSession;
@@ -77,6 +93,7 @@ describe('Claim /me endpoint', () => {
   beforeAll(async () => {
     recipientKp = generateKeypair();
     recipientSession = await getSessionToken(recipientKp.publicKey, recipientKp.secretKey);
+    await seedXidentity(recipientKp.publicKey);
   });
 
   test('returns empty items when no releases exist', async () => {
@@ -109,7 +126,7 @@ describe('Claim /me endpoint', () => {
 
     const planItems = res.body.items.filter(i => i.source === 'plan');
     expect(planItems.length).toBeGreaterThanOrEqual(1);
-    expect(planItems[0].admin_factor_hex).toBe('f'.repeat(64));
+    expect(planItems[0].encrypted_admin_factor).toBeDefined();
     expect(planItems[0].label).toBe('Test Release');
   });
 
@@ -125,6 +142,7 @@ describe('Claim plan-releases endpoint', () => {
   beforeAll(async () => {
     recipientKp = generateKeypair();
     recipientSession = await getSessionToken(recipientKp.publicKey, recipientKp.secretKey);
+    await seedXidentity(recipientKp.publicKey);
 
     const db = require('../../server/db');
     const recipientAddr = recipientKp.publicKey.toLowerCase();
@@ -157,7 +175,7 @@ describe('Claim plan-releases endpoint', () => {
       .expect(200);
 
     expect(res.body.items.length).toBeGreaterThanOrEqual(1);
-    const hasNullFactor = res.body.items.some(i => !i.admin_factor);
+    const hasNullFactor = res.body.items.some(i => !i.encrypted_admin_factor);
     expect(hasNullFactor).toBe(false);
     expect(res.body.items[0].label).toBe('Released Item');
   });
@@ -176,6 +194,7 @@ describe('Claim get-admin-factor endpoint', () => {
   beforeAll(async () => {
     recipientKp = generateKeypair();
     recipientSession = await getSessionToken(recipientKp.publicKey, recipientKp.secretKey);
+    await seedXidentity(recipientKp.publicKey);
 
     const db = require('../../server/db');
     const recipientAddr = recipientKp.publicKey.toLowerCase();
@@ -201,7 +220,7 @@ describe('Claim get-admin-factor endpoint', () => {
       })
       .expect(200);
 
-    expect(res.body.admin_factor_hex).toBe(adminFactor);
+    expect(res.body.encrypted_admin_factor).toBeDefined();
   });
 
   test('returns 403 when evm_address does not match logged-in wallet', async () => {

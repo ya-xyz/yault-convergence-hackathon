@@ -112,9 +112,21 @@ describe('Trigger Decision API', () => {
   let authorityKp;
   let authorityId;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     authorityKp = generateKeypair();
     authorityId = deriveAuthorityId(authorityKp.publicKey);
+
+    // Register the authority in the database so authorityAuthMiddleware accepts it
+    const db = require('../../server/db');
+    await db.authorities.create(authorityId, {
+      authority_id: authorityId,
+      name: 'Test Authority',
+      bar_number: 'TEST-TD-001',
+      jurisdiction: 'US-CA',
+      pubkey: authorityKp.publicKey,
+      verified: true,
+      status: 'active',
+    });
   });
 
   // -------------------------------------------------------------------------
