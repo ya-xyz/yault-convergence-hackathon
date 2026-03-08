@@ -66,8 +66,8 @@ contract AdminFactorVaultTest is Test {
         vm.prank(deployer);
         vault.setTransferExempt(address(escrow), true);
 
-        // Deploy AdminFactorVault (with escrow reference)
-        afVault = new AdminFactorVault(deployer, address(attestation), address(escrow));
+        // Deploy AdminFactorVault (no Ownable — only needs attestation + escrow)
+        afVault = new AdminFactorVault(address(attestation), address(escrow));
 
         // Register AdminFactorVault as a fallback submitter on ReleaseAttestation
         vm.prank(deployer);
@@ -191,7 +191,7 @@ contract AdminFactorVaultTest is Test {
         assertEq(owner, alice);
     }
 
-    function testRetrieve_NotStored() public {
+    function testRetrieve_NotStored() public view {
         (bytes memory ct, bytes32 fp, address owner) = afVault.retrieve(WALLET_HASH, 99);
         assertEq(ct.length, 0, "empty ciphertext");
         assertEq(fp, bytes32(0), "zero fingerprint");
@@ -246,17 +246,47 @@ contract AdminFactorVaultTest is Test {
     }
 
     // -----------------------------------------------------------------------
-    //  destroy() — with HOLD attestation (still allowed)
+    //  destroy() — with oracle HOLD attestation (should still succeed)
     // -----------------------------------------------------------------------
 
-    function testDestroy_WithHoldAttestation_Success() public {
+    function testDestroy_WithOracleHold_SkipsRejectSubmission() public {
         _store(1);
         _submitHold(1);
 
-        // Despite HOLD attestation, owner can still destroy
-        // Note: submitAttestation for REJECT will fail because oracle attestation exists
-        // and fallback can't overwrite oracle. But that's OK — HOLD already prevents claim.
-        // Let's test with a different setup: fallback HOLD.
+        // Despite oracle HOLD, owner can still destroy the AF.
+        // The REJECT submission is skipped because fallback cannot overwrite oracle,
+        // but the AF ciphertext is destroyed. The oracle HOLD already prevents claims.
+        vm.prank(alice);
+        afVault.destroy(WALLET_HASH, 1);
+
+        // AF should be destroyed
+        assertFalse(afVault.isActive(WALLET_HASH, 1), "AF should be inactive");
+        (bytes memory ct,,) = afVault.retrieve(WALLET_HASH, 1);
+        assertEq(ct.length, 0, "ciphertext should be zeroed");
+
+        // Attestation should still be oracle HOLD (not overwritten to REJECT)
+        Attestation memory att = attestation.getAttestation(WALLET_HASH, 1);
+        assertEq(att.source, attestation.SOURCE_ORACLE(), "source should still be ORACLE");
+        assertEq(att.decision, attestation.DECISION_HOLD(), "decision should still be HOLD");
+    }
+
+    function testDestroyAndReclaim_WithOracleHold() public {
+        _store(1);
+
+        uint256 shares = vault.balanceOf(alice);
+        _depositToEscrow(1, shares);
+        assertEq(vault.balanceOf(alice), 0, "all shares in escrow");
+
+        _submitHold(1);
+
+        // destroyAndReclaim should work even with oracle HOLD
+        vm.prank(alice);
+        afVault.destroyAndReclaim(WALLET_HASH, 1);
+
+        // AF destroyed, shares reclaimed
+        assertFalse(afVault.isActive(WALLET_HASH, 1), "AF should be inactive");
+        assertEq(vault.balanceOf(alice), shares, "alice should have shares back");
+        assertEq(escrow.remainingForRecipient(WALLET_HASH, 1), 0, "escrow should be empty");
     }
 
     // -----------------------------------------------------------------------
@@ -312,24 +342,21 @@ contract AdminFactorVaultTest is Test {
     function testDestroy_PreventsSubsequentRelease() public {
         _store(1);
 
-        // Owner destroys (REJECT attestation submitted)
+        // Owner destroys (REJECT attestation submitted via fallback)
         vm.prank(alice);
         afVault.destroy(WALLET_HASH, 1);
 
-        // Oracle tries to submit RELEASE — should revert because fallback REJECT exists
-        // and oracle can overwrite fallback, BUT... let's check the actual behavior.
-        // In ReleaseAttestation: oracle CAN overwrite fallback attestations.
-        // However, that's the current design. The REJECT from destroy() won't block
-        // an oracle RELEASE since oracle > fallback.
-        //
-        // This is actually a design choice: if the oracle still certifies RELEASE
-        // (e.g., death verified), the plan owner shouldn't be able to block it.
-        // The AF being destroyed means the recipient can't decrypt the AF,
-        // but the attestation is a separate concern.
-        //
-        // For the AF vault's purpose: the AF data is gone, so even with RELEASE,
-        // the recipient can't reconstruct the three factors. Funds will be stuck
-        // but that's the owner's choice.
+        // Verify REJECT attestation exists
+        Attestation memory att = attestation.getAttestation(WALLET_HASH, 1);
+        assertEq(att.decision, attestation.DECISION_REJECT(), "should be REJECT");
+        assertEq(att.source, attestation.SOURCE_FALLBACK(), "should be FALLBACK");
+
+        // Oracle CAN overwrite fallback attestations (oracle > fallback).
+        // This is by design: if the oracle certifies RELEASE (e.g., death verified),
+        // the plan owner shouldn't be able to block it.
+        // However, the AF data is gone, so even with RELEASE the recipient
+        // can't reconstruct the three factors. Funds will be stuck but that's
+        // the owner's intentional choice.
     }
 
     // -----------------------------------------------------------------------
@@ -422,6 +449,17 @@ contract AdminFactorVaultTest is Test {
 
         vm.prank(attacker);
         vm.expectRevert(AdminFactorVault.NotAFOwner.selector);
+        afVault.destroyAndReclaim(WALLET_HASH, 1);
+    }
+
+    function testDestroyAndReclaim_AlreadyDestroyedReverts() public {
+        _store(1);
+
+        vm.prank(alice);
+        afVault.destroyAndReclaim(WALLET_HASH, 1);
+
+        vm.prank(alice);
+        vm.expectRevert(AdminFactorVault.AlreadyDestroyed.selector);
         afVault.destroyAndReclaim(WALLET_HASH, 1);
     }
 

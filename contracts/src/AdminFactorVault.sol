@@ -1,25 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IReleaseAttestation, Attestation} from "./interfaces/IReleaseAttestation.sol";
 
 /**
- * @title IReleaseAttestation
- * @notice Minimal interface for reading and submitting attestations.
+ * @title IReleaseAttestationSubmitter
+ * @notice Extended interface adding submitAttestation to the shared IReleaseAttestation.
  */
-interface IReleaseAttestationFull {
-    function getAttestation(bytes32 walletIdHash, uint256 recipientIndex)
-        external
-        view
-        returns (
-            uint8 source,
-            uint8 decision,
-            bytes32 reasonCode,
-            bytes32 evidenceHash,
-            uint64 timestamp,
-            address submitter
-        );
-
+interface IReleaseAttestationSubmitter is IReleaseAttestation {
     function submitAttestation(
         uint8 source,
         bytes32 walletIdHash,
@@ -78,7 +66,8 @@ interface IVaultShareEscrow {
  * NOTE: This contract must be registered as a fallbackSubmitter on ReleaseAttestation
  *       for the destroy-with-REJECT flow to work.
  */
-contract AdminFactorVault is Ownable {
+contract AdminFactorVault {
+    uint8 public constant SOURCE_ORACLE = 0;
     uint8 public constant SOURCE_FALLBACK = 1;
     uint8 public constant DECISION_RELEASE = 0;
     uint8 public constant DECISION_REJECT = 2;
@@ -86,7 +75,7 @@ contract AdminFactorVault is Ownable {
     /// @notice Reason code emitted when AF is destroyed by plan owner.
     bytes32 public constant REASON_AF_DESTROYED = keccak256("AF_DESTROYED");
 
-    IReleaseAttestationFull public immutable ATTESTATION;
+    IReleaseAttestationSubmitter public immutable ATTESTATION;
     IVaultShareEscrow public immutable ESCROW;
 
     struct EncryptedAF {
@@ -130,8 +119,8 @@ contract AdminFactorVault is Ownable {
     //  Constructor
     // -----------------------------------------------------------------------
 
-    constructor(address initialOwner, address _attestation, address _escrow) Ownable(initialOwner) {
-        ATTESTATION = IReleaseAttestationFull(_attestation);
+    constructor(address _attestation, address _escrow) {
+        ATTESTATION = IReleaseAttestationSubmitter(_attestation);
         ESCROW = IVaultShareEscrow(_escrow);
     }
 
@@ -177,48 +166,19 @@ contract AdminFactorVault is Ownable {
      *
      *         If RELEASE attestation already exists, reverts (commitment is final).
      *
+     *         If an oracle HOLD attestation exists, the REJECT submission is skipped
+     *         (fallback cannot overwrite oracle), but the AF ciphertext is still destroyed.
+     *         The HOLD already prevents claims, and the destroyed AF provides additional
+     *         protection since the recipient cannot decrypt the three factors.
+     *
      *         After destroy(), the plan owner can safely call VaultShareEscrow.reclaim()
-     *         or YaultPathClaim equivalent since the attestation is REJECT.
+     *         or YaultPathClaim equivalent since the attestation is not RELEASE.
      *
      * @param walletIdHash   Plan/wallet identifier hash.
      * @param recipientIndex Recipient path index.
      */
     function destroy(bytes32 walletIdHash, uint256 recipientIndex) external {
-        bytes32 key = _key(walletIdHash, recipientIndex);
-        EncryptedAF storage entry = _vault[key];
-
-        if (entry.owner == address(0)) revert NotStored();
-        if (entry.owner != msg.sender) revert NotAFOwner();
-        if (entry.ciphertext.length == 0) revert AlreadyDestroyed();
-
-        // Check attestation status — RELEASE is final, cannot destroy after RELEASE.
-        (, uint8 decision,,, uint64 timestamp,) =
-            ATTESTATION.getAttestation(walletIdHash, recipientIndex);
-
-        if (timestamp != 0 && decision == DECISION_RELEASE) {
-            revert ReleaseAlreadyAttested();
-        }
-
-        // Submit REJECT attestation to lock the slot (prevent future RELEASE).
-        // Only attempt if no attestation exists yet or current is not already REJECT.
-        // This call will revert if this contract is not a registered fallbackSubmitter,
-        // which is the expected configuration.
-        if (timestamp == 0 || decision != DECISION_REJECT) {
-            ATTESTATION.submitAttestation(
-                SOURCE_FALLBACK,
-                walletIdHash,
-                recipientIndex,
-                DECISION_REJECT,
-                REASON_AF_DESTROYED,
-                bytes32(0)
-            );
-        }
-
-        // Zero out the encrypted data (true deletion from storage).
-        delete _vault[key].ciphertext;
-        // Keep owner and fingerprint for audit trail; mark as destroyed by empty ciphertext.
-
-        emit AdminFactorDestroyed(walletIdHash, recipientIndex, msg.sender);
+        _destroy(walletIdHash, recipientIndex);
     }
 
     /**
@@ -230,37 +190,7 @@ contract AdminFactorVault is Ownable {
      * @param recipientIndex Recipient path index.
      */
     function destroyAndReclaim(bytes32 walletIdHash, uint256 recipientIndex) external {
-        bytes32 key = _key(walletIdHash, recipientIndex);
-        EncryptedAF storage entry = _vault[key];
-
-        if (entry.owner == address(0)) revert NotStored();
-        if (entry.owner != msg.sender) revert NotAFOwner();
-        if (entry.ciphertext.length == 0) revert AlreadyDestroyed();
-
-        // Check attestation status — RELEASE is final, cannot destroy after RELEASE.
-        (, uint8 decision,,, uint64 timestamp,) =
-            ATTESTATION.getAttestation(walletIdHash, recipientIndex);
-
-        if (timestamp != 0 && decision == DECISION_RELEASE) {
-            revert ReleaseAlreadyAttested();
-        }
-
-        // Submit REJECT attestation to lock the slot (prevent future RELEASE).
-        if (timestamp == 0 || decision != DECISION_REJECT) {
-            ATTESTATION.submitAttestation(
-                SOURCE_FALLBACK,
-                walletIdHash,
-                recipientIndex,
-                DECISION_REJECT,
-                REASON_AF_DESTROYED,
-                bytes32(0)
-            );
-        }
-
-        // Zero out the encrypted data.
-        delete _vault[key].ciphertext;
-
-        emit AdminFactorDestroyed(walletIdHash, recipientIndex, msg.sender);
+        _destroy(walletIdHash, recipientIndex);
 
         // Reclaim escrow shares back to the owner in the same tx.
         uint256 remaining = ESCROW.remainingForRecipient(walletIdHash, recipientIndex);
@@ -305,6 +235,48 @@ contract AdminFactorVault is Ownable {
     // -----------------------------------------------------------------------
     //  Internal
     // -----------------------------------------------------------------------
+
+    /**
+     * @dev Shared destroy logic for destroy() and destroyAndReclaim().
+     *      Validates ownership, checks attestation state, submits REJECT if possible,
+     *      and zeros the encrypted ciphertext.
+     */
+    function _destroy(bytes32 walletIdHash, uint256 recipientIndex) internal {
+        bytes32 key = _key(walletIdHash, recipientIndex);
+        EncryptedAF storage entry = _vault[key];
+
+        if (entry.owner == address(0)) revert NotStored();
+        if (entry.owner != msg.sender) revert NotAFOwner();
+        if (entry.ciphertext.length == 0) revert AlreadyDestroyed();
+
+        // Check attestation status — RELEASE is final, cannot destroy after RELEASE.
+        Attestation memory att = ATTESTATION.getAttestation(walletIdHash, recipientIndex);
+
+        if (att.timestamp != 0 && att.decision == DECISION_RELEASE) {
+            revert ReleaseAlreadyAttested();
+        }
+
+        // Submit REJECT attestation to lock the slot (prevent future RELEASE).
+        // Skip if an oracle attestation already exists (fallback cannot overwrite oracle).
+        // In that case, the existing oracle HOLD already prevents claims, and destroying
+        // the AF ciphertext provides additional security.
+        if (att.timestamp == 0 || (att.source != SOURCE_ORACLE && att.decision != DECISION_REJECT)) {
+            ATTESTATION.submitAttestation(
+                SOURCE_FALLBACK,
+                walletIdHash,
+                recipientIndex,
+                DECISION_REJECT,
+                REASON_AF_DESTROYED,
+                bytes32(0)
+            );
+        }
+
+        // Zero out the encrypted data (true deletion from storage).
+        delete _vault[key].ciphertext;
+        // Keep owner and fingerprint for audit trail; mark as destroyed by empty ciphertext.
+
+        emit AdminFactorDestroyed(walletIdHash, recipientIndex, msg.sender);
+    }
 
     function _key(bytes32 walletIdHash, uint256 recipientIndex)
         internal

@@ -37,7 +37,7 @@ contract DeployAdminFactorVault is Script {
 
         vm.startBroadcast(deployerKey);
 
-        AdminFactorVault afVault = new AdminFactorVault(deployer, attestationAddr, escrowAddr);
+        AdminFactorVault afVault = new AdminFactorVault(attestationAddr, escrowAddr);
         console2.log("AdminFactorVault deployed at:", address(afVault));
 
         // Register AdminFactorVault as a fallback submitter on ReleaseAttestation
