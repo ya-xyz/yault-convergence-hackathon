@@ -1411,7 +1411,7 @@ function renderLogin() {
     <div style="margin-top:60px;">
       <h1 style="margin-bottom:4px;">Yault</h1>
       <p style="text-align:center;color:var(--text-muted);margin-bottom:32px;font-size:14px;">
-        Non-Custodial Asset Release & Vault Platform
+        Self-Custodial Crypto Treasury Platform
       </p>
       ${wallet.renderLoginUI({
         title: T('connectWallet'),
@@ -1430,6 +1430,17 @@ function renderLogin() {
         </button>
       </div>
 
+      <section class="env-notice" aria-label="Test Environment Notice" style="max-width:760px;margin:16px auto 0;">
+        <h2>Test Environment Notice</h2>
+        <p>This is a test environment. The system is currently running on testnets (Ethereum Sepolia / Solana Devnet).</p>
+        <p><strong>Testing tutorial:</strong></p>
+        <ol>
+          <li>Full testing requires Yallet wallet support (not released yet).</li>
+          <li>Get test ETH from <a href="https://sepolia-faucet.pk910.de/#/" target="_blank" rel="noopener">https://sepolia-faucet.pk910.de/#/</a>.</li>
+          <li>Swap to WETH on <a href="https://app.uniswap.org/" target="_blank" rel="noopener">https://app.uniswap.org/</a> (Sepolia network).</li>
+        </ol>
+      </section>
+
       <!-- Trial Application Modal -->
       <div id="trialModal" class="hidden">
         <div class="modal-overlay" data-action="close-trial-modal">
@@ -1439,7 +1450,7 @@ function renderLogin() {
               <button class="modal-close" data-action="close-trial-modal">&times;</button>
             </div>
             <p style="color:var(--text-secondary);font-size:14px;margin-bottom:20px;">
-              Get early access to Yault's non-custodial asset release platform.
+              Get early access to Yault's self-custodial crypto treasury platform.
             </p>
             <div class="form-group">
               <label class="form-label">Name</label>

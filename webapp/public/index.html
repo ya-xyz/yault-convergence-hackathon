@@ -135,6 +135,14 @@
     .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
     .modal-close { background: none; border: none; color: var(--text-muted); font-size: 20px; cursor: pointer; }
     .modal-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+    .env-notice { background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.35); border-radius: var(--radius); padding: 16px; margin-bottom: 16px; }
+    .env-notice h2 { font-size: 16px; margin-bottom: 8px; color: var(--warning); }
+    .env-notice p { font-size: 13px; color: var(--text-secondary); margin-bottom: 8px; }
+    .env-notice ol { margin-left: 20px; color: var(--text-secondary); font-size: 13px; }
+    .env-notice li { margin: 4px 0; }
+    .env-notice a { color: #7dd3fc; text-decoration: none; }
+    .env-notice a:hover { text-decoration: underline; }
+    .site-footer { margin-top: 20px; padding-top: 12px; border-top: 1px solid var(--border); color: var(--text-muted); font-size: 12px; text-align: center; }
   </style>
 </head>
 <body>
@@ -180,6 +188,9 @@
         <p data-i18n="loading">Loading…</p>
       </div>
     </main>
+    <footer class="site-footer">
+      © 2026 Yault. Test environment for evaluation and integration testing only.
+    </footer>
   </div>
   <script src="js/env.js"></script>
   <script>
