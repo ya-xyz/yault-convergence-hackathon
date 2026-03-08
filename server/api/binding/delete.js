@@ -49,40 +49,22 @@ router.delete('/:id', authorityAuthMiddleware, async (req, res) => {
       });
     }
 
-    // Atomic: terminate binding + decrement counter in a single SQLite transaction
-    // Use prepare/bind/step for parameterized SELECT (sql.js exec does not bind params)
-    db.bindings.runTransaction(() => {
-      const innerDb = db._getDb();
-
-      let stmt = innerDb.prepare('SELECT data FROM "bindings" WHERE id = ?');
-      stmt.bind([id]);
-      let bindingData = null;
-      if (stmt.step()) bindingData = stmt.get()[0];
-      stmt.free();
-      if (!bindingData) return;
-
-      const currentBinding = JSON.parse(bindingData);
-      if (currentBinding.status === 'terminated') return;
-
-      // Mark as terminated
-      currentBinding.status = 'terminated';
-      currentBinding.terminated_at = Date.now();
-      innerDb.run('UPDATE "bindings" SET data = ? WHERE id = ?',
-        [JSON.stringify(currentBinding), id]);
-
-      // Decrement authority's active binding count (parameterized SELECT)
-      stmt = innerDb.prepare('SELECT data FROM "authorities" WHERE id = ?');
-      stmt.bind([currentBinding.authority_id]);
-      let authorityData = null;
-      if (stmt.step()) authorityData = stmt.get()[0];
-      stmt.free();
-      if (authorityData) {
-        const currentAuthority = JSON.parse(authorityData);
-        currentAuthority.active_bindings = Math.max((currentAuthority.active_bindings || 1) - 1, 0);
-        innerDb.run('UPDATE "authorities" SET data = ? WHERE id = ?',
-          [JSON.stringify(currentAuthority), currentBinding.authority_id]);
+    // Backend-agnostic terminate + decrement (SQLite + Postgres adapters)
+    const updatedBinding = {
+      ...binding,
+      status: 'terminated',
+      terminated_at: Date.now(),
+    };
+    await db.bindings.update(id, updatedBinding);
+    if (binding.authority_id) {
+      const authority = await db.authorities.findById(binding.authority_id);
+      if (authority) {
+        await db.authorities.update(binding.authority_id, {
+          ...authority,
+          active_bindings: Math.max((authority.active_bindings || 1) - 1, 0),
+        });
       }
-    });
+    }
 
     return res.json({
       binding_id: id,

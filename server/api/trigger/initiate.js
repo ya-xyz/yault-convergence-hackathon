@@ -187,47 +187,22 @@ router.post('/', authorityAuthMiddleware, async (req, res) => {
       notes: notes ? String(notes).substring(0, 2000) : null,
     };
 
-    // ── Atomic duplicate check + create in a single transaction ────────
-    try {
-      db.triggers.runTransaction(() => {
-        const innerDb = db._getDb();
-
-        // Check for duplicate inside the transaction to prevent TOCTOU
-        // H-11 FIX: Add size guard and early exit for duplicate check
-        const countResult = innerDb.exec('SELECT COUNT(*) FROM "triggers"');
-        const totalTriggers = countResult.length > 0 ? countResult[0].values[0][0] : 0;
-        if (totalTriggers > 10000) {
-          console.warn('[trigger/initiate] Warning: trigger table exceeds 10K records, duplicate check may be slow');
-        }
-        const results = innerDb.exec('SELECT data FROM "triggers"');
-        if (results.length > 0) {
-          for (const row of results[0].values) {
-            const t = JSON.parse(row[0]);
-            if (
-              t.authority_id === authorityId &&
-              t.wallet_id === wallet_id &&
-              t.recipient_index === recipient_index &&
-              t.plan_id === planId &&
-              (t.status === 'pending' || t.status === 'cooldown')
-            ) {
-              throw new Error('DUPLICATE_TRIGGER');
-            }
-          }
-        }
-
-        // Create trigger
-        innerDb.run('INSERT OR REPLACE INTO "triggers" (id, data) VALUES (?, ?)',
-          [triggerId, JSON.stringify(record)]);
+    // Duplicate check + create (backend-agnostic: works for SQLite and Postgres adapters)
+    const existingForWallet = await db.triggers.findByWallet(wallet_id);
+    const dup = existingForWallet.find((t) =>
+      t.authority_id === authorityId &&
+      t.wallet_id === wallet_id &&
+      Number(t.recipient_index) === Number(recipient_index) &&
+      t.plan_id === planId &&
+      (t.status === 'pending' || t.status === 'cooldown')
+    );
+    if (dup) {
+      return res.status(409).json({
+        error: 'Duplicate trigger',
+        detail: 'An active trigger already exists for this recipient path.',
       });
-    } catch (txErr) {
-      if (txErr.message === 'DUPLICATE_TRIGGER') {
-        return res.status(409).json({
-          error: 'Duplicate trigger',
-          detail: 'An active trigger already exists for this recipient path.',
-        });
-      }
-      throw txErr;
     }
+    await db.triggers.create(triggerId, record);
 
     // ── Audit log ───────────────────────────────────────────────────────
 

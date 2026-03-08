@@ -81,43 +81,22 @@ router.post('/', authorityAuthMiddleware, async (req, res) => {
       binding_id: bindingId,
     };
 
-    // Atomic: create binding + increment counter in a single SQLite transaction
-    // to prevent race conditions on active_bindings count.
-    try {
-      db.bindings.runTransaction(() => {
-        const innerDb = db._getDb();
-
-        // Re-read the authority inside the transaction (parameterized SELECT via prepare/bind/step)
-        const stmt = innerDb.prepare('SELECT data FROM "authorities" WHERE id = ?');
-        stmt.bind([bindingData.authority_id]);
-        let authorityData = null;
-        if (stmt.step()) authorityData = stmt.get()[0];
-        stmt.free();
-        if (!authorityData) throw new Error('AUTHORITY_NOT_FOUND');
-
-        const currentAuthority = JSON.parse(authorityData);
-        if (currentAuthority.active_bindings >= currentAuthority.max_capacity) {
-          throw new Error('CAPACITY_EXCEEDED');
-        }
-
-        // Create binding
-        innerDb.run('INSERT OR REPLACE INTO "bindings" (id, data) VALUES (?, ?)',
-          [bindingId, JSON.stringify(record)]);
-
-        // Increment count
-        currentAuthority.active_bindings = (currentAuthority.active_bindings || 0) + 1;
-        innerDb.run('UPDATE "authorities" SET data = ? WHERE id = ?',
-          [JSON.stringify(currentAuthority), bindingData.authority_id]);
-      });
-    } catch (txErr) {
-      if (txErr.message === 'CAPACITY_EXCEEDED') {
-        return res.status(400).json({
-          error: 'Capacity exceeded',
-          detail: 'This authority has reached maximum client capacity',
-        });
-      }
-      throw txErr;
+    // Backend-agnostic create + increment (SQLite + Postgres adapters)
+    const authorityLatest = await db.authorities.findById(bindingData.authority_id);
+    if (!authorityLatest) {
+      return res.status(404).json({ error: 'Authority not found' });
     }
+    if (authorityLatest.active_bindings >= authorityLatest.max_capacity) {
+      return res.status(400).json({
+        error: 'Capacity exceeded',
+        detail: 'This authority has reached maximum client capacity',
+      });
+    }
+    await db.bindings.create(bindingId, record);
+    await db.authorities.update(bindingData.authority_id, {
+      ...authorityLatest,
+      active_bindings: (authorityLatest.active_bindings || 0) + 1,
+    });
 
     return res.status(201).json({
       binding_id: bindingId,
