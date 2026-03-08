@@ -18,6 +18,8 @@ public/package.json
 # IDE
 .idea/
 .vscode/
+.claude/
+.github/
 *.swp
 *.swo
 
