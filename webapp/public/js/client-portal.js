@@ -5002,7 +5002,8 @@ function attachAppEvents() {
       } else if (state.planStep === 'trigger-config') {
         state.planStep = 'recipients';
       } else if (state.planStep === 'review') {
-        state.planStep = 'trigger-config';
+        const onlyOracle = state.planTriggerTypes.oracle && !state.planTriggerTypes.legal_authority && !state.planTriggerTypes.inactivity;
+        state.planStep = onlyOracle ? 'recipients' : 'trigger-config';
       }
       render();
     });
@@ -5128,7 +5129,13 @@ function attachAppEvents() {
           return;
         }
         state.planRecipients = nextList;
-        state.planStep = 'trigger-config';
+        const onlyOracle = state.planTriggerTypes.oracle && !state.planTriggerTypes.legal_authority && !state.planTriggerTypes.inactivity;
+        if (onlyOracle) {
+          state.planTriggerConfig.oracle = { source: 'Chainlink Oracle' };
+          state.planStep = 'review';
+        } else {
+          state.planStep = 'trigger-config';
+        }
       } else if (state.planStep === 'trigger-config') {
         state.planTriggerConfig.oracle = { source: 'Chainlink Oracle' };
         state.planTriggerConfig.legalAuthority.jurisdiction = document.getElementById('planLegalJurisdiction')?.value || '';
