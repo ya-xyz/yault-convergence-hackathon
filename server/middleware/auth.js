@@ -535,6 +535,62 @@ function dualAuthMiddleware(req, res, next) {
   }
 
   const authHeader = req.headers['authorization'] || '';
+
+  // Agent API Key: Bearer sk-yault-*
+  if (authHeader.startsWith('Bearer sk-yault-')) {
+    // Least-privilege: agent keys can ONLY access specific vault-spend routes.
+    // All other endpoints (release, trigger, wallet-plan, invites, admin, simulate, etc.)
+    // require a real wallet signature or session token.
+    //
+    // NOTE: Uses exact route matching where possible to prevent overly-broad access
+    // (e.g. /api/vault/simulate-yield, /api/vault/harvest are NOT agent-accessible).
+    const AGENT_ALLOWED_ROUTES = [
+      '/api/vault/deposit',              // core: deposit into vault
+      '/api/vault/redeem',               // core: redeem from vault
+      '/api/vault/transfer',             // core: transfer between accounts
+      '/api/vault/agent-authorization',  // read: check operator/allowance status
+      '/api/vault/balance/',             // read: GET /balance/:address (prefix-matched)
+      '/api/vault/balances/',            // read: GET /balances/:address (prefix-matched)
+      '/api/me/developer-keys',          // blocked downstream by requireWalletAuth, but auth is ok
+      '/api/me/spending-policies',       // blocked downstream by requireWalletAuth, but auth is ok
+    ];
+    const urlPath = req.originalUrl.split('?')[0]; // strip query string
+    const agentRouteAllowed = AGENT_ALLOWED_ROUTES.some((route) =>
+      urlPath === route || urlPath.startsWith(route + '/') || urlPath.startsWith(route)
+    );
+    if (!agentRouteAllowed) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        detail: 'Agent API keys can only access vault endpoints. Use a wallet-signed request for this resource.',
+      });
+    }
+
+    const apiKey = authHeader.slice(7);
+    const keyHash = crypto.createHash('sha256').update(apiKey, 'utf8').digest('hex');
+    const _db = require('../db');
+    return _db.agentApiKeys.findByHash(keyHash).then((record) => {
+      if (!record) {
+        return res.status(401).json({ error: 'Invalid API key' });
+      }
+      // Update last_used_at (best-effort, non-blocking).
+      // Re-read fresh record to avoid overwriting concurrent policy_id changes.
+      _db.agentApiKeys.findById(record.key_id).then((fresh) => {
+        if (fresh) _db.agentApiKeys.update(record.key_id, { ...fresh, last_used_at: Date.now() });
+      }).catch(() => {});
+      const _authorityId = crypto.createHash('sha256').update(record.wallet_id, 'hex').digest('hex');
+      req.auth = {
+        pubkey: record.wallet_id,
+        authority_id: _authorityId,
+        walletType: 'agent',
+        agent_key_id: record.key_id,
+      };
+      return next();
+    }).catch((err) => {
+      console.error('[auth] Agent API key lookup error:', err.message);
+      return res.status(500).json({ error: 'Internal server error' });
+    });
+  }
+
   if (authHeader.startsWith('Bearer ')) {
     const proxyResult = proxyAuthMiddleware(req, res, next);
     // When proxy auth is disabled/missing key, fallback to legacy auth instead of hanging request.

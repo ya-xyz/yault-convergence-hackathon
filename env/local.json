@@ -1,14 +1,14 @@
 {
-  "profile": "production",
+  "profile": "local",
   "server": {
-    "nodeEnv": "production",
+    "nodeEnv": "development",
     "port": 3001,
-    "corsOrigin": "https://yault.xyz",
+    "corsOrigin": "*",
     "databasePath": "./data/yault.db"
   },
   "api": {
-    "baseUrl": "https://api.yault.xyz/api",
-    "publicUrl": "https://api.yault.xyz/api"
+    "baseUrl": "http://localhost:3001/api",
+    "publicUrl": "http://localhost:3001/api"
   },
   "drand": {
     "chainHash": "dbd506d6ef76e5f386f41c651dcb808c5bcbd75471cc4eafa3f4df7ad4e4c493"
@@ -45,7 +45,8 @@
     "adminWallets": ""
   },
   "security": {
-    "adminSessionIpPinning": true,
+    "allowLocalhost": true,
+    "adminSessionIpPinning": false,
     "multisigRequestWindowMs": 60000,
     "multisigMaxRequestsPerWindow": 24
   },
@@ -61,7 +62,6 @@
     "enableConsoleLog": true
   },
   "rwa": {
-    "dev": true,
     "uploadAndMintApiUrl": "https://api.yallet.xyz/api/v1/storage/rwa/upload-and-mint",
     "network": "devnet"
   }

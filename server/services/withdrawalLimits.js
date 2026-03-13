@@ -30,12 +30,15 @@ const PERIOD_MS = {
  * @returns {Promise<{ isMember: boolean, limit: number|null, period: string, parentWalletIds: string[] }>}
  */
 async function getMemberLimits(walletId) {
-  const memberships = await db.subAccounts.findByMember(walletId);
+  const allMemberships = await db.subAccounts.findByMember(walletId);
+  // Only consider active memberships — removed/suspended memberships should not
+  // impose stale withdrawal limits or mark a wallet as a member.
+  const memberships = allMemberships.filter((m) => m.status === 'active');
   if (memberships.length === 0) {
     return { isMember: false, limit: null, period: 'monthly', parentWalletIds: [] };
   }
 
-  // Find the most restrictive limit across all parent relationships
+  // Find the most restrictive limit across all active parent relationships
   let limit = null;
   let period = 'monthly';
   const parentWalletIds = [];
@@ -72,7 +75,9 @@ async function getPeriodUsage(walletId, period, parentIds) {
     .reduce((sum, a) => sum + Number(a.amount || 0), 0);
 
   // Also count vault redeems tracked in allowances with type 'vault_redeem'
-  // (we'll add these when redeeming)
+  // (recorded when a sub-account redeems from vault).
+  // NOTE: vault_transfer records (from /api/vault/transfer) are already counted above
+  // via findByTo — they have to_wallet_id = recipient and status = 'completed'.
   const all = await db.allowances.findByFrom(walletId);
   total += all
     .filter((a) => a.type === 'vault_redeem' && a.created_at >= periodStart)

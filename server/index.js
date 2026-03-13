@@ -133,7 +133,9 @@ if (trustProxyEnv === 'false' || trustProxyEnv === '0') {
 } else if (trustProxyEnv) {
   app.set('trust proxy', trustProxyEnv === 'true' ? true : trustProxyEnv);
 } else {
-  app.set('trust proxy', true);
+  // Use 1 (one hop) instead of true to satisfy express-rate-limit v8+
+  // which rejects `true` as overly permissive.
+  app.set('trust proxy', 1);
 }
 
 // Body parsing
@@ -518,6 +520,14 @@ const meProfile = require('./api/me/profile');
 app.use('/api/me/addresses', meAddresses);
 app.use('/api/me/tokens', meTokens);
 app.use('/api/me/profile', meProfile);
+
+// Developer API Keys (agent / MCP integration)
+const developerKeys = require('./api/developer-keys');
+app.use('/api/me/developer-keys', developerKeys);
+
+// Spending Policies (agent API key spending limits)
+const spendingPoliciesRouter = require('./api/spending-policies');
+app.use('/api/me/spending-policies', spendingPoliciesRouter);
 
 // Admin / Ops (requires ADMIN_TOKEN)
 app.use('/api/admin', adminRouter);

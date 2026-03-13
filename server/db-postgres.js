@@ -10,7 +10,7 @@ if (!DATABASE_URL) {
 const pool = new Pool({ connectionString: DATABASE_URL, max: Number(process.env.PG_POOL_MAX || 10) });
 let _ready = false;
 
-const TABLES = ['authorities', 'bindings', 'triggers', 'revenue', 'withdrawals', 'auditLog', 'vaultPositions', 'adminSessions', 'authoritySessions', 'insurancePolicies', 'subAccounts', 'allowances', 'trialApplications', 'recipientPaths', 'releasedFactors', 'kyc', 'accountInvites', 'walletPlans', 'walletAddresses', 'users', 'recipientMnemonicAdmin', 'authorityReleaseLinks', 'userCustomTokens', 'rwaReleaseRegistry', 'rwaDeliveryLog', 'campaigns', 'referrals', 'activities', 'adminApprovals', 'walletAdminFactors', 'recipientPathIndex', 'mnemonicHashIndex'];
+const TABLES = ['authorities', 'bindings', 'triggers', 'revenue', 'withdrawals', 'auditLog', 'vaultPositions', 'adminSessions', 'authoritySessions', 'insurancePolicies', 'subAccounts', 'allowances', 'trialApplications', 'recipientPaths', 'releasedFactors', 'kyc', 'accountInvites', 'walletPlans', 'walletAddresses', 'users', 'recipientMnemonicAdmin', 'authorityReleaseLinks', 'userCustomTokens', 'rwaReleaseRegistry', 'rwaDeliveryLog', 'campaigns', 'referrals', 'activities', 'adminApprovals', 'walletAdminFactors', 'recipientPathIndex', 'mnemonicHashIndex', 'agentApiKeys', 'spendingPolicies', 'agentBudgetLedger'];
 
 async function ensureReady() {
   if (_ready) return;
@@ -322,6 +322,31 @@ mnemonicHashIndex.deleteByWalletPlan = async function (walletId, planId) {
   }
 };
 
+// Agent API Keys (for MCP / external agent integration)
+const agentApiKeys = createCollection('agentApiKeys', { allowedJsonFields: ['wallet_id', 'key_hash'] });
+agentApiKeys.findByWallet = async function (walletId) {
+  return this.findByField('wallet_id', walletId);
+};
+agentApiKeys.findByHash = async function (hash) {
+  const results = await this.findByField('key_hash', hash);
+  return results.length > 0 ? results[0] : null;
+};
+
+// Spending Policies (agent API key spending limits)
+const spendingPolicies = createCollection('spendingPolicies', { allowedJsonFields: ['wallet_id'] });
+spendingPolicies.findByWallet = async function (walletId) {
+  return this.findByField('wallet_id', walletId);
+};
+
+// Agent Budget Ledger (tracks actual spend per agent API key for rolling budget enforcement)
+const agentBudgetLedger = createCollection('agentBudgetLedger', { allowedJsonFields: ['key_id', 'wallet_id', 'policy_id'] });
+agentBudgetLedger.findByKey = async function (keyId) {
+  return this.findByField('key_id', keyId);
+};
+agentBudgetLedger.findByPolicy = async function (policyId) {
+  return this.findByField('policy_id', policyId);
+};
+
 module.exports = {
   authorities,
   bindings,
@@ -355,6 +380,9 @@ module.exports = {
   walletAdminFactors,
   recipientPathIndex,
   mnemonicHashIndex,
+  agentApiKeys,
+  spendingPolicies,
+  agentBudgetLedger,
   ensureReady,
   async _close() {
     await pool.end();

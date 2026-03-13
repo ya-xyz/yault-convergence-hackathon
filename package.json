@@ -18,8 +18,10 @@
     "migrate:sqlite-to-postgres": "node server/scripts/migrate-sqlite-to-postgres.js",
     "seed:test-authority": "node server/scripts/seed-test-authority.js",
     "env:dev": "node scripts/generate-env.mjs development",
+    "env:local": "node scripts/generate-env.mjs local",
     "env:test": "node scripts/generate-env.mjs test",
     "env:prod": "node scripts/generate-env.mjs production",
+    "local": "npm run env:local && NODE_ENV=development node server/index.js",
     "lint": "eslint server/ client/ tests/ webapp/public/js/",
     "lint:fix": "eslint server/ client/ tests/ webapp/public/js/ --fix"
   },

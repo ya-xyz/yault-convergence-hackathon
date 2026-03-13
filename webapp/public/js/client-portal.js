@@ -133,6 +133,8 @@ const state = {
   vaultRedeemLoading: false,
   activities: [],                // [{ id, type, amount, asset, tx_hash, status, created_at }]
   activitiesLoading: false,
+  activitiesPage: 0,           // current page (0-indexed)
+  activitiesPerPage: 20,       // items per page
   // Accounts page (related accounts, invite, transfer)
   accountsSection: 'accounts', // 'accounts' | 'invite' — left sidebar selection
   relatedAccountsInvites: [],  // [{ email, status: 'pending'|'accepted', label? }]
@@ -223,6 +225,24 @@ const state = {
   portfolioCcip: null,          // CCIP bridge status
   portfolioLoading: false,
   portfolioError: null,
+  // Developer API Keys
+  developerKeys: [],            // [{ key_id, prefix, label, policy_id, created_at, last_used_at }]
+  developerKeysLoading: false,
+  developerNewKeyLabel: '',
+  developerNewKeyResult: null,  // { key, key_id, prefix } — shown once after creation
+  developerSection: 'api-keys', // active sidebar section
+  // Spending Policies
+  spendingPolicies: [],
+  spendingPoliciesLoading: false,
+  policyFormVisible: false,
+  policyFormEdit: null,         // null = create, policy_id = edit
+  policyForm: { label: '', max_per_transaction: '', daily_limit: '', weekly_limit: '', monthly_limit: '', allowed_addresses: '', allowed_operations: ['deposit', 'redeem', 'transfer', 'create_allowance'] },
+  policyBindModalKeyId: null,   // key_id for the bind-policy modal
+  // Agent Authorization (operator approve)
+  agentAuth: null,              // { configured, operator_address, usdc_allowance, shares_allowance, ... }
+  agentAuthLoading: false,
+  agentAuthAmount: '',          // user-input authorize amount
+  agentAuthBusy: false,         // true while approve tx is in-flight
 };
 
 // Tokens per chain for global context dropdown (cascading: Token options depend on Chain)
@@ -335,7 +355,7 @@ const REDEEM_DEFAULT_TOKENS = {
 
 // ─── Navigation ───
 
-const PAGES = ['wallet', 'accounts', 'protection', 'portfolio', 'claim', 'profile', 'settings', 'activities'];
+const PAGES = ['wallet', 'accounts', 'protection', 'portfolio', 'claim', 'profile', 'settings', 'activities', 'developers'];
 
 function navigate(page) {
   state.page = page;
@@ -376,6 +396,10 @@ function navigate(page) {
     loadPortfolioData().then(() => render());
   } else if (page === 'settings') {
     Promise.all([loadKYCStatus(), loadWalletAddresses()]).then(() => render());
+  } else if (page === 'developers') {
+    loadDeveloperKeys();
+    loadSpendingPolicies();
+    loadAgentAuthorization();
   }
 }
 
@@ -430,8 +454,8 @@ function initWallet() {
           info.allAddresses || addressesToSave ? Promise.resolve() : loadWalletAddresses(),
           refreshWalletBalances(), // Also fetch balances when opening the Wallet tab by default
         ]);
-        ensurePlanWriteRetryLoop();
-        flushPendingPlanWrites().catch(() => {});
+        if (typeof ensurePlanWriteRetryLoop === 'function') ensurePlanWriteRetryLoop();
+        if (typeof flushPendingPlanWrites === 'function') flushPendingPlanWrites().catch(() => {});
         render();
       } catch (err) {
         showToast('Auth failed: ' + err.message, 'error');
@@ -1453,7 +1477,7 @@ function renderLogin() {
 }
 
 function renderNav() {
-  var labels = { wallet: T('wallet'), accounts: 'Linked Accounts', protection: T('protection'), portfolio: 'Portfolio', claim: T('claim'), profile: T('profile') || 'Profile', settings: T('settings'), activities: 'Activities' };
+  var labels = { wallet: T('wallet'), accounts: 'Linked Accounts', protection: T('protection'), portfolio: 'Portfolio', claim: T('claim'), profile: T('profile') || 'Profile', settings: T('settings'), activities: 'Activities', developers: 'Developers' };
   const items = PAGES.map((p) => {
     var label = labels[p];
     if (label === p) label = p.charAt(0).toUpperCase() + p.slice(1);
@@ -3016,6 +3040,13 @@ function renderVaultTab() {
 function renderWalletActivities() {
   var items = state.activities || [];
   var loading = state.activitiesLoading;
+  var perPage = state.activitiesPerPage || 20;
+  var totalPages = Math.max(1, Math.ceil(items.length / perPage));
+  if (state.activitiesPage >= totalPages) state.activitiesPage = totalPages - 1;
+  if (state.activitiesPage < 0) state.activitiesPage = 0;
+  var page = state.activitiesPage;
+  var start = page * perPage;
+  var pageItems = items.slice(start, start + perPage);
 
   var rows = '';
   if (loading && items.length === 0) {
@@ -3023,8 +3054,8 @@ function renderWalletActivities() {
   } else if (items.length === 0) {
     rows = '<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--text-muted);">No activities yet. Actions like login, deposit, harvest, and redeem will appear here.</td></tr>';
   } else {
-    for (var i = 0; i < items.length; i++) {
-      var a = items[i];
+    for (var i = 0; i < pageItems.length; i++) {
+      var a = pageItems[i];
       var typeLabel = activityTypeLabel(a.type);
       var typeIcon = activityTypeIcon(a.type);
       var amountStr = a.amount ? (parseFloat(a.amount).toFixed(4) + ' ' + (a.asset || '')) : (a.detail ? esc(a.detail) : '\u2014');
@@ -3052,6 +3083,22 @@ function renderWalletActivities() {
     }
   }
 
+  // Pagination controls
+  var paginationHtml = '';
+  if (items.length > perPage) {
+    var showing = items.length === 0 ? '0' : ((start + 1) + '\u2013' + Math.min(start + perPage, items.length));
+    paginationHtml = '<div style="display:flex;align-items:center;justify-content:space-between;margin-top:16px;font-size:13px;color:var(--text-muted);">' +
+      '<span>' + showing + ' of ' + items.length + '</span>' +
+      '<div style="display:flex;gap:4px;align-items:center;">' +
+      '<button class="btn btn-secondary" data-activities-page="0" style="font-size:12px;padding:4px 8px;"' + (page === 0 ? ' disabled' : '') + '>&laquo;</button>' +
+      '<button class="btn btn-secondary" data-activities-page="' + (page - 1) + '" style="font-size:12px;padding:4px 10px;"' + (page === 0 ? ' disabled' : '') + '>Prev</button>' +
+      '<span style="padding:0 8px;">Page ' + (page + 1) + ' / ' + totalPages + '</span>' +
+      '<button class="btn btn-secondary" data-activities-page="' + (page + 1) + '" style="font-size:12px;padding:4px 10px;"' + (page >= totalPages - 1 ? ' disabled' : '') + '>Next</button>' +
+      '<button class="btn btn-secondary" data-activities-page="' + (totalPages - 1) + '" style="font-size:12px;padding:4px 8px;"' + (page >= totalPages - 1 ? ' disabled' : '') + '>&raquo;</button>' +
+      '</div>' +
+      '</div>';
+  }
+
   return '<div class="card" style="padding:20px;">' +
     '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">' +
     '<h3 style="margin:0;">Activities</h3>' +
@@ -3069,6 +3116,7 @@ function renderWalletActivities() {
     '<tbody>' + rows + '</tbody>' +
     '</table>' +
     '</div>' +
+    paginationHtml +
     '</div>';
 }
 
@@ -4068,6 +4116,357 @@ function renderActivity() {
   `;
 }
 
+// ─── Developers Tab (API Keys for MCP / Agent integration) ───
+
+const DEVELOPER_SECTIONS = [
+  { key: 'api-keys', label: 'API Keys' },
+  { key: 'spending-policies', label: 'Spending Policies' },
+  { key: 'agent-authorization', label: 'Agent Authorization' },
+];
+
+async function loadDeveloperKeys() {
+  state.developerKeysLoading = true;
+  render();
+  try {
+    const headers = await getAuthHeadersAsync();
+    const resp = await fetch(`${API_BASE}/me/developer-keys`, { headers });
+    if (resp.ok) {
+      const data = await resp.json();
+      state.developerKeys = data.keys || [];
+    }
+  } catch (err) {
+    console.error('[developers] Failed to load keys:', err);
+  }
+  state.developerKeysLoading = false;
+  render();
+}
+
+async function loadSpendingPolicies() {
+  state.spendingPoliciesLoading = true;
+  render();
+  try {
+    const headers = await getAuthHeadersAsync();
+    const resp = await fetch(`${API_BASE}/me/spending-policies`, { headers });
+    if (resp.ok) {
+      const data = await resp.json();
+      state.spendingPolicies = data.policies || [];
+    }
+  } catch (err) {
+    console.error('[developers] Failed to load policies:', err);
+  }
+  state.spendingPoliciesLoading = false;
+  render();
+}
+
+async function loadAgentAuthorization() {
+  state.agentAuthLoading = true;
+  render();
+  try {
+    const headers = await getAuthHeadersAsync();
+    const resp = await fetch(`${API_BASE}/vault/agent-authorization`, { headers });
+    if (resp.ok) {
+      state.agentAuth = await resp.json();
+    }
+  } catch (err) {
+    console.error('[developers] Failed to load agent authorization:', err);
+  }
+  state.agentAuthLoading = false;
+  render();
+}
+
+function renderAgentAuthorization() {
+  if (state.agentAuthLoading) return '<div style="padding:24px;color:#aaa;">Loading authorization status...</div>';
+  const auth = state.agentAuth;
+  if (!auth || !auth.configured) {
+    const errMsg = auth?.error || 'Operator not configured. Set RELEASE_ATTESTATION_RELAYER_PRIVATE_KEY on the server.';
+    return '<div style="padding:24px;color:#f87171;">' + esc(errMsg) + '</div>';
+  }
+
+  const usdcAllowance = parseFloat(auth.usdc_allowance || '0');
+  const sharesAllowance = parseFloat(auth.shares_allowance || '0');
+  const symbol = auth.underlying_symbol || 'USDC';
+  const hasAllowance = usdcAllowance > 0 || sharesAllowance > 0;
+
+  // Suggested amounts from spending policies
+  let suggestWeekly = '';
+  let suggestMonthly = '';
+  if (state.spendingPolicies && state.spendingPolicies.length > 0) {
+    const p = state.spendingPolicies[0].conditions || {};
+    suggestWeekly = p.weekly_limit || '';
+    suggestMonthly = p.monthly_limit || '';
+  }
+
+  const keyCount = state.developerKeys ? state.developerKeys.length : 0;
+  const policyCount = state.spendingPolicies ? state.spendingPolicies.length : 0;
+
+  // Tooltip content (shown/hidden via JS)
+  const tooltipId = 'agent-auth-tooltip';
+
+  return `
+    <div style="padding:24px 0;">
+      <div style="background:#0d1117;border:1px solid #2a2a4a;border-radius:12px;padding:20px;margin-bottom:20px;position:relative;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+          <div style="color:#e2e8f0;font-weight:600;">Remaining On-Chain Allowance</div>
+          <span id="agent-auth-help-btn" style="cursor:pointer;width:22px;height:22px;border-radius:50%;background:#2a2a4a;display:inline-flex;align-items:center;justify-content:center;font-size:13px;color:#888;font-weight:700;" title="How it works">\u003F</span>
+        </div>
+        <div id="${tooltipId}" style="display:none;background:#1c1917;border:1px solid #78350f;border-radius:10px;padding:14px;margin-bottom:16px;">
+          <div style="color:#fbbf24;font-size:12px;line-height:1.7;">
+            <strong>Two-layer security model</strong><br>
+            <span style="color:#4ade80;">On-chain</span> \u2014 You approve a total USDC spending cap. This is a hard limit enforced by the blockchain, shared across <strong>all</strong> your API keys.<br>
+            <span style="color:#60a5fa;">App-layer</span> \u2014 Each key has its own <a href="#" data-developer-section="spending-policies" style="color:#60a5fa;text-decoration:underline;">Spending Policy</a> (per-tx / daily / weekly / monthly caps).<br>
+            <span style="color:#f87171;">When the allowance runs out, all agents stop. You must review and re-approve.</span>
+          </div>
+        </div>
+        <div style="display:flex;gap:24px;flex-wrap:wrap;">
+          <div style="flex:1;min-width:180px;">
+            <div style="font-size:12px;color:#888;margin-bottom:4px;">Deposit</div>
+            <div style="display:flex;align-items:baseline;gap:6px;">
+              <div style="font-size:28px;font-weight:700;color:${usdcAllowance > 0 ? '#4ade80' : '#f87171'};">
+                ${usdcAllowance.toFixed(2)}
+              </div>
+              <span style="font-size:13px;color:#888;">USDC</span>
+            </div>
+          </div>
+          <div style="flex:1;min-width:180px;">
+            <div style="font-size:12px;color:#888;margin-bottom:4px;">Redeem</div>
+            <div style="display:flex;align-items:baseline;gap:6px;">
+              <div style="font-size:28px;font-weight:700;color:${sharesAllowance > 0 ? '#4ade80' : '#f87171'};">
+                ${sharesAllowance.toFixed(2)}
+              </div>
+              <span style="font-size:13px;color:#888;">shares</span>
+            </div>
+          </div>
+        </div>
+        <div style="font-size:12px;color:#666;margin-top:12px;">
+          Applies to all ${keyCount} API key${keyCount !== 1 ? 's' : ''} \u00b7 ${policyCount} spending polic${policyCount !== 1 ? 'ies' : 'y'}
+        </div>
+      </div>
+
+      <div style="background:#0d1117;border:1px solid #2a2a4a;border-radius:12px;padding:20px;margin-bottom:20px;">
+        <div style="color:#e2e8f0;font-weight:600;margin-bottom:4px;">Set Allowance</div>
+        <div style="margin-bottom:12px;font-size:12px;color:#888;">
+          We recommend setting this to your weekly or monthly policy limit and reviewing periodically.
+        </div>
+        <div style="margin-bottom:12px;">
+          <div style="display:inline-flex;align-items:center;border:1px solid #333;border-radius:8px;background:#111;overflow:hidden;">
+            <input type="text" id="agent-auth-amount" value="${esc(state.agentAuthAmount)}"
+              placeholder="e.g. 500" style="width:160px;padding:8px 12px;border:none;background:transparent;color:#fff;font-size:14px;outline:none;" />
+            <span style="padding:8px 12px;color:#888;font-size:13px;background:#1a1a2e;border-left:1px solid #333;user-select:none;">USDC</span>
+          </div>
+          ${suggestWeekly ? `<button class="btn-sm" data-agent-auth-suggest="${esc(suggestWeekly)}" style="margin-left:8px;font-size:12px;">Weekly (${esc(suggestWeekly)})</button>` : ''}
+          ${suggestMonthly ? `<button class="btn-sm" data-agent-auth-suggest="${esc(suggestMonthly)}" style="margin-left:4px;font-size:12px;">Monthly (${esc(suggestMonthly)})</button>` : ''}
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button id="agent-auth-approve-deposit" class="btn btn-primary" ${state.agentAuthBusy ? 'disabled' : ''} style="font-size:13px;">
+            ${state.agentAuthBusy ? 'Approving...' : 'Approve for Deposits'}
+          </button>
+          <button id="agent-auth-approve-redeem" class="btn btn-primary" ${state.agentAuthBusy ? 'disabled' : ''} style="font-size:13px;">
+            ${state.agentAuthBusy ? 'Approving...' : 'Approve for Redeems'}
+          </button>
+          <button id="agent-auth-approve-both" class="btn" ${state.agentAuthBusy ? 'disabled' : ''} style="font-size:13px;background:#7c3aed;color:#fff;">
+            ${state.agentAuthBusy ? 'Approving...' : 'Approve Both'}
+          </button>
+        </div>
+      </div>
+
+      <details style="margin-bottom:20px;">
+        <summary style="color:#888;font-size:12px;cursor:pointer;">Technical details</summary>
+        <div style="background:#1a1a2e;border:1px solid #2a2a4a;border-radius:8px;padding:12px;margin-top:8px;">
+          <div style="font-size:12px;color:#888;margin-bottom:4px;">Yault Operator Address</div>
+          <div style="font-family:monospace;font-size:12px;color:#ccc;word-break:break-all;margin-bottom:8px;">
+            ${esc(auth.operator_address)}
+          </div>
+          <div style="font-size:11px;color:#666;">
+            Chain ID: ${esc(auth.chain_id)} &nbsp;|&nbsp; ${esc(symbol)} (${auth.underlying_decimals} decimals)
+          </div>
+        </div>
+      </details>
+    </div>
+  `;
+}
+
+function renderDeveloperApiKeys() {
+  const newKeyHtml = state.developerNewKeyResult ? `
+    <div class="alert alert-success" style="word-break:break-all;margin-bottom:16px;">
+      <strong>New API Key Created</strong><br>
+      <code style="font-size:13px;user-select:all;">${esc(state.developerNewKeyResult.key)}</code>
+      <p style="margin:8px 0 0;color:var(--text-muted);font-size:12px;">
+        Copy this key now — it will not be shown again.
+      </p>
+      <button class="btn btn-secondary" data-dev-dismiss-key style="margin-top:8px;">Dismiss</button>
+    </div>
+  ` : '';
+
+  const keysHtml = state.developerKeysLoading
+    ? '<p style="color:var(--text-muted);">Loading...</p>'
+    : state.developerKeys.length === 0
+      ? '<p style="color:var(--text-muted);">No API keys yet. Create one to integrate with MCP or external agents.</p>'
+      : `<table class="table" style="width:100%;"><thead><tr>
+          <th>Key</th><th>Label</th><th>Policy</th><th>Created</th><th>Last Used</th><th></th>
+        </tr></thead><tbody>${state.developerKeys.map((k) => {
+          const pol = k.policy_id ? state.spendingPolicies.find((p) => p.policy_id === k.policy_id) : null;
+          return `<tr>
+          <td><code>${esc(k.prefix)}...</code></td>
+          <td>${esc(k.label)}</td>
+          <td>
+            ${pol ? '<span style="color:var(--success);">' + esc(pol.label) + '</span>' : '<span style="color:var(--warning);">None</span>'}
+            <button class="btn btn-secondary" data-dev-bind-policy="${esc(k.key_id)}" style="padding:2px 8px;font-size:11px;margin-left:4px;">${k.policy_id ? 'Change' : 'Assign'}</button>
+          </td>
+          <td>${new Date(k.created_at).toLocaleDateString()}</td>
+          <td>${k.last_used_at ? new Date(k.last_used_at).toLocaleDateString() : '—'}</td>
+          <td><button class="btn btn-danger" data-dev-revoke="${esc(k.key_id)}" style="padding:4px 10px;font-size:12px;">Revoke</button></td>
+        </tr>`;
+        }).join('')}</tbody></table>`;
+
+  return `
+    <h2 style="margin-bottom:16px;">API Keys</h2>
+    ${newKeyHtml}
+    <div class="card" style="margin-bottom:16px;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
+        <input type="text" class="form-input" placeholder="Key label (e.g. My MCP Server)" value="${esc(state.developerNewKeyLabel)}" data-dev-key-label style="flex:1;max-width:300px;" />
+        <button class="btn btn-primary" data-dev-create-key>Generate Key</button>
+      </div>
+      ${keysHtml}
+    </div>
+    <div class="card" style="background:var(--bg);border:1px solid var(--border);">
+      <h3 style="margin-bottom:8px;">Usage</h3>
+      <p style="color:var(--text-muted);font-size:13px;margin-bottom:8px;">Use your API key with the Yault MCP Server for Claude Desktop, Claude Code, or any MCP-compatible client:</p>
+      <pre style="background:var(--surface);padding:12px;border-radius:var(--radius);font-size:12px;overflow-x:auto;white-space:pre-wrap;">{
+  "mcpServers": {
+    "yault": {
+      "command": "npx",
+      "args": ["@yallet/aesp-mcp"],
+      "env": {
+        "YAULT_API_KEY": "your-key-here"
+      }
+    }
+  }
+}</pre>
+    </div>
+  `;
+}
+
+function renderSpendingPolicies() {
+  const allOps = ['deposit', 'redeem', 'transfer', 'create_allowance'];
+
+  const formHtml = state.policyFormVisible ? (() => {
+    const f = state.policyForm;
+    const isEdit = !!state.policyFormEdit;
+    return `
+      <div class="card" style="margin-bottom:16px;border:2px solid var(--primary);">
+        <h3>${isEdit ? 'Edit' : 'Create'} Spending Policy</h3>
+        <div style="display:grid;gap:12px;margin-top:12px;">
+          <div>
+            <label class="form-label">Label</label>
+            <input type="text" class="form-input" data-policy-field="label" value="${esc(f.label)}" placeholder="e.g. Conservative Agent Policy" />
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+            <div>
+              <label class="form-label">Max per Transaction (USDC)</label>
+              <input type="text" class="form-input" data-policy-field="max_per_transaction" value="${esc(f.max_per_transaction)}" placeholder="e.g. 100" />
+            </div>
+            <div>
+              <label class="form-label">Daily Limit (USDC)</label>
+              <input type="text" class="form-input" data-policy-field="daily_limit" value="${esc(f.daily_limit)}" placeholder="e.g. 500" />
+            </div>
+            <div>
+              <label class="form-label">Weekly Limit (USDC)</label>
+              <input type="text" class="form-input" data-policy-field="weekly_limit" value="${esc(f.weekly_limit)}" placeholder="e.g. 2000" />
+            </div>
+            <div>
+              <label class="form-label">Monthly Limit (USDC)</label>
+              <input type="text" class="form-input" data-policy-field="monthly_limit" value="${esc(f.monthly_limit)}" placeholder="e.g. 5000" />
+            </div>
+          </div>
+          <div>
+            <label class="form-label">Allowed Addresses (comma-separated, leave empty for any)</label>
+            <input type="text" class="form-input" data-policy-field="allowed_addresses" value="${esc(f.allowed_addresses)}" placeholder="0x1234..., 0xabcd..." />
+          </div>
+          <div>
+            <label class="form-label">Allowed Operations</label>
+            <div style="display:flex;gap:16px;flex-wrap:wrap;">
+              ${allOps.map((op) => `
+                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;">
+                  <input type="checkbox" data-policy-op="${op}" ${f.allowed_operations.includes(op) ? 'checked' : ''} />
+                  ${esc(op)}
+                </label>
+              `).join('')}
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;">
+            <button class="btn btn-primary" data-policy-submit>${isEdit ? 'Update' : 'Create'}</button>
+            <button class="btn btn-secondary" data-policy-cancel>Cancel</button>
+          </div>
+        </div>
+      </div>
+    `;
+  })() : '';
+
+  const policiesHtml = state.spendingPoliciesLoading
+    ? '<p style="color:var(--text-muted);">Loading...</p>'
+    : state.spendingPolicies.length === 0
+      ? '<p style="color:var(--text-muted);">No spending policies yet. Create one to control what your API keys can do.</p>'
+      : `<table class="table" style="width:100%;"><thead><tr>
+          <th>Label</th><th>Per Tx</th><th>Daily</th><th>Weekly</th><th>Monthly</th><th>Keys</th><th></th>
+        </tr></thead><tbody>${state.spendingPolicies.map((p) => `<tr>
+          <td>${esc(p.label)}</td>
+          <td>${p.conditions.max_per_transaction || '\u2014'}</td>
+          <td>${p.conditions.daily_limit || '\u2014'}</td>
+          <td>${p.conditions.weekly_limit || '\u2014'}</td>
+          <td>${p.conditions.monthly_limit || '\u2014'}</td>
+          <td>${p.bound_keys_count || 0}</td>
+          <td>
+            <button class="btn btn-secondary" data-policy-edit="${esc(p.policy_id)}" style="padding:4px 10px;font-size:12px;">Edit</button>
+            <button class="btn btn-danger" data-policy-delete="${esc(p.policy_id)}" style="padding:4px 10px;font-size:12px;">Delete</button>
+          </td>
+        </tr>`).join('')}</tbody></table>`;
+
+  return `
+    <h2 style="margin-bottom:16px;">Spending Policies</h2>
+    <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px;">
+      Spending policies control what agent API keys can do. Each key must have a policy assigned before it can perform vault operations.
+      Set per-transaction, daily, weekly, and monthly USDC limits.
+    </p>
+    ${formHtml}
+    <div style="margin-bottom:16px;">
+      <button class="btn btn-primary" data-policy-create>Create Policy</button>
+    </div>
+    <div class="card">
+      ${policiesHtml}
+    </div>
+  `;
+}
+
+function renderPolicyBindModal() {
+  if (!state.policyBindModalKeyId) return '';
+  const key = state.developerKeys.find((k) => k.key_id === state.policyBindModalKeyId);
+  if (!key) return '';
+  return `
+    <div style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:1000;display:flex;align-items:center;justify-content:center;" data-policy-bind-dismiss>
+      <div class="card" style="max-width:420px;width:90%;position:relative;" onclick="event.stopPropagation()">
+        <h3 style="margin-bottom:12px;">Assign Policy to Key</h3>
+        <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px;">${esc(key.label)} (${esc(key.prefix)}...)</p>
+        <select class="form-input" data-policy-bind-select style="margin-bottom:12px;">
+          <option value="">No policy (blocks agent operations)</option>
+          ${state.spendingPolicies.map((p) => `
+            <option value="${esc(p.policy_id)}" ${key.policy_id === p.policy_id ? 'selected' : ''}>
+              ${esc(p.label)}${p.conditions.daily_limit ? ' (daily: ' + p.conditions.daily_limit + ')' : ''}
+            </option>
+          `).join('')}
+        </select>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-primary" data-policy-bind-confirm>Save</button>
+          <button class="btn btn-secondary" data-policy-bind-dismiss>Cancel</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderDevelopers() {
+  return '';
+}
+
 const SETTINGS_SECTIONS = [
   { key: 'wallet', label: 'Connected Wallet' },
   { key: 'account', label: 'Account' },
@@ -4313,6 +4712,7 @@ function render() {
     case 'activities': content = renderWalletActivities(); break;
     case 'profile': content = renderProfileContent(); break;
     case 'settings': content = renderSettings(); break;
+    case 'developers': content = renderDevelopers(); break;
     default: content = renderWallet();
   }
 
@@ -4368,6 +4768,15 @@ function render() {
       state.settingsSection === 'account' ? renderSettingsAccountSection() :
       renderSettingsKYCSection();
     app.innerHTML = renderPageWithSidebar(SETTINGS_SECTIONS, 'settings-section', state.settingsSection, sectionContent);
+  } else if (state.page === 'developers') {
+    const devSection = state.developerSection || 'api-keys';
+    const devContent = devSection === 'agent-authorization' ? renderAgentAuthorization()
+      : devSection === 'spending-policies' ? renderSpendingPolicies()
+      : renderDeveloperApiKeys();
+    app.innerHTML = renderPageWithSidebar(DEVELOPER_SECTIONS, 'developer-section', devSection, devContent);
+    if (state.policyBindModalKeyId) {
+      app.insertAdjacentHTML('beforeend', renderPolicyBindModal());
+    }
   } else {
     app.innerHTML = `
       <header class="app-header" style="display:flex;align-items:center;margin-bottom:16px;">${renderNav()}</header>
@@ -6316,9 +6725,21 @@ function attachAppEvents() {
   var btnRefreshAct = document.getElementById('btnRefreshActivities');
   if (btnRefreshAct) {
     btnRefreshAct.addEventListener('click', function () {
+      state.activitiesPage = 0;
       loadActivities();
     });
   }
+
+  // Activities pagination
+  app.querySelectorAll('[data-activities-page]').forEach(function (el) {
+    el.addEventListener('click', function () {
+      var p = parseInt(el.dataset.activitiesPage, 10);
+      if (!isNaN(p) && p >= 0) {
+        state.activitiesPage = p;
+        render();
+      }
+    });
+  });
 
   // Accounts left sidebar (Accounts / Invite)
   app.querySelectorAll('[data-accounts-section]').forEach((el) => {
@@ -6343,6 +6764,371 @@ function attachAppEvents() {
       render();
     });
   });
+
+  // Developer tab: API Key management
+  const devKeyLabelInput = app.querySelector('[data-dev-key-label]');
+  if (devKeyLabelInput) {
+    devKeyLabelInput.addEventListener('input', (e) => { state.developerNewKeyLabel = e.target.value; });
+  }
+  app.querySelectorAll('[data-dev-create-key]').forEach((el) => {
+    el.addEventListener('click', async () => {
+      try {
+        const headers = await getAuthHeadersAsync();
+        headers['Content-Type'] = 'application/json';
+        const resp = await fetch(`${API_BASE}/me/developer-keys`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ label: state.developerNewKeyLabel || 'Default' }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+          state.developerNewKeyResult = { key: data.key, key_id: data.key_id, prefix: data.prefix };
+          state.developerNewKeyLabel = '';
+          await loadDeveloperKeys();
+        } else {
+          state.error = data.error || 'Failed to create key';
+          render();
+        }
+      } catch (err) {
+        state.error = err.message;
+        render();
+      }
+    });
+  });
+  app.querySelectorAll('[data-dev-revoke]').forEach((el) => {
+    el.addEventListener('click', async () => {
+      const keyId = el.dataset.devRevoke;
+      if (!confirm('Revoke this API key? Any integrations using it will stop working.')) return;
+      try {
+        const headers = await getAuthHeadersAsync();
+        const resp = await fetch(`${API_BASE}/me/developer-keys/${keyId}`, { method: 'DELETE', headers });
+        if (resp.ok) {
+          await loadDeveloperKeys();
+        } else {
+          const data = await resp.json();
+          state.error = data.error || 'Failed to revoke key';
+          render();
+        }
+      } catch (err) {
+        state.error = err.message;
+        render();
+      }
+    });
+  });
+  app.querySelectorAll('[data-dev-dismiss-key]').forEach((el) => {
+    el.addEventListener('click', () => {
+      state.developerNewKeyResult = null;
+      render();
+    });
+  });
+
+  // Developer tab: sidebar navigation
+  app.querySelectorAll('[data-developer-section]').forEach((el) => {
+    el.addEventListener('click', () => {
+      state.developerSection = el.dataset.developerSection;
+      render();
+      if (state.developerSection === 'agent-authorization' && !state.agentAuth && !state.agentAuthLoading) {
+        loadAgentAuthorization();
+      }
+    });
+  });
+
+  // Developer tab: bind policy to key
+  app.querySelectorAll('[data-dev-bind-policy]').forEach((el) => {
+    el.addEventListener('click', () => {
+      state.policyBindModalKeyId = el.dataset.devBindPolicy;
+      render();
+    });
+  });
+
+  // Spending policy: create button
+  app.querySelectorAll('[data-policy-create]').forEach((el) => {
+    el.addEventListener('click', () => {
+      state.policyFormVisible = true;
+      state.policyFormEdit = null;
+      state.policyForm = {
+        label: '', max_per_transaction: '', daily_limit: '',
+        weekly_limit: '', monthly_limit: '', allowed_addresses: '',
+        allowed_operations: ['deposit', 'redeem', 'transfer', 'create_allowance'],
+      };
+      render();
+    });
+  });
+
+  // Spending policy: form field inputs
+  app.querySelectorAll('[data-policy-field]').forEach((el) => {
+    el.addEventListener('input', (e) => {
+      state.policyForm[el.dataset.policyField] = e.target.value;
+    });
+  });
+
+  // Spending policy: operation checkboxes
+  app.querySelectorAll('[data-policy-op]').forEach((el) => {
+    el.addEventListener('change', () => {
+      var op = el.dataset.policyOp;
+      if (el.checked && !state.policyForm.allowed_operations.includes(op)) {
+        state.policyForm.allowed_operations.push(op);
+      } else if (!el.checked) {
+        state.policyForm.allowed_operations = state.policyForm.allowed_operations.filter(function(o) { return o !== op; });
+      }
+    });
+  });
+
+  // Spending policy: cancel form
+  app.querySelectorAll('[data-policy-cancel]').forEach((el) => {
+    el.addEventListener('click', () => {
+      state.policyFormVisible = false;
+      state.policyFormEdit = null;
+      render();
+    });
+  });
+
+  // Spending policy: submit form (create or update)
+  app.querySelectorAll('[data-policy-submit]').forEach((el) => {
+    el.addEventListener('click', async () => {
+      var f = state.policyForm;
+      var body = {
+        label: f.label,
+        conditions: {
+          max_per_transaction: f.max_per_transaction || null,
+          daily_limit: f.daily_limit || null,
+          weekly_limit: f.weekly_limit || null,
+          monthly_limit: f.monthly_limit || null,
+          allowed_addresses: f.allowed_addresses
+            ? f.allowed_addresses.split(',').map(function(s) { return s.trim(); }).filter(Boolean)
+            : [],
+          allowed_operations: f.allowed_operations,
+        },
+      };
+      try {
+        var headers = await getAuthHeadersAsync();
+        headers['Content-Type'] = 'application/json';
+        var isEdit = !!state.policyFormEdit;
+        var url = isEdit
+          ? API_BASE + '/me/spending-policies/' + state.policyFormEdit
+          : API_BASE + '/me/spending-policies';
+        var resp = await fetch(url, {
+          method: isEdit ? 'PUT' : 'POST',
+          headers: headers,
+          body: JSON.stringify(body),
+        });
+        if (resp.ok) {
+          state.policyFormVisible = false;
+          state.policyFormEdit = null;
+          showToast(isEdit ? 'Policy updated' : 'Policy created', 'success');
+          await loadSpendingPolicies();
+        } else {
+          var data = await resp.json();
+          state.error = data.error || 'Failed to save policy';
+          render();
+        }
+      } catch (err) {
+        state.error = err.message;
+        render();
+      }
+    });
+  });
+
+  // Spending policy: edit
+  app.querySelectorAll('[data-policy-edit]').forEach((el) => {
+    el.addEventListener('click', () => {
+      var p = state.spendingPolicies.find(function(pol) { return pol.policy_id === el.dataset.policyEdit; });
+      if (!p) return;
+      state.policyFormVisible = true;
+      state.policyFormEdit = p.policy_id;
+      state.policyForm = {
+        label: p.label || '',
+        max_per_transaction: p.conditions.max_per_transaction || '',
+        daily_limit: p.conditions.daily_limit || '',
+        weekly_limit: p.conditions.weekly_limit || '',
+        monthly_limit: p.conditions.monthly_limit || '',
+        allowed_addresses: (p.conditions.allowed_addresses || []).join(', '),
+        allowed_operations: p.conditions.allowed_operations || [],
+      };
+      render();
+    });
+  });
+
+  // Spending policy: delete
+  app.querySelectorAll('[data-policy-delete]').forEach((el) => {
+    el.addEventListener('click', async () => {
+      if (!confirm('Delete this spending policy?')) return;
+      try {
+        var headers = await getAuthHeadersAsync();
+        var resp = await fetch(API_BASE + '/me/spending-policies/' + el.dataset.policyDelete, {
+          method: 'DELETE', headers: headers
+        });
+        if (resp.ok) {
+          showToast('Policy deleted', 'success');
+          await loadSpendingPolicies();
+        } else {
+          var data = await resp.json();
+          state.error = data.error || 'Failed to delete policy';
+          render();
+        }
+      } catch (err) {
+        state.error = err.message;
+        render();
+      }
+    });
+  });
+
+  // Policy bind modal: confirm
+  app.querySelectorAll('[data-policy-bind-confirm]').forEach((el) => {
+    el.addEventListener('click', async () => {
+      var select = document.querySelector('[data-policy-bind-select]');
+      var policyId = select ? select.value : '';
+      try {
+        var headers = await getAuthHeadersAsync();
+        headers['Content-Type'] = 'application/json';
+        var resp = await fetch(API_BASE + '/me/developer-keys/' + state.policyBindModalKeyId + '/policy', {
+          method: 'PUT',
+          headers: headers,
+          body: JSON.stringify({ policy_id: policyId || null }),
+        });
+        if (resp.ok) {
+          state.policyBindModalKeyId = null;
+          showToast('Policy assigned', 'success');
+          await loadDeveloperKeys();
+        } else {
+          var data = await resp.json();
+          state.error = data.error || 'Failed to assign policy';
+          render();
+        }
+      } catch (err) {
+        state.error = err.message;
+        render();
+      }
+    });
+  });
+
+  // Policy bind modal: dismiss
+  app.querySelectorAll('[data-policy-bind-dismiss]').forEach((el) => {
+    el.addEventListener('click', () => {
+      state.policyBindModalKeyId = null;
+      render();
+    });
+  });
+
+  // Agent authorization: amount input
+  // Agent auth: help tooltip toggle
+  var agentHelpBtn = document.getElementById('agent-auth-help-btn');
+  if (agentHelpBtn) {
+    agentHelpBtn.addEventListener('click', () => {
+      var tip = document.getElementById('agent-auth-tooltip');
+      if (tip) tip.style.display = tip.style.display === 'none' ? 'block' : 'none';
+    });
+  }
+
+  var agentAuthAmountInput = document.getElementById('agent-auth-amount');
+  if (agentAuthAmountInput) {
+    agentAuthAmountInput.addEventListener('input', (e) => {
+      state.agentAuthAmount = e.target.value;
+    });
+  }
+
+  // Agent authorization: suggest buttons
+  app.querySelectorAll('[data-agent-auth-suggest]').forEach((el) => {
+    el.addEventListener('click', () => {
+      state.agentAuthAmount = el.dataset.agentAuthSuggest;
+      var inp = document.getElementById('agent-auth-amount');
+      if (inp) inp.value = state.agentAuthAmount;
+    });
+  });
+
+  // Agent authorization: approve buttons
+  var approveDepositBtn = document.getElementById('agent-auth-approve-deposit');
+  var approveRedeemBtn = document.getElementById('agent-auth-approve-redeem');
+  var approveBothBtn = document.getElementById('agent-auth-approve-both');
+
+  async function doAgentApprove(mode) {
+    var amount = state.agentAuthAmount;
+    if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) {
+      showToast('Please enter a valid amount', 'error');
+      return;
+    }
+    var auth = state.agentAuth;
+    if (!auth || !auth.configured) return;
+
+    var provider = (window.yallet || window.ethereum);
+    if (!provider) {
+      showToast('No wallet detected. Connect Yallet or MetaMask.', 'error');
+      return;
+    }
+
+    var decimals = auth.underlying_decimals || 6;
+    // String-based decimal → wei conversion to avoid floating-point precision loss.
+    // Splits "123.456" into integer + fractional parts, pads/truncates to `decimals` places.
+    var amountWei = (function(amtStr, dec) {
+      var parts = amtStr.split('.');
+      var intPart = parts[0] || '0';
+      var fracPart = (parts[1] || '').slice(0, dec).padEnd(dec, '0');
+      var raw = intPart + fracPart;
+      // Strip leading zeros but keep at least '0'
+      raw = raw.replace(/^0+/, '') || '0';
+      return '0x' + BigInt(raw).toString(16);
+    })(String(amount), decimals);
+    var walletAddr = state.auth?.pubkey;
+    var from = walletAddr ? (walletAddr.startsWith('0x') ? walletAddr : '0x' + walletAddr) : null;
+    if (!from) {
+      showToast('Wallet address not found', 'error');
+      return;
+    }
+
+    var chainIdHex = '0x' + Number(auth.chain_id).toString(16);
+    try {
+      await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: chainIdHex }] });
+    } catch (e) {
+      // 4902 = chain not added to wallet (expected in some cases)
+      // 4001 = user rejected the switch
+      // Any failure here means we may be on the wrong chain — abort to avoid
+      // sending approve tx on wrong network (gas loss, wrong allowance state).
+      console.error('[agentAuth] chain switch failed — aborting approve:', e?.message);
+      showToast('Please switch to chain ' + auth.chain_id + ' in your wallet before approving.', 'error');
+      return;
+    }
+
+    var ERC20_APPROVE_SIG = '0x095ea7b3'; // approve(address,uint256)
+    function buildApproveTx(tokenAddr, spender, amtHex) {
+      var spenderPadded = spender.replace('0x', '').toLowerCase().padStart(64, '0');
+      var amtPadded = amtHex.replace('0x', '').padStart(64, '0');
+      return {
+        from: from,
+        to: tokenAddr,
+        data: ERC20_APPROVE_SIG + spenderPadded + amtPadded,
+        value: '0x0',
+        chainId: chainIdHex,
+      };
+    }
+
+    state.agentAuthBusy = true;
+    render();
+
+    try {
+      if (mode === 'deposit' || mode === 'both') {
+        var depositTx = buildApproveTx(auth.usdc_address, auth.operator_address, amountWei);
+        await provider.request({ method: 'eth_sendTransaction', params: [depositTx] });
+        showToast('Deposit allowance approved', 'success');
+      }
+      if (mode === 'redeem' || mode === 'both') {
+        var redeemTx = buildApproveTx(auth.vault_address, auth.operator_address, amountWei);
+        await provider.request({ method: 'eth_sendTransaction', params: [redeemTx] });
+        showToast('Redeem allowance approved', 'success');
+      }
+      // Reload allowances from chain
+      await loadAgentAuthorization();
+    } catch (err) {
+      console.error('[agentAuth] Approve failed:', err);
+      showToast('Approve failed: ' + (err.message || err), 'error');
+    }
+
+    state.agentAuthBusy = false;
+    render();
+  }
+
+  if (approveDepositBtn) approveDepositBtn.addEventListener('click', () => doAgentApprove('deposit'));
+  if (approveRedeemBtn) approveRedeemBtn.addEventListener('click', () => doAgentApprove('redeem'));
+  if (approveBothBtn) approveBothBtn.addEventListener('click', () => doAgentApprove('both'));
 
   // Profile (Client): View / Edit mode
   app.querySelectorAll('[data-action="client-profile-edit"]').forEach((el) => {

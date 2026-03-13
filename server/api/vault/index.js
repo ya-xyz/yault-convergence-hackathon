@@ -26,6 +26,9 @@ const { getEVMChains } = require('../../config/chains');
 const vaultContract = require('../../services/vaultContract');
 const escrowContract = require('../../services/escrowContract');
 
+const { enforceAgentPolicy, recordAgentSpend, rollbackAgentSpend } = require('../../middleware/agentPolicy');
+const operatorExecutor = require('../../services/operatorExecutor');
+
 const router = Router();
 
 const hasVaultContract = () => !!(config.contracts && config.contracts.vaultAddress);
@@ -290,15 +293,57 @@ router.get('/balances/:address', dualAuthMiddleware, async (req, res) => {
   }
 });
 
+// ─── GET /agent-authorization ───
+
+router.get('/agent-authorization', dualAuthMiddleware, async (req, res) => {
+  const userAddress = req.auth.pubkey;
+  if (!userAddress || !isValidAddress(userAddress)) {
+    return res.status(400).json({ error: 'Valid wallet address required' });
+  }
+  try {
+    const auth = await operatorExecutor.getAgentAuthorization(userAddress);
+    res.json(auth);
+  } catch (err) {
+    console.error('[vault/agent-authorization] Error:', err.message);
+    res.status(500).json({ error: 'Failed to query agent authorization', detail: err.message });
+  }
+});
+
 // ─── POST /deposit ───
 
-router.post('/deposit', dualAuthMiddleware, async (req, res) => {
-  const { address, amount, asset } = req.body || {};
+router.post('/deposit', dualAuthMiddleware, enforceAgentPolicy({
+  operation: 'deposit',
+  getAmount: (req) => req.body?.amount === 'max' ? null : req.body?.amount,
+  getDestination: (req) => req.body?.address,
+}), async (req, res) => {
+  const { address, amount, asset, chain, vault_id } = req.body || {};
   if (!address || !isValidAddress(address)) {
     return res.status(400).json({ error: 'Valid address is required' });
   }
   if (!amount) {
     return res.status(400).json({ error: 'amount is required' });
+  }
+
+  // Reject if client specifies a chain or vault_id that doesn't match server config.
+  // The server only operates on a single chain/vault — silently ignoring mismatches
+  // would cause the transaction to execute on the wrong chain from the client's perspective.
+  if (chain) {
+    const serverChainId = String(config.contracts?.vaultChainId || '1');
+    if (String(chain) !== serverChainId) {
+      return res.status(400).json({
+        error: 'Chain mismatch',
+        detail: `This server operates on chain ${serverChainId}. Requested chain: ${chain}`,
+      });
+    }
+  }
+  if (vault_id) {
+    const serverVault = (config.contracts?.vaultAddress || '').toLowerCase();
+    if (serverVault && vault_id.toLowerCase().replace(/^0x/, '') !== serverVault.replace(/^0x/, '')) {
+      return res.status(400).json({
+        error: 'Vault mismatch',
+        detail: `This server operates vault ${serverVault}. Requested vault: ${vault_id}`,
+      });
+    }
   }
 
   const normalizedAddr = normalizeAddr(address);
@@ -325,11 +370,39 @@ router.post('/deposit', dualAuthMiddleware, async (req, res) => {
   }
 
   if (hasVaultContract()) {
+    // Agent operator execution: server signs and sends tx on behalf of user
+    if (req.auth?.walletType === 'agent') {
+      try {
+        const result = await operatorExecutor.executeDeposit(normalizedAddr, String(numAmount));
+        await recordAgentSpend(req).catch(() => {});
+        return res.json({
+          status: 'executed',
+          address: normalizedAddr,
+          amount: numAmount.toFixed(4),
+          tx_hash: result.txHash,
+          block_number: result.blockNumber,
+          shares_received: result.sharesReceived,
+          transfer_tx_hash: result.transferTxHash,
+          message: 'Deposit executed by operator on behalf of agent.',
+        });
+      } catch (err) {
+        console.error('[vault/deposit] Operator execution failed:', err.message);
+        // Rollback the pre-reserved spend since the operation failed
+        await rollbackAgentSpend(req).catch(() => {});
+        return res.status(502).json({
+          error: 'Operator execution failed',
+          detail: err.message,
+        });
+      }
+    }
+
     const receiver = normalizedAddr.startsWith('0x') ? normalizedAddr : '0x' + normalizedAddr;
     const tx = await vaultContract.buildDepositTx(config, String(numAmount), receiver);
     const assetAddress = await vaultContract.getAssetAddress(config);
     if (tx) {
       const underlyingDecimals = config?.contracts?.underlyingDecimals ?? 6;
+      // Note: no recordAgentSpend here — this path is only reached by non-agent (wallet-signed)
+      // requests. Agent requests are handled by the operator execution branch above.
       return res.json({
         status: 'pending_signature',
         address: normalizedAddr,
@@ -349,6 +422,7 @@ router.post('/deposit', dualAuthMiddleware, async (req, res) => {
   pos.updated_at = Date.now();
   await db.vaultPositions.create(normalizedAddr, pos);
 
+  await recordAgentSpend(req).catch(() => {});
   res.json({
     status: 'deposited',
     address: normalizedAddr,
@@ -361,13 +435,37 @@ router.post('/deposit', dualAuthMiddleware, async (req, res) => {
 
 // ─── POST /redeem ───
 
-router.post('/redeem', dualAuthMiddleware, async (req, res) => {
-  const { address, shares } = req.body || {};
+router.post('/redeem', dualAuthMiddleware, enforceAgentPolicy({
+  operation: 'redeem',
+  getAmount: (req) => req.body?.shares === 'max' ? null : req.body?.shares,
+  getDestination: (req) => req.body?.address,
+}), async (req, res) => {
+  const { address, shares, chain, vault_id } = req.body || {};
   if (!address || !isValidAddress(address)) {
     return res.status(400).json({ error: 'Valid address is required' });
   }
   if (!shares) {
     return res.status(400).json({ error: 'shares is required' });
+  }
+
+  // Reject chain/vault_id mismatches (same rationale as deposit)
+  if (chain) {
+    const serverChainId = String(config.contracts?.vaultChainId || '1');
+    if (String(chain) !== serverChainId) {
+      return res.status(400).json({
+        error: 'Chain mismatch',
+        detail: `This server operates on chain ${serverChainId}. Requested chain: ${chain}`,
+      });
+    }
+  }
+  if (vault_id) {
+    const serverVault = (config.contracts?.vaultAddress || '').toLowerCase();
+    if (serverVault && vault_id.toLowerCase().replace(/^0x/, '') !== serverVault.replace(/^0x/, '')) {
+      return res.status(400).json({
+        error: 'Vault mismatch',
+        detail: `This server operates vault ${serverVault}. Requested vault: ${vault_id}`,
+      });
+    }
   }
 
   const normalizedAddr = normalizeAddr(address);
@@ -399,9 +497,65 @@ router.post('/redeem', dualAuthMiddleware, async (req, res) => {
     return res.status(400).json({ error: 'No shares available to redeem' });
   }
 
+  // Inline agent policy check for shares='max' (middleware skipped because amount was unknown).
+  // Uses checkAndReserve (not checkPolicy) to acquire the per-policy lock and atomically
+  // record the spend reservation — prevents bypassing budget accounting.
+  if (shares === 'max' && req.auth?.walletType === 'agent' && req.auth.agent_key_id) {
+    const policyService = require('../../services/spendingPolicyService');
+    const reserveResult = await policyService.checkAndReserve({
+      key_id: req.auth.agent_key_id,
+      wallet_id: req.auth.pubkey,
+      operation: 'redeem',
+      amount: String(numShares),
+      destination: normalizedAddr,
+    });
+    if (!reserveResult.allowed) {
+      return res.status(403).json({
+        error: 'Policy violation',
+        detail: reserveResult.error,
+        policy_detail: reserveResult.detail || null,
+      });
+    }
+    // Stash reservation entry_id so rollback works if the operation fails
+    req._agentPolicy = {
+      key_id: req.auth.agent_key_id,
+      wallet_id: req.auth.pubkey,
+      operation: 'redeem',
+      amount: String(numShares),
+      destination: normalizedAddr,
+      reservation_entry_id: reserveResult.reservation?.entry_id || null,
+    };
+  }
+
   if (hasVaultContract()) {
+    // Agent operator execution: server signs and sends tx on behalf of user
+    if (req.auth?.walletType === 'agent') {
+      try {
+        const result = await operatorExecutor.executeRedeem(normalizedAddr, String(numShares));
+        await recordAgentSpend(req).catch(() => {});
+        return res.json({
+          status: 'executed',
+          address: normalizedAddr,
+          shares_redeemed: numShares.toFixed(4),
+          tx_hash: result.txHash,
+          block_number: result.blockNumber,
+          assets_received: result.assetsReceived,
+          message: 'Redeem executed by operator on behalf of agent.',
+        });
+      } catch (err) {
+        console.error('[vault/redeem] Operator execution failed:', err.message);
+        // Rollback the pre-reserved spend since the operation failed
+        await rollbackAgentSpend(req).catch(() => {});
+        return res.status(502).json({
+          error: 'Operator execution failed',
+          detail: err.message,
+        });
+      }
+    }
+
     const tx = await vaultContract.buildRedeemTx(config, String(numShares), normalizedAddr, normalizedAddr);
     if (tx) {
+      // Note: no recordAgentSpend here — non-agent path only (agents handled above)
       return res.json({
         status: 'pending_signature',
         address: normalizedAddr,
@@ -438,6 +592,7 @@ router.post('/redeem', dualAuthMiddleware, async (req, res) => {
     });
   } catch { /* non-fatal */ }
 
+  await recordAgentSpend(req).catch(() => {});
   res.json({
     status: 'redeemed',
     address: normalizedAddr,
@@ -494,7 +649,11 @@ router.post('/harvest', dualAuthMiddleware, async (req, res) => {
 
 // ─── POST /transfer (internal vault share transfer for allowances) ───
 
-router.post('/transfer', dualAuthMiddleware, async (req, res) => {
+router.post('/transfer', dualAuthMiddleware, enforceAgentPolicy({
+  operation: 'transfer',
+  getAmount: (req) => req.body?.amount,
+  getDestination: (req) => req.body?.to_address,
+}), async (req, res) => {
   const { from_address, to_address, amount, currency } = req.body || {};
   if (!from_address || !to_address || !amount) {
     return res.status(400).json({ error: 'from_address, to_address, and amount are required' });
@@ -566,16 +725,34 @@ router.post('/transfer', dualAuthMiddleware, async (req, res) => {
   toPos.updated_at = Date.now();
   await db.vaultPositions.create(normalizedTo, toPos);
 
+  // Record the transfer in allowances so withdrawal limits count it.
+  // Without this, repeated transfers bypass getPeriodUsage() because
+  // it queries db.allowances — unrecorded transfers are invisible.
+  const transferAllowanceId = require('crypto').randomBytes(16).toString('hex');
+  await db.allowances.create(transferAllowanceId, {
+    allowance_id: transferAllowanceId,
+    from_wallet_id: normalizedFrom,
+    to_wallet_id: normalizedTo,
+    amount: String(numAmount),
+    currency: currency || 'USDC',
+    type: 'vault_transfer',
+    status: 'completed',
+    created_at: Date.now(),
+  }).catch((err) => {
+    console.error('[vault/transfer] Failed to record transfer allowance:', err.message);
+  });
+
   const transferMessage = hasVaultContract()
     ? 'Recorded in platform DB. YaultVault disables on-chain share transfer; internal allocation only.'
     : 'Recorded in platform DB (no VAULT_ADDRESS).';
 
+  await recordAgentSpend(req).catch(() => {});
   res.json({
     status: 'transferred',
     from: normalizedFrom,
     to: normalizedTo,
     amount: numAmount.toFixed(4),
-    currency: currency || 'ETH',
+    currency: currency || 'USDC',
     shares_moved: sharesToMove.toFixed(4),
     from_remaining: fromPos.deposited.toFixed(4),
     message: transferMessage,

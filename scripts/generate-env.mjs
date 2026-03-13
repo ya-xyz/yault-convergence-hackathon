@@ -24,7 +24,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 
 const profile = process.argv[2] || 'development';
-const validProfiles = ['development', 'test', 'production'];
+const validProfiles = ['development', 'test', 'production', 'local'];
 if (!validProfiles.includes(profile)) {
   console.error(`[env] Invalid profile: "${profile}". Must be one of: ${validProfiles.join(', ')}`);
   process.exit(1);

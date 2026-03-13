@@ -10,7 +10,7 @@
 
 const { Router } = require('express');
 const crypto = require('crypto');
-const { authMiddleware } = require('../../middleware/auth');
+const { dualAuthMiddleware } = require('../../middleware/auth');
 const { Allowance } = require('../../models/schemas');
 const db = require('../../db');
 const { checkLimit } = require('../../services/withdrawalLimits');
@@ -22,7 +22,7 @@ const router = Router();
  * @description Create an allowance / fund transfer to a sub-account.
  *              Only the parent wallet can send allowances to its members.
  */
-router.post('/', authMiddleware, async (req, res) => {
+router.post('/', dualAuthMiddleware, async (req, res) => {
   try {
     const callerAddress = req.auth.pubkey;
 
@@ -134,7 +134,7 @@ router.post('/', authMiddleware, async (req, res) => {
  * @route PUT /:id/cancel
  * @description Cancel a recurring allowance. Only the sender (parent) can cancel.
  */
-router.put('/:id/cancel', authMiddleware, async (req, res) => {
+router.put('/:id/cancel', dualAuthMiddleware, async (req, res) => {
   try {
     const callerAddress = req.auth.pubkey;
     const { id } = req.params;
@@ -179,7 +179,7 @@ router.put('/:id/cancel', authMiddleware, async (req, res) => {
  * @description List allowances for the authenticated wallet.
  *              Returns both sent (as parent) and received (as member) allowances.
  */
-router.get('/', authMiddleware, async (req, res) => {
+router.get('/', dualAuthMiddleware, async (req, res) => {
   try {
     const callerAddress = req.auth.pubkey;
 
