@@ -264,6 +264,7 @@ router.get('/balances/:address', dualAuthMiddleware, async (req, res) => {
         includeTokens: req.query.tokens !== 'false',
         chains: chains && chains.length > 0 ? chains : undefined,
         maxEvmChains: Number.isFinite(maxEvmChains) && maxEvmChains > 0 ? maxEvmChains : undefined,
+        useTestnet: config.useTestnet,
       }
     );
 
@@ -302,6 +303,25 @@ router.get('/agent-authorization', dualAuthMiddleware, async (req, res) => {
   }
   try {
     const auth = await operatorExecutor.getAgentAuthorization(userAddress);
+    // Include agent identity from the API key so the agent can use it for
+    // client-side policy matching. agent_id (pk-yault-xxx) is the public
+    // identifier, analogous to Stripe's pk_live / OAuth client_id.
+    if (req.auth.walletType === 'agent' && req.auth.agent_key_id) {
+      auth.agent_id = req.auth.agent_id || req.auth.agent_key_id;
+      auth.wallet_id = req.auth.pubkey;
+      // Also include bound spending policy so agent can sync server-side limits
+      const keyRecord = await db.agentApiKeys.findById(req.auth.agent_key_id);
+      if (keyRecord?.policy_id) {
+        const policyRecord = await db.spendingPolicies.findById(keyRecord.policy_id);
+        if (policyRecord) {
+          auth.spending_policy = {
+            policy_id: policyRecord.policy_id,
+            label: policyRecord.label,
+            conditions: policyRecord.conditions,
+          };
+        }
+      }
+    }
     res.json(auth);
   } catch (err) {
     console.error('[vault/agent-authorization] Error:', err.message);
@@ -757,6 +777,81 @@ router.post('/transfer', dualAuthMiddleware, enforceAgentPolicy({
     from_remaining: fromPos.deposited.toFixed(4),
     message: transferMessage,
   });
+});
+
+// ─── POST /send (direct ERC-20 transfer to arbitrary recipient — agent only) ───
+
+router.post('/send', dualAuthMiddleware, enforceAgentPolicy({
+  operation: 'send',
+  getAmount: (req) => req.body?.amount,
+  getDestination: (req) => req.body?.to_address,
+}), async (req, res) => {
+  const { from_address, to_address, amount, memo } = req.body || {};
+
+  if (!from_address || !isValidAddress(from_address)) {
+    return res.status(400).json({ error: 'Valid from_address is required' });
+  }
+  if (!to_address || !isValidAddress(to_address)) {
+    return res.status(400).json({ error: 'Valid to_address is required' });
+  }
+  if (!amount) {
+    return res.status(400).json({ error: 'amount is required' });
+  }
+
+  const normalizedFrom = normalizeAddr(from_address);
+  const normalizedTo = normalizeAddr(to_address);
+
+  // C-01: Verify caller owns the sender address
+  if (normalizeAddr(req.auth.pubkey) !== normalizedFrom) {
+    return res.status(403).json({
+      error: 'Forbidden',
+      detail: 'You can only send from your own address',
+    });
+  }
+
+  const numAmount = parseFloat(amount);
+  if (isNaN(numAmount) || numAmount <= 0) {
+    return res.status(400).json({ error: 'amount must be a positive number' });
+  }
+
+  if (!hasVaultContract()) {
+    return res.status(400).json({
+      error: 'Vault contract not configured',
+      detail: 'VAULT_ADDRESS must be set for send operations',
+    });
+  }
+
+  // Send is agent-only — wallet users sign their own transfers
+  if (req.auth?.walletType !== 'agent') {
+    return res.status(400).json({
+      error: 'Send endpoint is agent-only',
+      detail: 'Direct wallet sends should use your own wallet signing',
+    });
+  }
+
+  try {
+    const result = await operatorExecutor.executeSend(
+      normalizedFrom, normalizedTo, String(numAmount)
+    );
+    await recordAgentSpend(req).catch(() => {});
+    return res.json({
+      status: 'executed',
+      from: normalizedFrom,
+      to: normalizedTo,
+      amount: numAmount.toFixed(4),
+      memo: memo || null,
+      tx_hash: result.txHash,
+      block_number: result.blockNumber,
+      message: 'Send executed by operator on behalf of agent.',
+    });
+  } catch (err) {
+    console.error('[vault/send] Operator execution failed:', err.message);
+    await rollbackAgentSpend(req).catch(() => {});
+    return res.status(502).json({
+      error: 'Operator execution failed',
+      detail: err.message,
+    });
+  }
 });
 
 // ─── POST /simulate-yield (dev/demo: inject WETH into vault to simulate yield) ───

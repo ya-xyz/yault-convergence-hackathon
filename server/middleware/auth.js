@@ -537,25 +537,76 @@ function dualAuthMiddleware(req, res, next) {
   const authHeader = req.headers['authorization'] || '';
 
   // Agent API Key: Bearer sk-yault-*
+  // ── Agent key authentication (pk-yault-* = read-only, sk-yault-* = full access) ──
+  //
+  // Follows the Stripe pk/sk pattern:
+  //   pk-yault-xxx  →  public key (safe to embed in frontend), read-only access
+  //   sk-yault-xxx  →  secret key (server-side only), full read+write access
+  //
+  // Read-only routes: balance queries, authorization status
+  // Write routes: deposit, redeem, transfer, send (financial operations)
+
+  const AGENT_READ_ROUTES = [
+    '/api/vault/agent-authorization',  // read: check operator/allowance status + agent identity
+    '/api/vault/balance/',             // read: GET /balance/:address (prefix-matched)
+    '/api/vault/balances/',            // read: GET /balances/:address (prefix-matched)
+  ];
+
+  const AGENT_WRITE_ROUTES = [
+    '/api/vault/deposit',              // write: deposit into vault
+    '/api/vault/redeem',               // write: redeem from vault
+    '/api/vault/transfer',             // write: transfer between accounts
+    '/api/vault/send',                 // write: send tokens to arbitrary address
+  ];
+
+  const AGENT_ADMIN_ROUTES = [
+    '/api/me/developer-keys',          // blocked downstream by requireWalletAuth, but auth is ok
+    '/api/me/spending-policies',       // blocked downstream by requireWalletAuth, but auth is ok
+  ];
+
+  if (authHeader.startsWith('Bearer pk-yault-')) {
+    // Public key: read-only access (balance queries, authorization checks)
+    const urlPath = req.originalUrl.split('?')[0];
+    const readAllowed = AGENT_READ_ROUTES.some((route) =>
+      urlPath === route || urlPath.startsWith(route + '/') || urlPath.startsWith(route)
+    );
+    if (!readAllowed) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        detail: 'Public keys (pk-yault-*) can only access read-only endpoints. Use a secret key (sk-yault-*) for write operations.',
+      });
+    }
+
+    const agentId = authHeader.slice(7); // "pk-yault-xxx"
+    const _db = require('../db');
+    return _db.agentApiKeys.findByAgentId(agentId).then((record) => {
+      if (!record) {
+        return res.status(401).json({ error: 'Invalid public key' });
+      }
+      _db.agentApiKeys.findById(record.key_id).then((fresh) => {
+        if (fresh) _db.agentApiKeys.update(record.key_id, { ...fresh, last_used_at: Date.now() });
+      }).catch(() => {});
+      const _authorityId = crypto.createHash('sha256').update(record.wallet_id, 'hex').digest('hex');
+      req.auth = {
+        pubkey: record.wallet_id,
+        authority_id: _authorityId,
+        walletType: 'agent',
+        keyType: 'public',
+        agent_key_id: record.key_id,
+        agent_id: record.agent_id || null,
+      };
+      return next();
+    }).catch((err) => {
+      console.error('[auth] Agent public key lookup error:', err.message);
+      return res.status(500).json({ error: 'Internal server error' });
+    });
+  }
+
   if (authHeader.startsWith('Bearer sk-yault-')) {
-    // Least-privilege: agent keys can ONLY access specific vault-spend routes.
-    // All other endpoints (release, trigger, wallet-plan, invites, admin, simulate, etc.)
-    // require a real wallet signature or session token.
-    //
-    // NOTE: Uses exact route matching where possible to prevent overly-broad access
-    // (e.g. /api/vault/simulate-yield, /api/vault/harvest are NOT agent-accessible).
-    const AGENT_ALLOWED_ROUTES = [
-      '/api/vault/deposit',              // core: deposit into vault
-      '/api/vault/redeem',               // core: redeem from vault
-      '/api/vault/transfer',             // core: transfer between accounts
-      '/api/vault/agent-authorization',  // read: check operator/allowance status
-      '/api/vault/balance/',             // read: GET /balance/:address (prefix-matched)
-      '/api/vault/balances/',            // read: GET /balances/:address (prefix-matched)
-      '/api/me/developer-keys',          // blocked downstream by requireWalletAuth, but auth is ok
-      '/api/me/spending-policies',       // blocked downstream by requireWalletAuth, but auth is ok
-    ];
-    const urlPath = req.originalUrl.split('?')[0]; // strip query string
-    const agentRouteAllowed = AGENT_ALLOWED_ROUTES.some((route) =>
+    // Secret key: full read+write access
+    const ALL_AGENT_ROUTES = [...AGENT_READ_ROUTES, ...AGENT_WRITE_ROUTES, ...AGENT_ADMIN_ROUTES];
+    const urlPath = req.originalUrl.split('?')[0];
+    const agentRouteAllowed = ALL_AGENT_ROUTES.some((route) =>
       urlPath === route || urlPath.startsWith(route + '/') || urlPath.startsWith(route)
     );
     if (!agentRouteAllowed) {
@@ -582,7 +633,9 @@ function dualAuthMiddleware(req, res, next) {
         pubkey: record.wallet_id,
         authority_id: _authorityId,
         walletType: 'agent',
+        keyType: 'secret',
         agent_key_id: record.key_id,
+        agent_id: record.agent_id || null,
       };
       return next();
     }).catch((err) => {

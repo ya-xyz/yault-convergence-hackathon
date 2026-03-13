@@ -644,12 +644,16 @@ mnemonicHashIndex.deleteByWalletPlan = async function (walletId, planId) {
 };
 
 // Agent API Keys (for MCP / external agent integration)
-const agentApiKeys = createCollection('agentApiKeys', { allowedJsonFields: ['wallet_id', 'key_hash'] });
+const agentApiKeys = createCollection('agentApiKeys', { allowedJsonFields: ['wallet_id', 'key_hash', 'agent_id'] });
 agentApiKeys.findByWallet = async function (walletId) {
   return this.findByField('wallet_id', walletId);
 };
 agentApiKeys.findByHash = async function (hash) {
   const results = await this.findByField('key_hash', hash);
+  return results.length > 0 ? results[0] : null;
+};
+agentApiKeys.findByAgentId = async function (agentId) {
+  const results = await this.findByField('agent_id', agentId);
   return results.length > 0 ? results[0] : null;
 };
 

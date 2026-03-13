@@ -236,7 +236,7 @@ const state = {
   spendingPoliciesLoading: false,
   policyFormVisible: false,
   policyFormEdit: null,         // null = create, policy_id = edit
-  policyForm: { label: '', max_per_transaction: '', daily_limit: '', weekly_limit: '', monthly_limit: '', allowed_addresses: '', allowed_operations: ['deposit', 'redeem', 'transfer', 'create_allowance'] },
+  policyForm: { label: '', max_per_transaction: '', daily_limit: '', weekly_limit: '', monthly_limit: '', allowed_addresses: '', allowed_operations: ['deposit', 'redeem', 'transfer', 'send', 'create_allowance'] },
   policyBindModalKeyId: null,   // key_id for the bind-policy modal
   // Agent Authorization (operator approve)
   agentAuth: null,              // { configured, operator_address, usdc_allowance, shares_allowance, ... }
@@ -4289,9 +4289,16 @@ function renderDeveloperApiKeys() {
   const newKeyHtml = state.developerNewKeyResult ? `
     <div class="alert alert-success" style="word-break:break-all;margin-bottom:16px;">
       <strong>New API Key Created</strong><br>
-      <code style="font-size:13px;user-select:all;">${esc(state.developerNewKeyResult.key)}</code>
+      <div style="margin:8px 0;">
+        <span style="color:var(--text-muted);font-size:12px;">Secret Key:</span><br>
+        <code style="font-size:13px;user-select:all;">${esc(state.developerNewKeyResult.key)}</code>
+      </div>
+      ${state.developerNewKeyResult.agent_id ? `<div style="margin:8px 0;">
+        <span style="color:var(--text-muted);font-size:12px;">Agent ID (public, safe to share):</span><br>
+        <code style="font-size:13px;user-select:all;">${esc(state.developerNewKeyResult.agent_id)}</code>
+      </div>` : ''}
       <p style="margin:8px 0 0;color:var(--text-muted);font-size:12px;">
-        Copy this key now — it will not be shown again.
+        Copy the secret key now — it will not be shown again. The Agent ID can be viewed anytime.
       </p>
       <button class="btn btn-secondary" data-dev-dismiss-key style="margin-top:8px;">Dismiss</button>
     </div>
@@ -4302,11 +4309,13 @@ function renderDeveloperApiKeys() {
     : state.developerKeys.length === 0
       ? '<p style="color:var(--text-muted);">No API keys yet. Create one to integrate with MCP or external agents.</p>'
       : `<table class="table" style="width:100%;"><thead><tr>
-          <th>Key</th><th>Label</th><th>Policy</th><th>Created</th><th>Last Used</th><th></th>
+          <th>Key</th><th>Agent ID</th><th>Label</th><th>Policy</th><th>Created</th><th>Last Used</th><th></th>
         </tr></thead><tbody>${state.developerKeys.map((k) => {
           const pol = k.policy_id ? state.spendingPolicies.find((p) => p.policy_id === k.policy_id) : null;
+          const agentIdDisplay = k.agent_id ? esc(k.agent_id) : '<span style="color:var(--text-muted);">—</span>';
           return `<tr>
           <td><code>${esc(k.prefix)}...</code></td>
+          <td style="font-size:12px;">${k.agent_id ? `<code style="user-select:all;cursor:pointer;" title="Click to copy" data-copy-text="${esc(k.agent_id)}">${agentIdDisplay}</code>` : '—'}</td>
           <td>${esc(k.label)}</td>
           <td>
             ${pol ? '<span style="color:var(--success);">' + esc(pol.label) + '</span>' : '<span style="color:var(--warning);">None</span>'}
@@ -4335,19 +4344,23 @@ function renderDeveloperApiKeys() {
   "mcpServers": {
     "yault": {
       "command": "npx",
-      "args": ["@yallet/aesp-mcp"],
+      "args": ["@yault/aesp-mcp"],
       "env": {
-        "YAULT_API_KEY": "your-key-here"
+        "YAULT_API_KEY": "sk-yault-..."
       }
     }
   }
 }</pre>
+      <p style="color:var(--text-muted);font-size:12px;margin-top:8px;">
+        <strong>Agent ID</strong> (<code>pk-yault-...</code>) is your public identifier — safe to share and embed in agent configs.<br>
+        <strong>Secret Key</strong> (<code>sk-yault-...</code>) is private — treat it like a password. Multiple agents can share one key to share a budget.
+      </p>
     </div>
   `;
 }
 
 function renderSpendingPolicies() {
-  const allOps = ['deposit', 'redeem', 'transfer', 'create_allowance'];
+  const allOps = ['deposit', 'redeem', 'transfer', 'send', 'create_allowance'];
 
   const formHtml = state.policyFormVisible ? (() => {
     const f = state.policyForm;
@@ -6782,7 +6795,7 @@ function attachAppEvents() {
         });
         const data = await resp.json();
         if (resp.ok) {
-          state.developerNewKeyResult = { key: data.key, key_id: data.key_id, prefix: data.prefix };
+          state.developerNewKeyResult = { key: data.key, key_id: data.key_id, prefix: data.prefix, agent_id: data.agent_id };
           state.developerNewKeyLabel = '';
           await loadDeveloperKeys();
         } else {
@@ -6821,6 +6834,17 @@ function attachAppEvents() {
       render();
     });
   });
+  // Click-to-copy for Agent ID
+  app.querySelectorAll('[data-copy-text]').forEach((el) => {
+    el.addEventListener('click', () => {
+      const text = el.dataset.copyText;
+      navigator.clipboard.writeText(text).then(() => {
+        const orig = el.textContent;
+        el.textContent = 'Copied!';
+        setTimeout(() => { el.textContent = orig; }, 1200);
+      }).catch(() => {});
+    });
+  });
 
   // Developer tab: sidebar navigation
   app.querySelectorAll('[data-developer-section]').forEach((el) => {
@@ -6849,7 +6873,7 @@ function attachAppEvents() {
       state.policyForm = {
         label: '', max_per_transaction: '', daily_limit: '',
         weekly_limit: '', monthly_limit: '', allowed_addresses: '',
-        allowed_operations: ['deposit', 'redeem', 'transfer', 'create_allowance'],
+        allowed_operations: ['deposit', 'redeem', 'transfer', 'send', 'create_allowance'],
       };
       render();
     });

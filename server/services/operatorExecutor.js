@@ -200,6 +200,40 @@ async function executeRedeem(userAddress, sharesHuman) {
 }
 
 /**
+ * Execute a send (direct ERC-20 transfer) on behalf of a user.
+ *
+ * asset.transferFrom(user, recipient, amount) — pull from user, send to recipient.
+ * Requires: user has approved operator for the underlying asset (WETH).
+ *
+ * @param {string} userAddress - sender's EVM address
+ * @param {string} recipientAddress - recipient's EVM address
+ * @param {string} amountHuman - amount in human units (e.g. "0.1")
+ * @returns {{ txHash: string, blockNumber: number }}
+ */
+async function executeSend(userAddress, recipientAddress, amountHuman) {
+  const { wallet } = _ensureOperator();
+  const vaultAddress = _getVaultAddress();
+  const decimals = _getDecimals();
+  const user = _normalize(userAddress);
+  const recipient = _normalize(recipientAddress);
+  const amountWei = ethers.parseUnits(String(amountHuman), decimals);
+
+  // Get underlying asset address from vault
+  const vault = new ethers.Contract(vaultAddress, VAULT_ABI, wallet);
+  const assetAddress = await vault.asset();
+  const asset = new ethers.Contract(assetAddress, ERC20_ABI, wallet);
+
+  // transferFrom(user, recipient, amount) — operator must be approved by user
+  const tx = await asset.transferFrom(user, recipient, amountWei);
+  const receipt = await tx.wait();
+
+  return {
+    txHash: receipt.hash,
+    blockNumber: receipt.blockNumber,
+  };
+}
+
+/**
  * Get current agent authorization status for a user address.
  * Returns operator address and current on-chain allowances.
  */
@@ -266,5 +300,6 @@ module.exports = {
   getOperatorAddress,
   executeDeposit,
   executeRedeem,
+  executeSend,
   getAgentAuthorization,
 };

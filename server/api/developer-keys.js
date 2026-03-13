@@ -47,18 +47,23 @@ router.post('/', dualAuthMiddleware, requireWalletAuth, async (req, res) => {
       });
     }
 
-    // Generate key: sk-yault-<32 random bytes base64url>
+    // Generate secret key: sk-yault-<32 random bytes base64url>
     const secret = crypto.randomBytes(32).toString('base64url');
     const plainKey = `sk-yault-${secret}`;
     const keyHash = crypto.createHash('sha256').update(plainKey, 'utf8').digest('hex');
     const keyId = crypto.randomBytes(16).toString('hex');
     const prefix = plainKey.slice(0, 14); // "sk-yault-XXXXX" for display
 
+    // Generate public agent ID: pk-yault-<16 random bytes base64url>
+    // This is the OAuth "client_id" equivalent — safe to share, shown in UI.
+    const agentId = `pk-yault-${crypto.randomBytes(16).toString('base64url')}`;
+
     const record = {
       key_id: keyId,
       wallet_id: walletId,
       key_hash: keyHash,
       prefix,
+      agent_id: agentId,
       label,
       created_at: Date.now(),
       last_used_at: null,
@@ -78,6 +83,7 @@ router.post('/', dualAuthMiddleware, requireWalletAuth, async (req, res) => {
     // Return plaintext key ONLY on creation — never stored or shown again
     return res.status(201).json({
       key_id: keyId,
+      agent_id: agentId,
       key: plainKey,
       prefix,
       label,
@@ -104,6 +110,7 @@ router.get('/', dualAuthMiddleware, requireWalletAuth, async (req, res) => {
         .sort((a, b) => b.created_at - a.created_at)
         .map((k) => ({
           key_id: k.key_id,
+          agent_id: k.agent_id || null,
           prefix: k.prefix,
           label: k.label,
           policy_id: k.policy_id || null,

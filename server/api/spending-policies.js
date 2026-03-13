@@ -20,7 +20,7 @@ const router = Router();
 
 // Note: create_allowance is not currently enforced (allowances route uses authMiddleware,
 // which does not accept agent API keys). Kept for forward-compatibility.
-const VALID_OPERATIONS = ['deposit', 'redeem', 'transfer', 'create_allowance'];
+const VALID_OPERATIONS = ['deposit', 'redeem', 'transfer', 'send', 'create_allowance'];
 const MAX_POLICIES_PER_WALLET = 20;
 
 /** Validate an amount string: must be a positive number or null. */
